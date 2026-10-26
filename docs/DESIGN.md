@@ -8,6 +8,10 @@ Implementation reconciliation, 2026-10-26: the verifier bot on
 application or grants or revokes a Discord role. Draft PR #16 adds
 a limited wallet-signature and bot-response witness; it does not
 prove application-operator authority or change that role gate.
+Nova's founding attestation is signed and published, and
+`fiador.org` serves the site, registry, and attestation. The
+production `/verify/` and `/v/` routes remain unshipped; see
+`docs/verification.md` for the dated publication evidence.
 Sections 3.5, 4.6, 5, and 9 below distinguish the current behavior
 from a future, separately reviewed application-control protocol.
 Workstream W1 of the World Program.
@@ -716,8 +720,12 @@ established from the payload alone:
    and a successful verification records the nonce until expiry.
    Without a store, verification is stateless and replay inside
    the window is bounded by step 2's subject binding and step
-   4's expiry; the surfaces that need stronger (§5's bot, which
-   does supply a store backed by its `binding` table) get it.
+   4's expiry. The current §5 bot passes no `nonceStore`; its
+   `binding` table is not one. A published attestation is meant to
+   be checked repeatedly during its validity window, including
+   the bot's periodic legacy-binding rechecks. Applying the
+   core's one-use nonce option to that flow would reject those
+   later checks as replay.
 6. Registration (unless `checkRegistration: false`): the
    `verifyAddress` logic on `agentWalletAddress`. A resolved
    null humanId → `unregistered` + `not_registered`, even with a
@@ -1044,9 +1052,12 @@ summaries an admin explicitly asks to post.
   even when the claim verifies. Anyone may run it; it is rate
   limited per user (§5.4).
 - Existing guild-local bindings are rechecked at startup and
-  on the periodic loop (§5.5). A bot join or registry discovery
-  cannot create a trusted binding or grant a role. No unsolicited
-  DM goes to a bot owner.
+  on the periodic loop (§5.5). The current bot has no bot-join
+  event handler: a join alone triggers no claim check or log.
+  Registry discovery happens during an explicit `/verify-agent`
+  check when no guild binding exists; stored legacy bindings are
+  rechecked separately. None of these paths creates a trusted
+  binding or grants a role. No unsolicited DM goes to a bot owner.
 
 Draft PR #16 adds `/fiador control-start` and
 `/fiador control-complete` for admins with Manage Guild. It records
@@ -1325,15 +1336,14 @@ one short link in a channel; this surface is what makes that
 link speak for itself.
 
 - Canonical URL: `https://fiador.org/v/<short-id>`. (Domain
-  state, updated Oct 26, 2026: `fiador.org` is REGISTERED via
-  Cloudflare Registrar (active, auto-renew on), so the
-  canonical-domain blocker for this surface is cleared on the
-  registration side. DNS and hosting for it still await the
-  deploy decision through the coordinator (§6.4 hosting
-  posture); until then the endpoint is built and tested on a
-  staging host and no `/v/` link is published. The rule itself
-  stands: the surface ships only on the canonical domain — a
-  preview card served from anywhere else is not this surface.)
+  state, checked Oct 26, 2026: `fiador.org` is registered and
+  its DNS and Vercel production hosting are live for the site,
+  registry, and founding attestation (`docs/verification.md`).
+  The production `/v/` route still returns 404; its handler has
+  only protected-preview evidence, and no canonical `/v/` link
+  has been published. The surface ships only when that route is
+  deployed and verified on the canonical domain — a preview card
+  served from elsewhere is not this surface.)
 - Short-id: content-derived and tamper-evident. The id is the
   first 10 characters of the base32 encoding of
   SHA-256 over the attestation's canonical signing bytes
@@ -1607,15 +1617,13 @@ Preconditions (state at design time, re-check at test time):
 
 Steps:
 
-1. Publish Nova's attestation.
-   - Draft payload for the Nova Discord application (application
-     ID + bot user ID from the live bot, not from memory), sign
-     with the demo wallet, host at a public HTTPS URL with CORS
-     open, add the registry entry by PR in the (then-created)
-     repo. Record: payload hash, URL, signing date. The payload
-     carries `operator_display_name: "Nic Lydon"` — Nic's fleet
-     opt-in under §3.1.1, since his bots already operate
-     publicly as his.
+1. Publish Nova's attestation — COMPLETE, Oct 26, 2026.
+   - The founding payload was signed with the dedicated program
+     wallet, published at a public HTTPS URL, and indexed in the
+     registry. It carries `operator_display_name: "Nic Lydon"`
+     under Nic's opt-in in §3.1.1. The signing, publication, and
+     live fetch-back are recorded in `docs/verification.md`;
+     this completion does not close the remaining steps below.
 2. Package and page verification, happy path.
    - Verify package via its Discord layer: by application ID
      (registry), by URL, by pasted payload — three results with
@@ -1777,8 +1785,11 @@ checked, and re-apply to any future repo in the program:
       possible v2 addition in §5 only. (The public/private gates
       in this checklist stand unchanged by this decision.)
 
-Before the first public push (all must pass, results recorded in
-the repo's `docs/narrative/` launch entry):
+For the remaining public demo launch and future release commits
+(the repo and founding attestation are already public; unchecked
+items below are open gates, not evidence that the first push is
+still pending). Record results in `docs/verification.md` and the
+repo's `docs/narrative/` launch entry:
 
 - [ ] Secret scan over the full tree AND full git history:
       `gitleaks` (or `trufflehog`) run by CI and once manually
@@ -1902,8 +1913,8 @@ spec's recommendation is used as a placeholder and flagged.
 
 Decision 1 is the spec's one remaining open item. Decisions
 2–3 surfaced during this design and are recorded here rather
-than settled. Repo creation itself is not a table row: it is a
-go, not a preference, and it has not been given (§10).
+than settled. Repo creation was an execution go, not a table
+preference; it was given and used on Oct 25, 2026 (§10).
 
 Resolved, recorded so nobody re-opens them, and deliberately
 not rows above because the table is only for what is still open:
@@ -1935,11 +1946,11 @@ not rows above because the table is only for what is still open:
   serialisation alone, with NO prefix line (§3.2; §13 D2
   adopts the W0 form). A `fiador-discord-attestation:v1`
   prefix existed only in this design's first revision and was
-  dropped with D2, before any attestation was signed (§9 has
-  not run); domain separation is carried by the subject type
-  inside the signed payload. After the first signed
-  attestation exists, the canonical form is frozen like any
-  other format constant.
+  dropped with D2 before the founding attestation was signed
+  (§9 step 1; `docs/verification.md`); domain separation is
+  carried by the subject type inside the signed payload. The
+  signed founding attestation freezes the canonical form like
+  any other format constant.
 - Licence. Apache-2.0 is the program default for the whole
   World Program, including this repo (Nic, Oct 25, 2026, via
   the coordinator, and recorded in the portfolio). Applied in
@@ -2076,20 +2087,21 @@ dispute.
    card rendering from the §6.2 assets, and the two failure
    cards (not found / could not check). Demo-milestone work:
    it is the surface the guild demonstration is performed
-   through (posting the link IS the demo), so it lands before
-   step 7's test, on a staging host until the canonical
-   domain is live.
+   through (posting the link IS the demo), so it must reach the
+   canonical domain before step 7's live test. Protected-preview
+   tests exist; the production `/v/` route remains unshipped.
 6. Registry, README, examples, threat model, CI incl. secret
    scan (§§3.4, 7, 8, 10).
 7. Nic's-guild end-to-end test (§9), adversarial review (§10),
-   launch checklist (§10), then — and only on Nic's go — repo
-   creation and first public push, in that order.
+   and the remaining public demo launch checks (§10). Repo
+   creation and the founding public push already occurred;
+   completing this step is a separate release decision.
 8. Community guild pitch (§9 step 6), on Nic's go, with the
    working demo as evidence.
 
-No step before 7 creates a repo, pushes publicly, changes a
-Discord server outside Nic's guild test in step 7's test phase,
-or sends anything outward.
+The repo and founding attestation are already public. Remaining
+steps do not authorize changes to a Discord server outside Nic's
+guild test or outward posts; those retain their §10 gates.
 
 ## 13. Coordination with W0 — divergence log
 
@@ -2133,11 +2145,12 @@ in writing in both documents.
   all, W0 provisionally proposes status `unknown` plus a new
   failure code `attestation_not_found`, with the badge rendering
   it as unverified. W1's surfaces need the distinction either
-  way (§4.2 note): the bot logs "no attestation found" on join,
-  and the guild pitch must not describe an operator who never
-  attested as having failed a check. W1 position: adopt the
-  W0 provisional answer, and give it its own plain-language
-  sentence, distinct from every failure sentence.
+  way (§4.2 note): a requested bot check must distinguish "no
+  attestation found" from a failed attestation; current `main`
+  has no bot-join handler. The guild pitch must not describe an
+  operator who never attested as having failed a check. W1
+  position: adopt the W0 provisional answer and give it a
+  plain-language sentence distinct from every failure sentence.
 - D5, `verifySignedMessage` export. OPEN, W0 chat to agree.
   This revision proposes one export beyond the W0 spec's
   closed list, because W3's seal verification needs a
