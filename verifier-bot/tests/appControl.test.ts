@@ -16,6 +16,7 @@ const BOT = '444444444444444444';
 const VERIFIER = '555555555555555555';
 const MESSAGE = '666666666666666666';
 const URL = 'https://operator.example.com/attestation.json';
+const REGISTRY_URL = 'https://registry.example.com/registry.json';
 const account = privateKeyToAccount(generatePrivateKey());
 
 function fixture() {
@@ -26,6 +27,7 @@ function fixture() {
     attestationUrl: URL,
     extra: { discord_bot_user_id: BOT, human_id_hash: hashHumanId(SYNTHETIC_HUMAN_ID) },
   });
+  let registryDoc: unknown = { entries: [] };
   const store = new InMemoryStore();
   const adapter = new FakeDiscordAdapter();
   adapter.ownBotId = VERIFIER;
@@ -34,7 +36,11 @@ function fixture() {
   const verify = new VerifyService({
     verifier: createVerifier() as unknown as VerifierLike,
     store,
-    fetchJson: async () => attestation,
+    fetchJson: async (url) => {
+      if (url === URL) return attestation;
+      if (url === REGISTRY_URL) return registryDoc;
+      throw new Error('Unexpected test URL.');
+    },
   });
   const service = new AppControlService({
     service: verify, store, adapter,
@@ -46,7 +52,13 @@ function fixture() {
     store, adapter, verify, service,
     setNow(value: string) { now = new Date(value); },
     setAttestation(value: typeof attestation) { attestation = value; },
+    setRegistryDoc(value: unknown) { registryDoc = value; },
   };
+}
+
+function configureRegistry(store: InMemoryStore): void {
+  store.upsertGuildConfig({ guildId: GUILD, roleId: null,
+    registryUrl: REGISTRY_URL, syncIntervalMinutes: 360, logChannelId: null });
 }
 
 beforeEach(() => resetFakeVerifier('verified'));
@@ -224,6 +236,43 @@ describe('Discord app response witness', () => {
     expect(await current.isPublishedClaimCurrent(GUILD, APP, URL, 'bb'.repeat(32))).toBe(true);
     expect(await current.isPublishedClaimCurrent(GUILD, APP, URL, 'cc'.repeat(32))).toBe(false);
     expect(await current.isPublishedClaimCurrent(GUILD, APP, 'https://other.example.com/a.json', 'bb'.repeat(32))).toBe(false);
+  });
+
+  it.each([{}, { entries: null }])('refuses a start when a configured registry is malformed: %j', async (registryDoc) => {
+    const f = fixture();
+    configureRegistry(f.store);
+    f.store.upsertBinding({ guildId: GUILD, applicationId: APP, attestationUrl: URL,
+      payloadHash: null, boundVia: 'url', boundBy: 'legacy-user',
+      boundAt: '2026-10-25T00:00:00.000Z', botUserId: BOT });
+    f.setRegistryDoc(registryDoc);
+
+    await expect(f.service.start(GUILD, CHANNEL, URL)).rejects.toThrow('Malformed registry document.');
+    expect(f.store.getControlChallenge('aa'.repeat(32))).toBeNull();
+    await expect(f.verify.resolveAttestation(GUILD, APP)).rejects.toThrow('Malformed registry document.');
+
+    f.setRegistryDoc({ entries: [] });
+    await expect(f.verify.resolveAttestation(GUILD, APP)).resolves.toMatchObject({
+      payload: { subject: { id: APP } },
+    });
+    await expect(f.service.start(GUILD, CHANNEL, URL)).resolves.toMatchObject({ applicationId: APP });
+  });
+
+  it.each([{}, { entries: null }])('keeps a witness unconsumed when the registry becomes malformed: %j', async (registryDoc) => {
+    const f = fixture();
+    configureRegistry(f.store);
+    const challenge = await f.service.start(GUILD, CHANNEL, URL); // a valid empty registry permits an unlisted claim
+    f.adapter.message = { id: MESSAGE, channel_id: CHANNEL, author: { id: BOT, bot: true },
+      type: 0, content: canonicalBotResponseText(challenge), timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
+    const signature = await account.signMessage({ message: canonicalChallengeText(challenge) });
+    f.setNow('2026-10-26T20:02:00.000Z');
+    f.setRegistryDoc(registryDoc);
+
+    await expect(f.service.complete(GUILD, challenge.nonce, signature, MESSAGE))
+      .rejects.toThrow('Malformed registry document.');
+    expect(f.store.getControlChallenge(challenge.nonce)?.consumedAt).toBeNull();
+
+    f.setRegistryDoc({ entries: [] });
+    expect(await f.service.complete(GUILD, challenge.nonce, signature, MESSAGE)).toBe(true);
   });
 
   it('does not treat a legacy binding as app-control proof', async () => {

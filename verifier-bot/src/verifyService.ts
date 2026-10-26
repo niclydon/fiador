@@ -119,7 +119,10 @@ export class VerifyService {
     applicationId: string,
   ): Promise<RegistryEntry | null> {
     const doc = (await this.fetchJson(registryUrl)) as { entries?: RegistryEntry[] } | null;
-    if (!doc || !Array.isArray(doc.entries)) return null;
+    // Only an actual entries array can say an application is unlisted.
+    if (!doc || !Array.isArray(doc.entries)) {
+      throw new Error('Malformed registry document.');
+    }
     const matches = doc.entries.filter((e) => e?.discord_application_id === applicationId);
     if (matches.length > 1) throw new Error('Duplicate registry application entries.');
     const entry = matches[0] ?? null;
