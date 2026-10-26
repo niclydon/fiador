@@ -30,6 +30,9 @@ describe('buildResultEmbed — public shape only (DESIGN §5.3, §3.3)', () => {
     // Not even the full hash: the embed shows it truncated.
     expect(pub.humanHash).toMatch(/^[0-9a-f]{64}$/);
     expect(rendered).not.toContain(pub.humanHash as string);
+    expect(embed.title).toContain('Application control unproven');
+    expect(embed.color).toBe(0x6e6e73);
+    expect(embed.description).toContain('has not been linked to control');
     // What it does show: truncated wallet, status, descriptor footer.
     expect(rendered).toContain('0x1234…45678');
     expect(embed.footer.text).toBe(DESCRIPTOR_LINE);
@@ -50,7 +53,7 @@ describe('buildResultEmbed — public shape only (DESIGN §5.3, §3.3)', () => {
       result: pub,
       attestation: makeAttestation(),
     });
-    expect(withoutName.fields.some((f) => f.name.includes('Operator'))).toBe(false);
+    expect(withoutName.fields.some((f) => f.name === 'Operator (self-asserted)')).toBe(false);
   });
 
   it('a failed embed carries the failure sentence for its code', () => {

@@ -6,10 +6,10 @@
 // to this shape, which is what makes every flow testable without a token.
 //
 // Commands:
-//   /fiador           guild status: bindings, last checks, role members
+//   /fiador status    paged legacy claims, last checks, manual role audit
 //   /fiador setup     (Manage Guild) configure role / registry / interval / log channel
 //   /verify-agent     one-off check of one application, no state change
-//   /attest           operator claim flow: verify, then bind + role decision
+//   /attest           operator claim check; app control remains unproven
 
 import {
   SlashCommandBuilder,
@@ -22,11 +22,16 @@ import { RoleSyncEngine } from './roles.js';
 import type { Store } from './store.js';
 import {
   isSignedAttestation,
-  payloadHash,
   VerifyService,
 } from './verifyService.js';
 
 export const HUMAN_BACKED_ROLE_NAME = 'Human-backed';
+const STATUS_PAGE_SIZE = 6;
+
+function statusField(value: string, limit: number): string {
+  const oneLine = value.replace(/[\r\n\t]/g, ' ').replace(/@/g, '＠');
+  return oneLine.length > limit ? `${oneLine.slice(0, limit - 1)}…` : oneLine;
+}
 
 export interface CommandContext {
   guildId: string;
@@ -79,12 +84,17 @@ export function buildCommandDefinitions(): RESTPostAPIChatInputApplicationComman
     .setName('fiador')
     .setDescription('Fiador status and setup for this server')
     .addSubcommand((sub) =>
-      sub.setName('status').setDescription('Show bound bots and their last check results'),
+      sub
+        .setName('status')
+        .setDescription('Show legacy operator claims and manual role-audit warning')
+        .addIntegerOption((opt) =>
+          opt.setName('page').setDescription('Legacy claims page (six per page)').setMinValue(1),
+        ),
     )
     .addSubcommand((sub) =>
       sub
         .setName('setup')
-        .setDescription('Configure the Human-backed role, registry, and sync (Manage Guild)')
+        .setDescription('Configure role display, registry checks, and log channel (Manage Guild)')
         // Note: enforced at runtime in handleFiadorSetup via the
         // caller's Manage Guild permission — subcommand builders have
         // no default-permissions API in discord.js v14.
@@ -95,10 +105,10 @@ export function buildCommandDefinitions(): RESTPostAPIChatInputApplicationComman
           opt.setName('registry_url').setDescription('Attestation registry URL for discovery'),
         )
         .addIntegerOption((opt) =>
-          opt.setName('sync_interval_minutes').setDescription('Role sync interval in minutes'),
+          opt.setName('sync_interval_minutes').setDescription('Legacy claim check interval in minutes'),
         )
         .addStringOption((opt) =>
-          opt.setName('log_channel_id').setDescription('Channel ID for grant/revoke log lines'),
+          opt.setName('log_channel_id').setDescription('Channel ID for check warnings'),
         ),
     );
 
@@ -114,7 +124,7 @@ export function buildCommandDefinitions(): RESTPostAPIChatInputApplicationComman
 
   const attest = new SlashCommandBuilder()
     .setName('attest')
-    .setDescription('Bind a bot to this server by verifying its signed Fiador attestation')
+    .setDescription('Check a signed operator attestation; app control remains unproven')
     .addStringOption((opt) =>
       opt.setName('url').setDescription('URL where the signed attestation JSON is hosted'),
     )
@@ -133,6 +143,11 @@ export async function handleFiadorStatus(
   ctx: CommandContext,
   deps: CommandDeps,
 ): Promise<ReplyPayload> {
+  const pageRaw = ctx.getOption('page');
+  const page = pageRaw === null ? 1 : Number(pageRaw);
+  if (!Number.isSafeInteger(page) || page < 1) {
+    return ephemeral('`page` must be a positive whole number.');
+  }
   const config = deps.store.getGuildConfig(ctx.guildId);
   const bindings = deps.store.listBindings(ctx.guildId);
   const lines: string[] = [];
@@ -142,23 +157,32 @@ export async function handleFiadorStatus(
       `No Human-backed role is configured yet — an admin can run \`/fiador setup\`. (The role is named "${HUMAN_BACKED_ROLE_NAME}" by default and tracked by ID, so it can be renamed freely.)`,
     );
   } else {
-    const count = await deps.adapter.getRoleMemberCount(ctx.guildId, config.roleId);
-    lines.push(`Human-backed role: <@&${config.roleId}> — ${count} member(s).`);
+    lines.push(`Human-backed role: <@&${statusField(config.roleId, 64)}> — admin must inspect all role holders in Discord; this bot does not have a complete member count.`);
   }
   lines.push(
-    `Sync interval: ${config?.syncIntervalMinutes ?? deps.defaultSyncIntervalMinutes} minutes. Registry: ${config?.registryUrl ?? '(instance default)'}.`,
+    `Legacy claim check interval: ${config?.syncIntervalMinutes ?? deps.defaultSyncIntervalMinutes} minutes. Registry: ${statusField(config?.registryUrl ?? '(instance default)', 120)}.`,
+  );
+  lines.push(
+    'ADMIN AUDIT REQUIRED: Stored claims do not prove Discord application control. Review existing Human-backed role holders manually and remove unsupported roles. Fiador grants and revokes no roles.',
   );
 
   if (bindings.length === 0) {
-    lines.push('No bots are bound in this server yet. An operator can bind one with `/attest`.');
+    lines.push('No legacy bindings are stored. `/attest` checks operator claims but cannot bind applications until control is proven.');
   } else {
-    lines.push('Bound bots:');
-    for (const binding of bindings) {
+    const totalPages = Math.ceil(bindings.length / STATUS_PAGE_SIZE);
+    if (page > totalPages) {
+      lines.push(`No legacy claims on page ${page}. Available pages: 1–${totalPages}.`);
+      return ephemeral(lines.join('\n'));
+    }
+    lines.push(`Stored legacy operator claims: page ${page} of ${totalPages}. Use /fiador status page:<number> for another page.`);
+    const first = (page - 1) * STATUS_PAGE_SIZE;
+    for (const binding of bindings.slice(first, first + STATUS_PAGE_SIZE)) {
       const last = deps.store.getLatestCheck(ctx.guildId, binding.applicationId);
+      const applicationId = statusField(binding.applicationId, 32);
       lines.push(
         last
-          ? `• Application ${binding.applicationId} — last check: **${last.status}** at ${last.checkedAt}`
-          : `• Application ${binding.applicationId} — not checked yet`,
+          ? `• Application ${applicationId} — application control unproven; no role automation; last attestation check: **${statusField(last.status, 24)}** at ${statusField(last.checkedAt, 32)}`
+          : `• Application ${applicationId} — application control unproven; no role automation; not checked yet`,
       );
     }
   }
@@ -198,7 +222,7 @@ export async function handleFiadorSetup(
       `• Registry URL: ${config.registryUrl ?? '(instance default)'}`,
       `• Sync interval: ${config.syncIntervalMinutes} minutes`,
       `• Log channel ID: ${config.logChannelId ?? '(none)'}`,
-      'Note: the bot role must sit above the Human-backed role in the role hierarchy and hold Manage Roles, or grants will fail.',
+      'Application-control proof is not implemented. Role automation is disabled.',
     ].join('\n'),
   );
 }
@@ -239,11 +263,9 @@ export async function handleAttest(
   }
 
   let attestation: SignedAttestation;
-  let attestationUrl: string;
   try {
     if (url) {
       attestation = await deps.service.fetchAttestation(url);
-      attestationUrl = url;
     } else {
       let parsed: unknown;
       try {
@@ -255,7 +277,6 @@ export async function handleAttest(
         return ephemeral('The pasted document is not a signed Fiador attestation.');
       }
       attestation = parsed;
-      attestationUrl = parsed.payload.attestationUrl ?? 'paste';
     }
   } catch (err) {
     return ephemeral(
@@ -268,9 +289,10 @@ export async function handleAttest(
   }
   const applicationId = attestation.payload.subject.id;
 
-  // The cryptography, not the caller, is the gate (DESIGN §5.2): anyone
-  // may run /attest, but a binding — and any role change — only ever
-  // follows a passing verify. On failure: report, store nothing.
+  // A valid operator signature proves the wallet made a claim about an
+  // application. It does not prove the wallet controls that application.
+  // Until there is a separate Discord-authenticated control challenge,
+  // /attest must not bind the application or change its role.
   const outcome = await deps.service.checkAttestation(ctx.guildId, attestation);
   const embed = buildResultEmbed({
     applicationId,
@@ -286,30 +308,9 @@ export async function handleAttest(
     };
   }
 
-  const botUserId =
-    outcome.botUserId ??
-    (await deps.adapter.resolveBotUserId(ctx.guildId, applicationId));
-  const binding = {
-    guildId: ctx.guildId,
-    applicationId,
-    attestationUrl,
-    payloadHash: payloadHash(attestation),
-    boundVia: url ? 'url' : 'paste',
-    boundBy: ctx.userId,
-    boundAt: new Date().toISOString(),
-    botUserId,
-  };
-  deps.store.upsertBinding(binding);
-
-  const report = await deps.sync.applyOutcome(ctx.guildId, binding, outcome);
-  const roleNote = !report.note
-    ? report.changed
-      ? ' The Human-backed role was granted.'
-      : ' The Human-backed role is already in place.'
-    : ` Role: ${report.note}`;
   return {
     ephemeral: true,
-    content: `Bound application ${applicationId} to this server.${roleNote}`,
+    content: `The operator attestation for application ${applicationId} passed, but control of that Discord application is unproven. Nothing was bound and no Human-backed role was granted.`,
     embeds: [embed],
   };
 }
