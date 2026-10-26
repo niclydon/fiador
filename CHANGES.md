@@ -1,5 +1,37 @@
 # Changes
 
+## 2026-10-26: first build — verify core stub, verifier bot, link preview
+
+- packages/verify-ts: the verify core at the W0 spec's interface
+  (createVerifier; verifyAddress / verifyAttestation /
+  resolveStatus; internal/public result split with hash-only
+  public outputs). Signature verification and the AgentBook
+  reader are injected dependencies: the shipped defaults fail
+  closed (no attestation verifies, lookups report unknown)
+  until the real implementations land.
+- verifier-bot: the self-host reference bot scaffold —
+  /fiador, /verify-agent, /attest; SQLite guild config and
+  check log; Human-backed role sync (revoke on invalid,
+  expired, unregistered; never on unknown); SSRF-guarded
+  attestation fetching per DESIGN §5.4.
+- link-preview: the /v/<short-id> endpoint — content-derived
+  ids resolved against the registry, crawl-time verification,
+  dynamic OG cards in every state including the not-found and
+  could-not-check failure cards, browser click-through to the
+  verify page.
+- 66 tests across the three packages, all against fakes and
+  synthetic fixtures; no live Discord, chain, or DNS in tests.
+- Merged the same morning (Oct 26): the stub verify-ts above
+  was replaced by the W0 implementation in the entry below,
+  per the pre-agreed reconciliation; the verifier bot and
+  link preview stand as built, adapted to the core's export
+  names (canonicalAttestationMessage). Narrative:
+  docs/narrative/2026-10-26-first-build.md.
+- Doc correction: docs/DESIGN.md's decisions summary no longer
+  describes a canonical signing prefix (the D2 resolution
+  adopted the W0 canonical form — the serialised payload
+  alone is the message); the Oct 25 entry below carries the
+  matching correction note.
 ## 2026-10-26: verify core and verify MCP implemented (W0)
 
 - Decision (Oct 26, 2026): no project-run public HTTP instance
@@ -43,7 +75,11 @@
 - One format consequence of the rename: the attestation
   canonical signing prefix is fiador-discord-attestation:v1,
   fixed before any attestation has been signed under the old
-  prefix.
+  prefix. (Corrected Oct 26, 2026: the prefix belonged to the
+  design's first revision only. Under the D2 resolution the
+  canonical form is the W0 ordered-keys serialisation alone,
+  with no prefix; see docs/DESIGN.md §3.2 and §13 D2. No
+  attestation has been signed under either form.)
 
 ## 2026-10-25: founding
 

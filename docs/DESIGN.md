@@ -122,6 +122,21 @@ Threat model, short form (full version lands in the repo as
   plus a documented public default, and fail closed on RPC error
   (package result status `unknown`, failure `lookup_failed`,
   never a pass and never a false `unregistered`, §4.2).
+- Agent-spawned agents: an agent can prepare and register
+  further agent wallets under the same verified human, each
+  registration still gated by the human's fresh World App
+  approval (worked example, Oct 26, 2026: one agent registered
+  three fleet wallets in a single sitting). Fiador claims the
+  binding, not a headcount: every spawned wallet's attestation
+  resolves to the same human-hash, and per-human limits,
+  trials, and consequences aggregate across the whole wallet
+  tree, so a spawned fleet reads to a verifier as one
+  principal, not many, and spawning buys the operator nothing.
+  The residual risks are a human approving registrations
+  without reading them and a human renting out their
+  approvals; both are attributable to that human and
+  revocable, not preventable, and neither lets a spawned agent
+  claim backing by a different or additional human.
 
 ## 2. Architecture at a glance
 
@@ -1829,12 +1844,19 @@ not rows above because the table is only for what is still open:
   Fiador. Descriptor rule (Nic, Oct 25, 2026): Fiador never
   appears naked in public copy; on first use in every surface
   it travels with "human-backed attestation for Discord bots"
-  (§7). One cryptographic consequence, recorded here because
-  it must not drift: the Discord profile's canonical signing
-  prefix is `fiador-discord-attestation:v1` (§3.2) — safe to
-  fix now because no attestation has been signed under the old
-  prefix (§9 has not run); after the first signed attestation
-  exists, the prefix is frozen like any other format constant.
+  (§7). One cryptographic point, recorded here because it
+  must not drift (corrected Oct 26, 2026 — an earlier wording
+  of this summary still described a signing prefix; the
+  normative text never carried one after the D2 resolution):
+  the Discord profile's canonical form is the W0 ordered-keys
+  serialisation alone, with NO prefix line (§3.2; §13 D2
+  adopts the W0 form). A `fiador-discord-attestation:v1`
+  prefix existed only in this design's first revision and was
+  dropped with D2, before any attestation was signed (§9 has
+  not run); domain separation is carried by the subject type
+  inside the signed payload. After the first signed
+  attestation exists, the canonical form is frozen like any
+  other format constant.
 - Licence. Apache-2.0 is the program default for the whole
   World Program, including this repo (Nic, Oct 25, 2026, via
   the coordinator, and recorded in the portfolio). Applied in
@@ -2047,6 +2069,23 @@ in writing in both documents.
   W1 repo's package set either way (§4.5); the open part is
   only whether the W0 chat co-owns its parity standard or
   reviews it. The fixture-parity bar does not change.
+- D7, disclosure pin vs the generic enum. Raised at build time
+  (Oct 26, 2026), coordinator to confirm. §3.1 of this design
+  pins the Discord profile's `humanIdDisclosure` to `hash`
+  (a `none` value is a profile validation failure), while the
+  W0 spec's generic payload defines `'hash' | 'none'` and the
+  coordinator's Oct 25–26 record states W1 matches the
+  hash|none model. The overnight build followed the W0 spec
+  at the core (the generic verifier accepts both; a `none`
+  result's hash is suppressed in every public projection,
+  which is the privacy-conservative direction), and neither
+  the bot nor the link preview currently enforces the profile
+  pin as a validation failure. W1's build position: the pin,
+  if it stands, is a consumer-side profile check that can be
+  added in one place in each consumer without touching the
+  core; if the pin is dropped in favour of the generic model,
+  nothing in the build changes. Either ruling is cheap; what
+  the build must not do is decide it silently, so it is here.
 
 Standing coordination rule from this revision forward: the
 package's API, canonical form, hash, and status model are
