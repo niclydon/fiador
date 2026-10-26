@@ -1016,8 +1016,11 @@ nothing in this section should be read as one:
   history, exactly as they are in the result.
   `binding` rows from earlier builds are legacy operator claims,
   not application-control records. `check_log` is append-only
-  and pruned by age (default 90 days) so a self-hoster can answer
-  "when was this claim last checked?"
+  so a self-hoster can answer "when was this claim last checked?"
+  The current store has a `pruneCheckLog` operation, but nothing
+  calls it: 90-day retention is a target, not current behavior.
+  Startup and recurring pruning need implementation and a test
+  before the retention claim can ship (§10).
 - Configuration is environment + a per-guild `/fiador
   setup` admin flow: bot token (env only, never in the DB),
   default registry URL, default RPC URL, sync interval default.
@@ -1090,9 +1093,13 @@ tested, not a command available from `main`.
   5 s timeout; 64 KiB body cap; JSON content type required; no
   credentials in URL.
 - `/attest` rate limit: 5 attempts / user / guild / 10 min,
-  in-memory. Registry and RPC traffic is cached per interval,
-  not per command, so a popular guild cannot be used to hammer
-  an operator's hosting or a public RPC.
+  in-memory on current `main`. `/verify-agent` currently has no
+  per-user limit. Neither the registry fetch nor the World Chain
+  RPC lookup is cached at the bot boundary, so repeated checks
+  can multiply upstream requests. Before broad use, add and test
+  a shared user/guild limit for both commands and bounded remote
+  lookup load (caching or an equivalent control); this is an
+  open performance gate (§10), not a property of current code.
 - Token hygiene: token from env, never logged, startup log prints
   the bot's own user ID and guild count only. Intents requested:
   Guilds + GuildMembers, with no Message Content intent. Current
@@ -1111,9 +1118,13 @@ tested, not a command available from `main`.
 ### 5.5 Sync loop semantics
 
 - The current loop rechecks stored legacy bindings at startup and
-  on an interval (default 6 hours, configurable by guild). It
-  logs the package status. Every status, including `verified`,
-  `invalid`, `expired`, and `unregistered`, preserves the existing
+  on a timer. On current `main`, the timer takes the shortest
+  configured guild interval and rechecks every guild on that
+  global cadence; individual guild intervals are not honored.
+  Independent per-guild scheduling must be implemented and tested
+  before an interval override is described as effective (§10).
+  The loop logs the package status. Every status, including
+  `verified`, `invalid`, `expired`, and `unregistered`, preserves the existing
   Discord role state. These rows lack trusted app-control proof,
   so they cannot safely identify a role holder to grant or revoke.
 - `unknown` (lookup failure) is retried once after 15 minutes;
@@ -1172,7 +1183,9 @@ designs ships in both light and dark mode:
   Discord themes (light and dark) in the §9 guild test, with the
   badge variant and accent colours chosen to hold contrast in
   each. Text carries the state in words in both themes, as
-  everywhere else in this design.
+  everywhere else in this design. A passing Discord operator
+  attestation uses the neutral `Claim unconfirmed` treatment,
+  never the verified-bot artwork (§6.1, §6.4).
 
 ### 6.1 Static page (`verify-page/`)
 
@@ -1199,12 +1212,13 @@ designs ships in both light and dark mode:
   §5.3 field set (including its display-name rule: shown only
   when the payload carries one, labelled self-asserted,
   §3.1.1), the failure sentence when invalid, and
-  `checkedAt`. A `verified` result is expressly a checked
-  operator attestation, never an assertion that the signer
-  controls the named Discord application. The honest-limits
-  paragraph (§1) is on the page itself, above the fold of the
-  result — the page is the demo
-  surface strangers will judge the claim by.
+  `checkedAt`. When the core returns `verified` for a passing
+  wallet claim, the Discord page presents `Claim unconfirmed`
+  with neutral, unverified-family badge art. The result never
+  asserts that the signer controls the named application. The
+  honest-limits paragraph (§1) is on the page itself, above the
+  fold of the result — the page is the demo surface strangers
+  will judge the claim by.
 - Styling: Nova Glass, the house style (§8.1 credit model) —
   the §5.3 tokens, the approved banner art as the page hero
   (§6.2), and the badge graphics for results, in both light and
@@ -1243,9 +1257,10 @@ Source of truth until repo creation:
   format used by the muse-discord banner, per the assets README).
 - `generated/fiador-server-icon.webp` (1600×1600): the demo
   guild / verifier bot avatar base.
-- Verify-result card set (verified / expired / failed embeds)
-  reuses the same states and tokens; no new art is commissioned
-  for v1.
+- Verify-result cards for a Discord claim use `Claim unconfirmed`
+  with neutral art on a passing wallet check, plus expired and
+  failed treatments. The verified artwork is not a passing-bot
+  state until application control is independently proven.
 
 ### 6.3 Dynamic served badge
 
@@ -1257,6 +1272,9 @@ Source of truth until repo creation:
   state even under copy-paste to another context (§1).
   The state is the operator attestation's status, not proof of
   Discord application control or eligibility for a guild role.
+  Until the control gate in §5.5 is met, a passing core result
+  must render neutral `Claim unconfirmed` art for the Discord
+  application, never the verified badge variant.
 - Implementation home in v1: a tiny standalone service in
   `badge-service/` consuming the verify package, runnable next
   to the verifier bot or alone. This service is W0's second
@@ -1337,9 +1355,8 @@ link speak for itself.
   no second implementation of the checks), and returns Open
   Graph meta plus a dynamically rendered `og:image` card
   (1200×630) in the Nova Glass language. Card contents: the
-  badge state artwork for the observed state (verified /
-  expired / unverified / revoked — colours and states matching
-  the §6.2 badge set exactly, rendered from the same assets),
+  state artwork for the observed Discord claim (`Claim unconfirmed`
+  on a passing core result, or expired / unverified / revoked),
   the Discord application name, the operator display name ONLY
   if the attestation opted in (§3.1.1), the descriptor line
   ("Fiador — human-backed attestation for Discord bots", per
@@ -1347,7 +1364,9 @@ link speak for itself.
   timestamp ("checked <time> UTC"). Meta: `og:title` carries
   Fiador + descriptor + application name + state; `og:description`
   carries the verdict sentence and the snapshot caveat below;
-  `twitter:card` is `summary_large_image`.
+  `twitter:card` is `summary_large_image`. `Claim unconfirmed`
+  uses neutral unverified-family artwork, never the gold verified
+  badge, even when the wallet check passes.
 - Human click-through: browsers (non-crawler user agents)
   land on the full verify page with the attestation prefilled;
   the page re-runs all checks client-side at open time.
@@ -1607,7 +1626,9 @@ Steps:
      surface has live evidence too, not only unit fixtures.
    - Python port: same checks, results diffed against TS output.
    - Static page: same three modes in a clean browser profile;
-     screenshot the verified result for `docs/verification.md`
+     confirm the core returns `verified` while the page renders
+     `Claim unconfirmed` with neutral artwork, then screenshot it
+     for `docs/verification.md`
      (identifiers truncated in the screenshot per §10), in both
      light and dark mode (§6.0): system-preference default, the
      toggle, and persistence each exercised once.
@@ -1661,22 +1682,23 @@ Steps:
      or role. A local fixture pass alone does not close this live
      test or the future application-control gate (§5.5).
 5. Served badge.
-   - Badge URL for Nova's application ID renders the verified
-     operator-attestation state, not verified application control,
-     with a current check time; swap to the expired binding and confirm
-     the badge decays to expired within its cache window; an
+   - Badge URL for Nova's application ID renders the neutral
+     `Claim unconfirmed` state with a current check time;
+     it never uses verified-bot art while application control is
+     unproven. Use the expired attestation and confirm the badge
+     decays to expired within its cache window; an
      invented application ID renders unverified, never an error
      image.
 5a. Link preview (§6.4).
    - Post Nova's `/v/` link in a test channel: the Discord
-     preview renders the verified operator-claim card (badge
-     state art matching the §6.2 set, application name,
+     preview renders the neutral `Claim unconfirmed` card (art
+     matching the unverified family, application name,
      operator display name —
      present only because Nova's attestation opted in — the
      descriptor line, and the crawl timestamp).
    - Click through: lands on the verify page prefilled, which
      re-runs the check live and agrees with the card.
-   - Swap to the expired binding, post the (different, content-
+   - Use the expired attestation, post the (different, content-
      derived) link fresh: the card renders expired. Record the
      cache caveat live: the OLD message's preview does not
      update, which is the documented behaviour (§6.4), and the
@@ -1828,6 +1850,18 @@ the repo's `docs/narrative/` launch entry):
       completed bot-response witness create no trusted binding
       and make no role write. A guild admin audits any existing
       Human-backed role holders manually (§5.5).
+- [ ] Discord page and `/v/` link preview show `Claim unconfirmed`
+      with neutral art for a passing wallet claim in both themes;
+      no application page or preview shows verified-bot art while
+      the §5.5 control gate remains closed.
+- [ ] Bot load gate (§5.4): `/attest` and `/verify-agent` share a
+      tested per-user, per-guild limit, and registry/RPC lookup
+      load has a measured bound (cache or equivalent) before
+      broad guild use. Current `main` meets neither full condition.
+- [ ] Bot scheduling and retention gate (§§5.1, 5.5): tests prove
+      independent per-guild intervals and startup plus recurring
+      90-day `check_log` pruning. The current code has a global
+      shortest-interval timer and an unused pruning method.
 
 Before any outward post (dev.to, Discord showcase, social):
 
