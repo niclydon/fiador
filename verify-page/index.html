@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fiador — human-backed attestation for Discord bots</title>
+<meta name="description" content="Fiador is human-backed attestation for Discord bots: a signed statement, verifiable by anyone, that a unique human backs the bot operator's wallet registration.">
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --ink: #1C1C1E;
+    --muted: #4c5a66;
+    --accent: #4A7FA5;
+    --label: #33617e;
+    --line: #d8dee4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0A0B13;
+      --surface: #1C1C1E;
+      --ink: #eef2f5;
+      --muted: #a7b6c0;
+      --accent: #4A7FA5;
+      --label: #8ABAD3;
+      --line: #2c3540;
+    }
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.55;
+  }
+  main {
+    max-width: 44rem;
+    margin: 0 auto;
+    padding: 3rem 1.25rem 4rem;
+  }
+  h1 {
+    font-size: 2rem;
+    margin: 0 0 0.25rem;
+    letter-spacing: 0.01em;
+  }
+  .descriptor {
+    color: var(--label);
+    font-size: 1.05rem;
+    margin: 0 0 2rem;
+  }
+  section {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 0.75rem;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.25rem;
+  }
+  h2 { font-size: 1.1rem; margin: 0 0 0.5rem; }
+  p { margin: 0.5rem 0; }
+  a { color: var(--accent); }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.9em;
+  }
+  footer {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-top: 2rem;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Fiador</h1>
+  <p class="descriptor">human-backed attestation for Discord bots</p>
+
+  <section>
+    <h2>The founding attestation</h2>
+    <p>
+      Fiador's first published attestation binds the Discord
+      application <code>1561422752521396254</code> (the bot
+      <strong>Nova</strong>) to its operator's wallet registration.
+      It is a signed JSON document: anyone can fetch it and verify,
+      live, that the wallet it names is registered to a unique
+      human, that the signature is the wallet's, and that the
+      attestation has not expired.
+    </p>
+    <p>
+      <a href="/attestations/nova.json">Read the founding attestation</a>
+      (signed JSON, served from this site).
+    </p>
+  </section>
+
+  <section>
+    <h2>What it proves, and what it does not</h2>
+    <p>
+      A verified attestation proves a unique human backs the
+      operator's wallet registration. It does not prove who that
+      human is, that any particular message was written by a
+      human, or that the software behind the bot behaves well.
+      The attestation carries a hash of the human identifier,
+      never the identifier itself.
+    </p>
+  </section>
+
+  <section>
+    <h2>The registry</h2>
+    <p>
+      Attestations are discovered through a small public registry:
+      one entry per Discord application, pointing at the
+      attestation's canonical URL. Listing is mechanical — if an
+      attestation verifies and the entry is well-formed, it is
+      listed.
+    </p>
+    <p>
+      <a href="/registry.json">Read the registry</a>
+      (JSON; canonical copy lives in the public repository).
+    </p>
+  </section>
+
+  <footer>
+    <p>Created by Nic Lydon. Source and specification are in the public Fiador repository.</p>
+  </footer>
+</main>
+</body>
+</html>

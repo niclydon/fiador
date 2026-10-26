@@ -1,0 +1,22 @@
+{
+  "payload": {
+    "version": 1,
+    "subject": {
+      "type": "discord_application",
+      "id": "1561422752521396254"
+    },
+    "agentWalletAddress": "0x21BD025D945cC9c32a4E282548920F1e007A14Bc",
+    "attestationUrl": "https://fiador.org/attestations/nova.json",
+    "operatorDisplayName": "Nic Lydon",
+    "humanIdDisclosure": "hash",
+    "issuedAt": "2026-10-26T10:09:06Z",
+    "expiresAt": "2027-01-24T10:09:06Z",
+    "nonce": "YccH8GnDYxP9CtZSVyO2lKD35y82bt6H",
+    "extra": {
+      "discord_bot_user_id": "1561422752521396254",
+      "human_id_hash": "7bf4573c68a68a00130b1fc7e2a9abf806ee43c121de7b9ad26b7797517341b1"
+    }
+  },
+  "signature": "0x3ac6fc973f5aeb47fa380a8966e572d30ff383fb5f17b69dac52432bfb39842f36df834a84071831b902d508e00845e01273a9a91b0adb14f954b9e0674c60611b",
+  "signatureType": "eip191"
+}
