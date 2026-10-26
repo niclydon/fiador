@@ -1,5 +1,27 @@
 # Changes
 
+## 2026-10-26: first build — verify core stub, verifier bot, link preview
+
+- packages/verify-ts: the verify core at the W0 spec's interface
+  (createVerifier; verifyAddress / verifyAttestation /
+  resolveStatus; internal/public result split with hash-only
+  public outputs). Signature verification and the AgentBook
+  reader are injected dependencies: the shipped defaults fail
+  closed (no attestation verifies, lookups report unknown)
+  until the real implementations land.
+- verifier-bot: the self-host reference bot scaffold —
+  /fiador, /verify-agent, /attest; SQLite guild config and
+  check log; Human-backed role sync (revoke on invalid,
+  expired, unregistered; never on unknown); SSRF-guarded
+  attestation fetching per DESIGN §5.4.
+- link-preview: the /v/<short-id> endpoint — content-derived
+  ids resolved against the registry, crawl-time verification,
+  dynamic OG cards in every state including the not-found and
+  could-not-check failure cards, browser click-through to the
+  verify page.
+- 66 tests across the three packages, all against fakes and
+  synthetic fixtures; no live Discord, chain, or DNS in tests.
+
 ## 2026-10-25: renamed to Fiador; build design lands
 
 - Project renamed human-backed -> Fiador (the guarantor who

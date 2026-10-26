@@ -1,0 +1,1 @@
+{"author":"Nic Lydon","description":"Fiador — human-backed attestation for Discord bots","engines":{"node":">=20"},"license":"Apache-2.0","name":"fiador","private":true,"scripts":{"test":"npm run test --workspaces --if-present","typecheck":"npm run typecheck --workspaces --if-present"},"version":"0.1.0","workspaces":["packages/*","verifier-bot","link-preview"]}

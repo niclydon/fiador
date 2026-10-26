@@ -1,0 +1,1 @@
+{"compilerOptions":{"declaration":false,"outDir":"dist","paths":{"@fiador/verify":["../packages/verify-ts/src/index.ts"]},"rootDir":"..","sourceMap":false,"types":["node"]},"extends":"../tsconfig.base.json","include":["src","api","test","vitest.config.ts"]}
