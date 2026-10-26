@@ -95,6 +95,10 @@ spec's honest-limits section; the design adds no stronger claim.
   claims; that the signer controls the named Discord application
   or bot; or who the human is. World ID is anonymous by design:
   the proof says "a unique human", never who.
+- AgentBook registrations are public on World Chain. A disclosed
+  wallet can reveal its pseudonymous human identifier and other
+  wallets registered to the same identifier. Fiador omits the raw
+  identifier from its outputs but cannot make the chain data private.
 - Freshness: registration is checked live at verification time,
   but Fiador does not currently certify or update a guild role.
   Guild admins must review any existing Human-backed role holders
@@ -397,10 +401,12 @@ libraries and all fixtures follow exactly this:
 ### 3.3 humanId handling — hash only in public, settled
 
 This is THE HUMANID RULE (Nic-direct, Oct 25, 2026), the
-program's binding privacy rule: the full humanId is never
-published anywhere outside the estate — no repo, post, page,
-fixture, screenshot, log, or outward message — and public
-material carries a hash of it only. It is written into the
+program's binding rule for its own artifacts: never copy the full
+humanId into a repo, post, page, fixture, screenshot, log, or
+outward message; publish only its hash in Fiador outputs. AgentBook
+itself stores the pseudonymous identifier on a public chain, so
+this rule cannot make a disclosed wallet or its linked registrations
+private. It is written into the
 portfolio (boundary section, as THE HUMANID RULE), into
 `~/AGENTS.md` as a standing convention binding every agent,
 and into the W1 spec (verification step and decisions section:
@@ -409,14 +415,13 @@ format-level settlement in this design; §10's launch checklist
 enforces it mechanically, and the leak-path audit at the end
 of this section is the checklist's map.
 
-- Where the full value lives: only in two private places — the
-  AgentBook contract itself, and a verifier's process memory
-  for the duration of one check. A verifier resolves the full
-  value privately, at check time, by calling
+- Where the full value lives: the public AgentBook contract and
+  a verifier's process memory for the duration of one check.
+  A verifier resolves the value at check time by calling
   `lookupHuman(agent_wallet_address)` on World Chain from the
-  wallet address in the payload. That is the only resolution
-  path; no public artifact is ever a source of the full value,
-  and no verifier persists, logs, displays, or returns it.
+  wallet address in the payload. Anyone can make that same public
+  read or inspect registration events. Fiador does not persist,
+  log, display, or return the full value in its outputs.
 - The hash construction the format specifies (normative; the
   package's exported `hashHumanId` implements exactly this,
   W0 spec §3.5): take the humanId in its canonical text form —

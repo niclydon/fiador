@@ -43,9 +43,11 @@ mark has to be able to say "no longer true."
 ## Privacy rules
 
 - Attestations publish a hash of the humanId, never the full value.
-  Verifiers resolve the full value privately through the on-chain
-  lookup. Two bots backed by the same human produce the same hash,
-  which is the one correlation the system intends to allow.
+  Fiador verifiers read the on-chain value for a check and omit it
+  from Fiador outputs. AgentBook lookup and registration events are
+  public: disclosing a registered wallet can reveal its pseudonymous
+  human identifier and other wallets registered to that identifier.
+  Two bots backed by the same human also publish the same hash.
 - An optional operator display name exists for operators who want
   to be named. It is off by default and never required.
 - No live private keys, tokens, or personal data belong in this repo.

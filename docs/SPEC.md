@@ -66,11 +66,13 @@ Verification, in order:
    re-verify against current World docs at build time)
 4. The verifier displays a hash of the humanId so a guild can see
    when two different bots trace to the same human. SETTLED PRIVACY
-   RULE (Nic-direct Oct 25, 2026): the full humanId is never
-   published, in this payload or anywhere public. Hash only, no
-   operator override in v1. Any agent working from this spec: do
-   not place the raw humanId in code fixtures, docs, screenshots,
-   logs, or messages outside the estate.
+   RULE (Nic-direct Oct 25, 2026): Fiador never copies the full
+   humanId into its payload, repo, or public outputs. Hash only, no
+   operator override in v1. AgentBook itself is public on World
+   Chain: a disclosed registered wallet can expose that identifier
+   and link other wallets registered to it. Any agent working from
+   this spec: do not place the raw humanId in code fixtures, docs,
+   screenshots, logs, or messages outside the estate.
 
 Discovery, the genuinely hard part. A verifier asked about a
 Discord application has its ID, but Discord profiles carry no
@@ -171,6 +173,10 @@ Consequences for this project:
 - World ID is anonymous. The proof says "a unique human," never who.
   An operator publicly claiming "this human is me" is a separate
   signed statement from an identity people already know
+- AgentBook registrations are public on World Chain. A disclosed
+  wallet can reveal its pseudonymous human identifier and other
+  wallets registered to the same identifier; anonymity does not
+  make those registrations unlinkable.
 - Registration is checked live and the verify page shows the
   check time. The current verifier does not certify or update a
   guild role. Admins must review existing role holders manually.
