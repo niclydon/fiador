@@ -1,5 +1,30 @@
 # Changes
 
+## 2026-10-26: founding attestation published (§9 step 1)
+
+- registry/: the first entry — Discord application
+  1561422752521396254 (Nova) pointing at
+  https://fiador.org/attestations/nova.json — plus the JSON
+  Schema for the §3.4 format and the contribution rules
+  (verifies + schema-valid = listed; tombstone as the
+  recommended removal path).
+- verify-page/: the minimal static hosting root for
+  fiador.org (Vercel) — a one-page front door with the
+  descriptor and the honest limits, the founding attestation
+  served byte-for-byte at /attestations/nova.json, and the
+  registry mirrored at /registry.json. The full §6.1 verify
+  page is later work.
+- The founding attestation was signed with the dedicated
+  World Program wallet via tools/signer and live-verified at
+  signing time: status verified, 2026-10-26T10:10:50Z,
+  payload hash
+  8bfeb9f9182de3ce63cdf42bdff941277250d96089982c65f0f97761f195a031,
+  expires 2027-01-24. Narrative:
+  docs/narrative/2026-10-26-founding-attestation.md.
+- DESIGN §9 precondition synced: the program wallet's
+  AgentBook registration is recorded as done (Oct 26, 2026,
+  live-verified), replacing the stale awaiting-the-tap text.
+
 ## 2026-10-26: reference signer CLI (tools/signer)
 
 - tools/signer: the reference signer from DESIGN §3.2 —

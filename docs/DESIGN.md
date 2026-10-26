@@ -1546,10 +1546,13 @@ Preconditions (state at design time, re-check at test time):
       (created Oct 25, held separately from the playground /
       fleet wallet) is the signing wallet for all public demos,
       the founding attestation, and registry listings. Its
-      AgentBook registration is prepared; the one remaining
-      step is Nic's World App approval tap, after which the
-      registration state gets the same dated `agentkit_status`
-      record as the item above before §9 step 1 signs anything.
+      AgentBook registration is DONE: Oct 26, 2026, ~01:03 ET
+      (Nic's World App approval tap during the home session;
+      live-verified `registered: true`, recorded in
+      `docs/verification.md`). At test start it still gets the
+      dated re-check above — a registration state is a fact
+      with a date — but nothing about §9 step 1 waits on
+      registration anymore.
 
 Steps:
 
