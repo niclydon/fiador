@@ -60,7 +60,7 @@ All responses are ephemeral.
 | --- | --- | --- |
 | `/fiador status [page]` | anyone | Six legacy claims per page, last operator checks, manual role-audit warning |
 | `/fiador setup` | Manage Guild | Set the Human-backed role ID, registry URL, sync interval, log channel |
-| `/verify-agent <application_id>` | anyone | One-off check of one application; no state change |
+| `/verify-agent <application_id>` | anyone | One-off check of one application; logs the check but changes no binding or role |
 | `/attest <url \| attestation>` | anyone | Check a presented operator attestation and log the result; never bind or change a role |
 
 Anyone may run `/attest` or `/verify-agent`; neither can grant a role.
@@ -147,10 +147,11 @@ interface (W0 spec §3 / DESIGN §4.1):
   token, no live Discord.
 - **Application control**: no production proof provider or live Discord
   test exists. The role gate is deliberately closed.
-- **Scheduler**: a local timer checks which guilds are due every 30
-  seconds. Each guild uses its own configured interval with ±10% jitter;
-  a full re-check runs at startup. Per-binding cadence refinement is
-  future work.
+- **Scheduler**: startup checks run independently across guilds, with up
+  to four guild checks in flight. Each guild's next check is scheduled
+  from its own configured interval with ±10% jitter; a local timer also
+  looks for new guilds and setup changes every 30 seconds. Per-binding
+  cadence refinement is future work.
 
 ## Pattern provenance
 

@@ -145,15 +145,14 @@ export async function main(env: Record<string, string | undefined> = process.env
     console.log(
       `fiador: logged in as ${ready.user.id}, serving ${ready.guilds.cache.size} guild(s).`,
     );
-    // Re-check legacy bindings before the scheduler starts. This records
-    // evidence and warnings, without changing guild roles.
-    void (async () => {
-      for (const guildId of store.listGuildIds()) {
-        await warnLegacyRoleAudit(guildId, store, adapter);
-        await engine.syncGuild(guildId).catch(() => undefined);
-      }
-      scheduleGuildSync(store, engine, config.syncIntervalMinutes);
-    })();
+    // Each guild receives its audit warning before its first check. A slow
+    // legacy check does not hold up startup checks for other guilds.
+    scheduleGuildSync(
+      store,
+      engine,
+      config.syncIntervalMinutes,
+      (guildId) => warnLegacyRoleAudit(guildId, store, adapter),
+    );
   });
 
   await client.login(config.token);

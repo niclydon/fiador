@@ -2,7 +2,8 @@ import type { Store } from './store.js';
 
 const CHECK_LOG_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const SYNC_POLL_MS = 30 * 1000;
+const GUILD_DISCOVERY_MS = 30 * 1000;
+const MAX_CONCURRENT_GUILD_SYNCS = 4;
 
 /** Remove checks older than 90 days, including their wallet and human hash. */
 export function pruneExpiredChecks(store: Store, nowMs = Date.now()): number {
@@ -24,9 +25,11 @@ export function startCheckLogPruning(store: Store): NodeJS.Timeout {
 }
 
 interface SyncState {
-  lastRunMs: number;
+  lastRunMs: number | null;
   intervalMs: number;
   dueMs: number;
+  inFlight: boolean;
+  firstSync: boolean;
 }
 
 export interface GuildSyncer {
@@ -34,41 +37,34 @@ export interface GuildSyncer {
 }
 
 /**
- * Check each guild only when its own interval is due. The short local poll
- * notices new guilds and setup changes without making extra network calls.
- * Call this after the startup pass, so its first due time starts from that pass.
+ * Start each guild's first check at startup, then use its own interval for
+ * later checks. One timer wakes at the next due time; a local discovery
+ * timer also notices new guilds and setup changes without network calls.
+ * Slow checks hold only their own guild slot, up to the concurrency cap.
  */
 export function scheduleGuildSync(
   store: Store,
   syncer: GuildSyncer,
   defaultIntervalMinutes: number,
+  beforeFirstSync?: (guildId: string) => Promise<void>,
 ): { stop(): void } {
   const states = new Map<string, SyncState>();
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
+  let activeSyncs = 0;
 
-  const intervalFor = (guildId: string): number =>
-    (store.getGuildConfig(guildId)?.syncIntervalMinutes ?? defaultIntervalMinutes) * 60 * 1000;
+  const intervalFor = (guildId: string): number => {
+    const configured = store.getGuildConfig(guildId)?.syncIntervalMinutes ?? defaultIntervalMinutes;
+    const minutes = Number.isFinite(configured) && configured > 0
+      ? configured : defaultIntervalMinutes;
+    return minutes * 60 * 1000;
+  };
   const jittered = (intervalMs: number): number =>
     intervalMs * (0.9 + Math.random() * 0.2);
 
-  const startedAt = Date.now();
-  for (const guildId of store.listGuildIds()) {
-    const intervalMs = intervalFor(guildId);
-    states.set(guildId, {
-      lastRunMs: startedAt,
-      intervalMs,
-      dueMs: startedAt + jittered(intervalMs),
-    });
-  }
-
-  const arm = () => {
+  const tick = () => {
     if (stopped) return;
-    timer = setTimeout(() => { void tick(); }, SYNC_POLL_MS);
-    timer.unref();
-  };
-
-  const tick = async () => {
+    if (timer) clearTimeout(timer);
     try {
       const guildIds = store.listGuildIds();
       const active = new Set(guildIds);
@@ -77,32 +73,69 @@ export function scheduleGuildSync(
         const intervalMs = intervalFor(guildId);
         let state = states.get(guildId);
         if (!state) {
-          state = { lastRunMs: nowMs, intervalMs, dueMs: nowMs };
+          state = {
+            lastRunMs: null,
+            intervalMs,
+            dueMs: nowMs,
+            inFlight: false,
+            firstSync: true,
+          };
           states.set(guildId, state);
         } else if (state.intervalMs !== intervalMs) {
           state.intervalMs = intervalMs;
-          state.dueMs = state.lastRunMs + jittered(intervalMs);
+          if (!state.inFlight && state.lastRunMs !== null) {
+            state.dueMs = state.lastRunMs + jittered(intervalMs);
+          }
         }
-        if (nowMs < state.dueMs) continue;
-        try {
-          await syncer.syncGuild(guildId);
-        } catch (error) {
-          console.error(`fiador: sync failed for guild ${guildId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-        state.lastRunMs = Date.now();
-        state.dueMs = state.lastRunMs + jittered(state.intervalMs);
+        if (activeSyncs >= MAX_CONCURRENT_GUILD_SYNCS ||
+            state.inFlight || nowMs < state.dueMs) continue;
+        state.inFlight = true;
+        activeSyncs++;
+        void runSync(guildId, state);
       }
       for (const guildId of states.keys()) {
-        if (!active.has(guildId)) states.delete(guildId);
+        if (!active.has(guildId) && !states.get(guildId)?.inFlight) states.delete(guildId);
       }
     } catch (error) {
       console.error(`fiador: sync scheduler failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      arm();
+      if (!stopped) {
+        const nowMs = Date.now();
+        let nextWakeMs = nowMs + GUILD_DISCOVERY_MS;
+        if (activeSyncs < MAX_CONCURRENT_GUILD_SYNCS) {
+          for (const state of states.values()) {
+            if (!state.inFlight) nextWakeMs = Math.min(nextWakeMs, state.dueMs);
+          }
+        }
+        timer = setTimeout(tick, Math.max(1, Math.ceil(nextWakeMs - nowMs)));
+        timer.unref();
+      }
     }
   };
 
-  arm();
+  const runSync = async (guildId: string, state: SyncState) => {
+    try {
+      if (state.firstSync && beforeFirstSync) {
+        try {
+          await beforeFirstSync(guildId);
+        } catch (error) {
+          console.error(`fiador: startup audit failed for guild ${guildId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      await syncer.syncGuild(guildId);
+    } catch (error) {
+      console.error(`fiador: sync failed for guild ${guildId}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      state.inFlight = false;
+      state.firstSync = false;
+      activeSyncs--;
+      state.lastRunMs = Date.now();
+      state.dueMs = state.lastRunMs + jittered(state.intervalMs);
+      tick();
+    }
+  };
+
+  tick();
   return {
     stop() {
       stopped = true;
