@@ -7,8 +7,8 @@
 # Fiador
 
 A Discord bot's profile tells you a name, an avatar, and nothing
-about whether anyone real stands behind it. Fiador is an open
-protocol and verifier that lets a bot operator prove, in a way any
+about whether anyone real stands behind it. Fiador — human-backed attestation for Discord
+bots — is an open protocol and verifier that lets a bot operator prove, in a way any
 server admin can check, that their bot is backed by one unique,
 verified human, using [World ID](https://world.org) and AgentBook
 registrations on World Chain.

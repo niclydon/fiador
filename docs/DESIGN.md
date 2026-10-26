@@ -1,4 +1,4 @@
-# W1 — Fiador: human-backed Discord bot attestation — build-ready design
+# W1 — Fiador — human-backed attestation for Discord bots: build-ready design
 
 Status: DESIGN, 2026-10-25; revised the same day for the
 first-repo decision, the settled queue decisions, the repo's
@@ -83,6 +83,11 @@ spec's honest-limits section; the design adds no stronger claim.
   but a granted Discord role is only as fresh as the verifier's
   last sync. Every surface that reports a result — library return,
   bot embed, verify page, served badge — carries `checkedAt`.
+  The link preview (§6.4) is the weakest surface by construction:
+  its card is a crawl-time snapshot inside a platform cache the
+  project does not control, so it is labelled a snapshot wherever
+  it is described, and the canonical-domain click-through check
+  is the only form of it anyone is asked to trust.
 - A stolen bot token still passes an old attestation. The
   attestation authenticates the operator's claim about an
   application ID, not the running process. Expiry (§3) bounds this,
@@ -160,6 +165,21 @@ Components built by this workstream:
    (§6) — consumers of the package; the badge service is W0's
    second deliverable, housed in this repo on the same terms.
 5. Examples, README, and narrative (§7, repo layout in §8)
+
+A third consumption surface is specced by W0 (approved by Nic
+Oct 25, 2026; W0 owns its spec, relayed to this workstream when
+it lands): a public verify MCP server — a thin MCP wrapper over
+the verify core exposing wallet lookup, attestation
+verification, and badge status, with no semantics of its own.
+From this design's side, the standing facts are: it is a
+consumer like the bot (§5) and the page (§6.1), reading the
+same core results and the same public-safe projection (the
+§6.3 result shape; hash-only, per §3.3 — the core's private
+`includeRawHumanId` mode is not reachable through it), and it
+inherits the package boundary unchanged (arrows still point
+into the package only). No W1 surface work is owed for it until
+W0's section lands; the demo and registry sequencing in §12
+already accounts for it there.
 
 Dependency rule that keeps the fold honest: arrows point into
 the package, never out of it. The package imports nothing from
@@ -456,7 +476,16 @@ of this section is the checklist's map.
      "submitted_by": "<free text, e.g. a GitHub handle>",
      "added_at": "<RFC3339>" }`.
   One entry per application ID. Sorted by application ID so diffs
-  are reviewable.
+  are reviewable. Entries carry no humanId in any form (§3.3).
+  Two additions serve the link preview (§6.4): the registry
+  index the preview resolves against is derived from entry
+  payload hashes (computed at publish time from the fetched
+  attestation, never a second hand-maintained file), and an
+  operator may mark an entry `"status": "revoked"` instead of
+  deleting it — a tombstone that keeps old `/v/` links
+  rendering an honest revoked card. Deletion remains possible;
+  tombstoning is the recommended removal path, and
+  `registry/CONTRIBUTING.md` says so.
 - Schema ships as `registry/registry.schema.json`; CI validates
   every PR against it, plus: HTTPS-only URLs, no duplicate
   application IDs, and a live fetch-and-verify of the submitted
@@ -1174,7 +1203,7 @@ Source of truth until repo creation:
   reuses the same states and tokens; no new art is commissioned
   for v1.
 
-### 6.3 Dynamic served badge (contract; hosting is an open decision)
+### 6.3 Dynamic served badge
 
 - Endpoint: `GET /badge/<discord_application_id>.svg` and `.png`.
   Response renders the §6.2 design for the state observed by a
@@ -1223,6 +1252,111 @@ Source of truth until repo creation:
   stateless package and the same result shape; no consumer
   gets a private variant of the truth.
 
+### 6.4 Attestation link preview — the `/v/` surface
+
+A first-class surface (design addition from Nic, Oct 25, 2026).
+The demonstration shape of the whole project is a bot posting
+one short link in a channel; this surface is what makes that
+link speak for itself.
+
+- Canonical URL: `https://fiador.org/v/<short-id>`. (Domain
+  state, updated Oct 26, 2026: `fiador.org` is REGISTERED via
+  Cloudflare Registrar (active, auto-renew on), so the
+  canonical-domain blocker for this surface is cleared on the
+  registration side. DNS and hosting for it still await the
+  deploy decision through the coordinator (§6.4 hosting
+  posture); until then the endpoint is built and tested on a
+  staging host and no `/v/` link is published. The rule itself
+  stands: the surface ships only on the canonical domain — a
+  preview card served from anywhere else is not this surface.)
+- Short-id: content-derived and tamper-evident. The id is the
+  first 10 characters of the base32 encoding of
+  SHA-256 over the attestation's canonical signing bytes
+  (§3.2) — any change to the payload changes the id, so a link
+  names one exact attestation, not a slot whose contents can
+  be swapped. Resolution needs no accounts and no database:
+  the preview resolves the id against the published registry
+  (registry entries carry the payload hash, §3.4; the service
+  matches the id against indexed entries, extending the id
+  length for an entry if a collision ever appears, minimum 10
+  characters). Registry tombstones (an entry marked revoked)
+  keep their ids resolvable precisely so old links render a
+  revoked card instead of silently becoming not-found.
+- The endpoint: a small dynamic handler (an edge function is
+  fine; reference implementation ships beside the badge
+  service, same operational family). On a crawler request it:
+  resolves the id, fetches the attestation, runs the same full
+  verification as the verify page (signature, expiry, live
+  AgentBook read at crawl time, through the verify package —
+  no second implementation of the checks), and returns Open
+  Graph meta plus a dynamically rendered `og:image` card
+  (1200×630) in the Nova Glass language. Card contents: the
+  badge state artwork for the observed state (verified /
+  expired / unverified / revoked — colours and states matching
+  the §6.2 badge set exactly, rendered from the same assets),
+  the Discord application name, the operator display name ONLY
+  if the attestation opted in (§3.1.1), the descriptor line
+  ("Fiador — human-backed attestation for Discord bots", per
+  the §7 descriptor rule), the verdict in words, and the crawl
+  timestamp ("checked <time> UTC"). Meta: `og:title` carries
+  Fiador + descriptor + application name + state; `og:description`
+  carries the verdict sentence and the snapshot caveat below;
+  `twitter:card` is `summary_large_image`.
+- Human click-through: browsers (non-crawler user agents)
+  land on the full verify page with the attestation prefilled;
+  the page re-runs all checks client-side at open time.
+  Serving OG meta to crawlers and the real destination to
+  humans is the standard link-preview arrangement, stated here
+  so nobody later mistakes it for cloaking: the crawler
+  content and the human content are the same verdict, rendered
+  for two readers.
+- Honesty spec, plainly (extends §1 to this surface; the copy
+  ships on the card's destination page and in the meta
+  description, not only in this design): the OG card is a
+  snapshot from crawl time, not the proof. Platform preview
+  caches mean a later expiry or revocation may never refresh a
+  preview already posted; a lookalike domain can imitate a
+  card pixel for pixel. The verification is the click-through
+  check on the canonical domain, run live at open time. The
+  card itself carries its crawl time for exactly this reason,
+  and no copy anywhere presents a preview screenshot as
+  evidence of current state.
+- Failure states, fail-closed like the core (§4.2): an unknown
+  id renders a neutral "attestation not found" card with full
+  OG meta — never a bare 404 with no meta, and never anything
+  that could be mistaken for a state. A lookup failure at crawl
+  time (registry, attestation host, or RPC unreachable)
+  renders an explicit "could not check" card in the unverified
+  visual family with the reason in words, served `no-store` —
+  never a verified-looking card, and never cached into looking
+  settled. A payload that fails verification renders its real
+  state (expired / unverified / revoked), in words, using the
+  same failure sentences as §5.3.
+- Modes: the card is a rendered image and carries no theme
+  variant of its own (like the §6.2 banner, it is one designed
+  artifact); the destination page it leads to is fully
+  both-modes under §6.0.
+- Hosting posture (Nic, Oct 26, 2026): v1 hosting for the
+  Fiador web surfaces — site, verify page (§6.1), and this
+  preview endpoint — is Vercel, right-sized for what v1 is: a
+  small Discord demonstration, not a crowd. Two constraints
+  are standing, not preferences. (1) PORTABILITY: the preview
+  endpoint and the verify surface depend only on the verify
+  core and the published attestation registry — nothing
+  Vercel-specific beyond the thinnest adapter at the edge, so
+  a move to Cloudflare (Workers/Pages) is a relocation, not a
+  rewrite. Cloudflare is recorded as the natural scale home to
+  evaluate — the program's domains and DNS already live there
+  — on real traffic numbers, not instinct, if the question
+  ever becomes live. (2) COST WATCH: the on-chain verification
+  reads are free, but serving pages and previews is not free
+  at scale, and funding public verification traffic out of
+  pocket indefinitely is not a standing commitment. If usage
+  grows past hobby scale, the traffic/cost picture goes back
+  to the coordinator as a decision item with numbers; it is
+  never absorbed silently by whoever happens to be operating
+  the surface that month.
+
 ## 7. Examples and docs
 
 - `examples/discord-js-bot/` — a minimal bot plus the 15-line
@@ -1246,7 +1380,21 @@ Source of truth until repo creation:
   resolved), and the plain statement that this is independent
   open source built on World's public surfaces, with no implied
   endorsement and no World marks in the project name or badge.
-  The README also carries the program's no-token position,
+- Naming in public copy — the descriptor rule (binding, Nic,
+  Oct 25, 2026): Fiador never appears naked in public copy. On
+  first use in every surface it travels with its descriptor,
+  "human-backed attestation for Discord bots" — README, spec
+  and design title blocks, badge-adjacent copy (alt text,
+  captions, the badge page's headings), registry listing copy,
+  and outward posts alike. The pattern matches the umbrella
+  rule (Operator Verified travels with "verified as a unique
+  human"): an opaque name is fine, an unexplained one is not.
+  After the first use, bare "Fiador" is normal. This design's
+  own title follows the rule; §10's copy checks enforce it on
+  launch surfaces, and the badge artwork itself is exempt by
+  construction (its label is the word "fiador" in a state mark,
+  and the pages around it carry the descriptor).
+- The README also carries the program's no-token position,
   stated on purpose (program direction, Oct 25, 2026): Fiador
   has no token, will not issue one, launches nothing, and
   verification is never something to buy or speculate on; any
@@ -1288,6 +1436,7 @@ fiador/                              # repo niclydon/fiador (created as human-ba
   verifier-bot/                      # §5: src/, Dockerfile, .env.example, README
   verify-page/                       # §6.1 static site
   badge-service/                     # §6.3 small service (W0 deliverable 2; a package consumer)
+  link-preview/                      # §6.4 /v/ endpoint: OG meta + dynamic card (edge-deployable)
   tools/
     sign-attestation/                # §3.2 reference signer CLI
   examples/
@@ -1461,13 +1610,31 @@ Steps:
      the badge decays to expired within its cache window; an
      invented application ID renders unverified, never an error
      image.
+5a. Link preview (§6.4).
+   - Post Nova's `/v/` link in a test channel: the Discord
+     preview renders the verified card (badge state art matching
+     the §6.2 set, application name, operator display name —
+     present only because Nova's attestation opted in — the
+     descriptor line, and the crawl timestamp).
+   - Click through: lands on the verify page prefilled, which
+     re-runs the check live and agrees with the card.
+   - Swap to the expired binding, post the (different, content-
+     derived) link fresh: the card renders expired. Record the
+     cache caveat live: the OLD message's preview does not
+     update, which is the documented behaviour (§6.4), and the
+     verification.md entry says so rather than calling it a
+     defect.
+   - Unknown id: renders the neutral "attestation not found"
+     card with meta intact. Crawl-time failure (endpoint's RPC
+     path blocked in the test env): renders "could not check",
+     `no-store`, never verified-looking.
 6. Community guild pitch (not a test step, an outward step —
    gated on Nic's go like every outward send, §10).
    - Pitch is an adoption decision for that guild's admins, with
      the working demo above as evidence. Nothing is installed
      there during the pitch.
 
-Exit criteria: steps 2–5 all recorded in `docs/verification.md`
+Exit criteria: steps 2–5a all recorded in `docs/verification.md`
 with dates and outputs; any step that cannot pass is recorded as
 "not verified" with the blocker, per quality bar 4 — a green
 summary without the underlying run does not close this plan.
@@ -1605,6 +1772,12 @@ Before any outward post (dev.to, Discord showcase, social):
       rule replaces this yet).
 - [ ] Post links the repo, shows truncated identifiers only, and
       makes no claim beyond §1.
+- [ ] Descriptor rule (§7): the post's first use of Fiador
+      carries "human-backed attestation for Discord bots"; the
+      name never appears naked in any launch surface's first
+      use (README, page headings, badge-adjacent copy, listing
+      copy are checked for the same in the trademark/claims
+      read above).
 
 Standing, after launch:
 
@@ -1626,7 +1799,8 @@ spec's recommendation is used as a placeholder and flagged.
 |---|---|---|---|
 | 1 | Whether anything beyond the operator display name links the human to Nic publicly | Narrowed Oct 25, 2026: the display-name part is settled (resolved, below — Nova's payload names him as operator, §3.1.1). What remains open is any further linkage: README/demo copy stating that the human behind the hash is Nic, or cross-project use of the same hash as his identifier. Recommendation (spec): no for v1; "a unique human" is the claim being demonstrated. The hash-only settlement already caps the exposure either way | §9 step 1, §7 copy |
 | 2 | Package names (npm / PyPI) | `fiador` on both (checked free Oct 25, 2026); the exact scoped/unscoped forms are settled at publish time, and availability is re-checked then, as with the repo name. Publishing itself is a separate launch act gated in §10 | First publish |
-| 3 | Registry hosting mirror | Any static host serving the repo file byte-for-byte (§3.4); choice is operational, coordinator may settle it without a Nic decision if the repo name implies one | First public verify surface |
+| 3 | Registry hosting mirror | Settled in practice by the hosting posture (Nic, Oct 26, 2026): the repo file stays canonical (§3.4) and the mirror serves from the same Vercel posture as the other Fiador web surfaces (§6.4). Any static host serving the file byte-for-byte satisfies the contract if posture ever changes | First public verify surface |
+| 4 | Hosting cost beyond hobby scale | Standing cost watch (§6.4): the serving/cost picture returns to the coordinator as a decision item with real numbers when usage outgrows hobby scale; not silently absorbed. No threshold is pre-set in this design — the first real traffic data sets it | When traffic data exists |
 
 Decision 1 is the spec's one remaining open item. Decisions
 2–3 surfaced during this design and are recorded here rather
@@ -1652,7 +1826,10 @@ not rows above because the table is only for what is still open:
   prose where plainly generic (the claim, the Discord role
   label), per the W1 spec's copy; the project name, package
   names, slash command (`/fiador`), and badge branding are
-  Fiador. One cryptographic consequence, recorded here because
+  Fiador. Descriptor rule (Nic, Oct 25, 2026): Fiador never
+  appears naked in public copy; on first use in every surface
+  it travels with "human-backed attestation for Discord bots"
+  (§7). One cryptographic consequence, recorded here because
   it must not drift: the Discord profile's canonical signing
   prefix is `fiador-discord-attestation:v1` (§3.2) — safe to
   fix now because no attestation has been signed under the old
@@ -1716,14 +1893,24 @@ Sequencing under the program direction (portfolio, Oct 25,
 dependency order, but the milestones they serve are, in order:
 (1) DEMO — a demo-able Fiador: the package path exercised end
 to end in Nic's guild (§9 steps 1–5), the static page checking a
-real attestation, the badge rendering real states. Work that
+real attestation, the badge rendering real states, and the
+link preview (§6.4): a `/v/` link posted in a channel whose
+preview card itself carries the verdict — the demonstration
+moment the surface exists for, since it is how a stranger in
+someone else's server meets Fiador. Work that
 does not unblock the demo waits, however elegant. (2) REGISTRY
 PRESENCE — a real listing in World's official AgentBook
 registry for the Fiador attestation/verification surface, with
 listing copy and demo links prepared as build artifacts of this
-workstream (the listing mechanics are verified against World's
+workstream (listing copy follows the §7 descriptor rule: Fiador
+travels with "human-backed attestation for Discord bots" on
+first use; the listing mechanics are verified against World's
 current process when the milestone opens; nothing here assumes
-them). (3) POLISH — everything else: visual iteration beyond
+them). The public verify MCP's listing (§2, W0's spec) is a
+distribution artifact in the same family and ships in this
+milestone, not the demo one: the demo proves the verification;
+this milestone puts it where agent builders actually look.
+(3) POLISH — everything else: visual iteration beyond
 the approved asset round, docs depth, extra examples. Within
 the program's sequencing, Fiador's job is to be the working
 public demonstration; this workstream's effort is weighted
@@ -1731,6 +1918,29 @@ accordingly, and a polish
 item never displaces a demo or registry item in a build order
 dispute.
 
+0. Prior-art check, re-run (quality bar item 0, Nic-direct
+   Oct 25, 2026, standing for the whole program). Before any
+   build starts, search: World's docs and packages, the
+   AgentBook registry, npm/PyPI, GitHub, the MCP registries,
+   and the adjacent field — for anything that already does
+   what Fiador does, in whole or in load-bearing part.
+   Founding instance, cited not redone: the Oct 25, 2026
+   whitespace research (full report:
+   `~/workspace/research_notes/world-agentkit-use-cases-whitespace-20261025-2344/report.md`),
+   which found the official AgentBook registry holding five
+   services and no public implementation for Discord/messaging
+   attestation — the verified-empty category this project
+   builds in. The field moves, so the check re-runs at build
+   start rather than inheriting October's answer: findings go
+   into a dated prior-art record in the repo's docs (what was
+   found, where, when, and its adoption signals — usage,
+   maintenance, uptake — not mere existence). If the re-run
+   finds an in-use equivalent, building anyway is a conscious,
+   evidence-backed call recorded in that same record (the
+   existing thing is dormant, proprietary where openness is
+   the point, or materially different in shape); reinventing
+   an in-use wheel by accident is a defect, and the build does
+   not start until the record exists.
 1. The verify package, core first (§4): re-verify the chain
    facts (network, contract, `lookupHuman` signature) against
    current World docs and record the check; prove the SDK
@@ -1752,6 +1962,15 @@ dispute.
    produce a real attestation.
 5. Verifier bot (§5) with role sync, fetch guards, and the
    `/attest` flow; badge service (§6.3, W0 spec §4) alongside it.
+5a. Link preview endpoint (§6.4) on the badge-service
+   operational family: id resolution against the registry,
+   crawl-time verification through the package, dynamic OG
+   card rendering from the §6.2 assets, and the two failure
+   cards (not found / could not check). Demo-milestone work:
+   it is the surface the guild demonstration is performed
+   through (posting the link IS the demo), so it lands before
+   step 7's test, on a staging host until the canonical
+   domain is live.
 6. Registry, README, examples, threat model, CI incl. secret
    scan (§§3.4, 7, 8, 10).
 7. Nic's-guild end-to-end test (§9), adversarial review (§10),

@@ -1,4 +1,4 @@
-# Fiador (human-backed Discord bots): public repo spec
+# Fiador — human-backed attestation for Discord bots: public repo spec
 
 Status: DESIGN, Oct 25, 2026. Nic's framing: a public repo so anyone
 using World and Discord can attest that their bot or app is backed by a
