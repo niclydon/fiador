@@ -60,11 +60,11 @@ All responses are ephemeral.
 | --- | --- | --- |
 | `/fiador status [page]` | anyone | Six legacy claims per page, last operator checks, manual role-audit warning |
 | `/fiador setup` | Manage Guild | Set the Human-backed role ID, registry URL, sync interval, log channel |
-| `/verify-agent <application_id>` | anyone | One-off check of one application; no state change |
+| `/verify-agent <application_id>` | anyone | One-off check of one application; logs the check but changes no binding or role |
 | `/attest <url \| attestation>` | anyone | Check a presented operator attestation and log the result; never bind or change a role |
 
-Anyone may run `/attest`; it cannot grant a role. `/attest` is
-rate-limited to 5 attempts per user per guild per 10 minutes.
+Anyone may run `/attest` or `/verify-agent`; neither can grant a role.
+They share a limit of 5 checks per user per guild per 10 minutes.
 
 ## Configuration
 
@@ -96,9 +96,9 @@ DISCORD_TOKEN=… DISCORD_CLIENT_ID=… npm start --workspace=@fiador/verifier-b
 ```
 
 State lives in one SQLite file (Node's built-in `node:sqlite`): guild
-config, bindings, and an append-only `check_log` (status stored verbatim,
-prunable by age) so a self-hoster can answer "when was this operator
-claim last checked?".
+config, bindings, and a `check_log` (status stored verbatim, pruned on
+startup and daily after 90 days) so a self-hoster can answer "when was
+this operator claim last checked?".
 
 ## Safety properties
 
@@ -147,9 +147,11 @@ interface (W0 spec §3 / DESIGN §4.1):
   token, no live Discord.
 - **Application control**: no production proof provider or live Discord
   test exists. The role gate is deliberately closed.
-- **Scheduler**: one jittered interval timer drives full-guild syncs
-  using the smallest configured interval; per-binding cadence refinement
-  is future work. A full re-check runs at startup.
+- **Scheduler**: startup checks run independently across guilds, with up
+  to four guild checks in flight. Each guild's next check is scheduled
+  from its own configured interval with ±10% jitter; a local timer also
+  looks for new guilds and setup changes every 30 seconds. Per-binding
+  cadence refinement is future work.
 
 ## Pattern provenance
 
