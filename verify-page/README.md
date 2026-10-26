@@ -1,6 +1,7 @@
 # Fiador browser verification page
 
-`verify-page/` is the static hosting root. Its `/verify/` page is the browser
+`verify-page/` is the static source tree. The root `npm run build:web` command
+copies it into the Vercel `public/` output directory. Its `/verify/` page is the browser
 destination for the `/v/<short-id>` preview route. A browser opening that
 route receives `/verify/?attestation=<public URL>` and starts a fresh check;
 it never reuses the crawler's earlier verdict.
@@ -28,7 +29,8 @@ npm run build --workspace @fiador/verify-page
 
 The esbuild step bundles the shared TypeScript core and profile logic to
 `verify-page/verify/app.js`. The committed bundle makes this tree deployable
-as static files without a build step. Rebuild it after any change to the
+as static files without a build step. The root web build also copies the
+canonical registry from `registry/registry.json`. Rebuild it after any change to the
 verify core or Discord profile checks. No secret or deployment token is
 needed. The page's local banner and badge files are copies of the approved
 repository assets so the static root has no third-party asset requests.
@@ -44,4 +46,5 @@ check, and the page calls that limitation out in the result.
 Local build and tests do not establish live Discord application control,
 production hosting, real browser CORS behavior, or a current on-chain
 result. Those remain separate live checks before publishing `/v/` links as
-a complete verification flow.
+a complete verification flow. See [the web preview runbook](../docs/web-preview.md)
+for the root deployment layout and preview checks.

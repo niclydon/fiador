@@ -261,6 +261,20 @@ describe('browser click-through', () => {
     expect(res.headers.get('location')).toBe(
       `https://fiador.org/verify/?attestation=${encodeURIComponent(ATT_URL)}`,
     );
+    expect(res.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('does not cache a changing crawler verdict or its SVG card', async () => {
+    const { deps } = makeHarness();
+    const page = await handleRequest(req(`/v/${liveId}`, DISCORD_UA), deps);
+    expect(page.status).toBe(200);
+    expect(page.headers.get('cache-control')).toBe('no-store');
+    expect(await page.text()).toContain('Claim unconfirmed');
+
+    const card = await handleRequest(req(`/v/${liveId}/card.svg`, DISCORD_UA), deps);
+    expect(card.status).toBe(200);
+    expect(card.headers.get('cache-control')).toBe('no-store');
+    expect(await card.text()).toContain('Claim unconfirmed');
   });
 });
 

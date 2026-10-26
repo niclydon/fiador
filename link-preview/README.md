@@ -46,10 +46,16 @@ card without depending on dead hosting.
   never the gold **Verified** treatment.
 - **Browsers** get a 302 to the verify page with the attestation
   prefilled (`{baseUrl}/verify/?attestation=<url>`). The static page
-  is implemented in PR #10 and locally tested; it starts a fresh
+  is implemented and locally tested; it starts a fresh
   browser check at open time. Deployed click-through and browser
   CORS/RPC behavior remain to be verified before these links form
   a complete verification flow.
+- **Cache policy**: every `/v/` response, including crawler pages,
+  browser redirects, cards, and errors, uses `Cache-Control: no-store`.
+  The page and redirect share a URL but vary by User-Agent; caching
+  either response under that URL can send a browser crawler HTML.
+  Card verdicts also depend on the latest registry and verification
+  result. External platforms may still retain an unfurled snapshot.
 - **The card** is one designed SVG artifact in the Nova Glass language
   (badge states and colours matching §6.2): state artwork and word,
   the application name (signed into the attestation, else the
@@ -69,8 +75,8 @@ card without depending on dead hosting.
   a bare 404 with no meta. Any lookup failure at crawl time (registry,
   attestation host, or the check itself returning `unknown`) renders
   an explicit "could not check" card in the unverified visual family,
-  served `Cache-Control: no-store` — never a verified-looking card,
-  and never cached into looking settled. If a live registry entry
+  served under the same no-store policy — never a verified-looking
+  card, and never cached into looking settled. If a live registry entry
   cannot be fetched during resolution, the answer is "could not
   check", not "not found": the requested id might be that entry.
   A signed Discord profile mismatch renders **Not verified** with
@@ -85,7 +91,9 @@ card without depending on dead hosting.
   attestation fetcher, the verify core, canonical base URL, clock.
 - `src/resolve.ts` — short-id resolution and name selection.
 - `src/card.ts` / `src/page.ts` — the SVG card and the OG page.
-- `api/v/[id].ts`, `api/v/[id]/card.ts` — the thin Vercel adapters.
+- `api/v/[id].ts`, `api/v/[id]/card.ts` — reusable thin Vercel adapters.
+  The root deployment packages both routes through `../api/preview.ts` so
+  protected previews use the bundled registry and their own click-through URL.
 
 ## Hosting posture (§6.4, standing constraints)
 
@@ -125,15 +133,19 @@ absorbed silently.
   application-control assertion. Those require Discord integration
   before a public claim can be called verified.
 - **Click-through destination is locally implemented.** The static
-  `verify-page/` hosting root contains `/verify/`, the founding
+  `verify-page/` source tree contains `/verify/`, the founding
   attestation, and the registry. Its browser check is locally tested,
-  but deployed click-through, CORS/RPC behavior, and trusted Discord
+  and root packaging are locally tested, but deployed click-through,
+  CORS/RPC behavior, and trusted Discord
   application control remain open. Do not publish `/v/` links as a
   finished verification flow until those gates pass.
 - **Canonical domain only.** The surface ships only on fiador.org;
   a preview card served from anywhere else is not this surface
   (DESIGN §6.4). DNS/hosting for the domain follow the deploy
   decision; nothing here publishes a `/v/` link before that.
+- **Root preview packaging.** `../docs/web-preview.md` describes the
+  Vercel `public/` build, `/v/` rewrites, protected preview command, and
+  remaining live and raster-image checks.
 - **Resolution scans the registry per request.** Deliberately simple
   for v1 scale; the derived payload-hash index (§3.4) is the seam
   where caching lands if traffic ever justifies it — see the cost

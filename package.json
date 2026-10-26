@@ -7,10 +7,13 @@
   "license": "Apache-2.0",
   "name": "fiador",
   "private": true,
+  "type": "module",
   "scripts": {
     "prebuild": "npm run build --workspace=@fiador/verify",
     "build": "npm run build --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "build:web": "npm run build --workspace=@fiador/verify && npm run build --workspace=@fiador/verify-page && node scripts/build-web.mjs",
+    "test": "npm run test --workspaces --if-present && npm run test:web",
+    "test:web": "npm run build:web && node --test scripts/web.test.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "version": "0.1.0",

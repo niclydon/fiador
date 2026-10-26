@@ -4,14 +4,15 @@
 //
 // Behaviour summary:
 // - Crawlers get the OG page (meta + the dynamic card as og:image);
-//   browsers get a 302 to the planned verify page, prefilled when an
-//   attestation is known. The full click-through page remains pending.
+//   browsers get a 302 to the verify page, prefilled when an
+//   attestation is known.
 // - Verification runs at crawl time through the verify core, and only
 //   the public projection (toPublicVerifyResult) is rendered from.
 // - Fail-closed: an unknown id is a neutral "attestation not found"
 //   card with full meta (never a bare 404), and any lookup failure is
-//   an explicit "could not check" card served no-store — never a
-//   verified-looking card, never cached into looking settled.
+//   an explicit "could not check" card — never a verified-looking card.
+// - Every response is no-store: the same /v/<id> URL is an OG page for
+//   crawlers and a redirect for browsers, and card verdicts can change.
 
 import { toPublicVerifyResult } from '@fiador/verify';
 import type { FailureCode, PublicVerifyResult } from '@fiador/verify';
@@ -83,17 +84,13 @@ function parseRoute(pathname: string): Route | null {
   return { id: id.toLowerCase(), card };
 }
 
-const CACHE_STATE = 'public, max-age=300, s-maxage=300';
-const CACHE_NOT_FOUND = 'public, max-age=60, s-maxage=60';
-const CACHE_FAILURE = 'no-store';
 const REQUEST_TIMEOUT_MS = 15_000;
 
-function svgResponse(svg: string, cacheControl: string): Response {
+function svgResponse(svg: string): Response {
   return new Response(svg, {
     status: 200,
     headers: {
       'content-type': 'image/svg+xml; charset=utf-8',
-      'cache-control': cacheControl,
     },
   });
 }
@@ -112,7 +109,6 @@ interface PageContext {
 function pageResponse(
   ctx: PageContext,
   canonicalUrl: string,
-  cacheControl: string,
 ): Response {
   const html = renderOgPage({
     state: ctx.state,
@@ -127,7 +123,6 @@ function pageResponse(
     status: 200,
     headers: {
       'content-type': 'text/html; charset=utf-8',
-      'cache-control': cacheControl,
     },
   });
 }
@@ -155,7 +150,12 @@ export async function handleRequest(
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
   try {
-    return await handleRequestWithinDeadline(req, deps, abort.signal);
+    const response = await handleRequestWithinDeadline(req, deps, abort.signal);
+    // The route varies by User-Agent, and even its SVG verdict can change.
+    // Enforce this at the outer boundary so every branch, including redirects
+    // and errors, stays out of shared browser/CDN caches.
+    response.headers.set('cache-control', 'no-store');
+    return response;
   } finally {
     clearTimeout(timer);
   }
@@ -195,7 +195,6 @@ async function handleRequestWithinDeadline(
         applicationName: 'Discord application',
         checkedAt: nowIso(),
       }),
-      CACHE_FAILURE,
     );
   const failurePage = (): Response =>
     pageResponse(
@@ -208,13 +207,11 @@ async function handleRequestWithinDeadline(
         verifyUrl: bareVerifyUrl,
       },
       canonicalUrl,
-      CACHE_FAILURE,
     );
   // For state-like responses: card route -> SVG, crawler -> OG page,
   // browser -> the verify page (prefilled when an attestation is known).
   const stateResponse = (
     ctx: PageContext,
-    cacheControl: string,
     browserTarget: string,
   ): Response => {
     if (route.card) {
@@ -225,7 +222,6 @@ async function handleRequestWithinDeadline(
           checkedAt: ctx.checkedAt,
           verdict: ctx.verdict,
         }),
-        cacheControl,
       );
     }
     if (!isCrawler) {
@@ -234,7 +230,7 @@ async function handleRequestWithinDeadline(
         headers: { location: browserTarget },
       });
     }
-    return pageResponse(ctx, canonicalUrl, cacheControl);
+    return pageResponse(ctx, canonicalUrl);
   };
 
   let entries: RegistryEntry[];
@@ -275,7 +271,7 @@ async function handleRequestWithinDeadline(
         cardUrl,
         verifyUrl: bareVerifyUrl,
       };
-      return stateResponse(ctx, CACHE_NOT_FOUND, bareVerifyUrl);
+      return stateResponse(ctx, bareVerifyUrl);
     }
     case 'revoked': {
       const verifyUrl = `${bareVerifyUrl}?attestation=${encodeURIComponent(
@@ -289,7 +285,7 @@ async function handleRequestWithinDeadline(
         cardUrl,
         verifyUrl,
       };
-      return stateResponse(ctx, CACHE_STATE, verifyUrl);
+      return stateResponse(ctx, verifyUrl);
     }
     case 'live': {
       const { entry, attestation } = resolution;
@@ -297,7 +293,7 @@ async function handleRequestWithinDeadline(
         entry.attestation_url,
       )}`;
       // Browsers never wait on this crawl-time check. The destination
-      // must re-run it live once the verify page is built.
+      // re-runs it live when the page opens.
       if (!route.card && !isCrawler) {
         return new Response(null, {
           status: 302,
@@ -382,7 +378,7 @@ async function handleRequestWithinDeadline(
             ? operator
             : undefined,
       };
-      return stateResponse(ctx, CACHE_STATE, verifyUrl);
+      return stateResponse(ctx, verifyUrl);
     }
   }
 }
