@@ -1,0 +1,8 @@
+{
+  "name": "fiador-app-authority-experiment",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": { "test": "node --test" },
+  "dependencies": { "viem": "^2.38.0" }
+}
