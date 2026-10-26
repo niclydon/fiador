@@ -86,6 +86,8 @@ are Guilds + GuildMembers, with no message-content intent.
 
 ## Run
 
+Requires Node.js 22.13 or newer for the unflagged `node:sqlite` module.
+
 ```sh
 # from the repo root, once: npm install
 npm run build --workspace=@fiador/verify   # the core must be built first

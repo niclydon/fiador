@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fiador — human-backed attestation for Discord bots</title>
-<meta name="description" content="Fiador is human-backed attestation for Discord bots: a signed statement, verifiable by anyone, that a unique human backs the bot operator's wallet registration.">
+<title>Fiador — signed wallet claims about Discord bots</title>
+<meta name="description" content="Fiador lets anyone check that a human-backed wallet signed a claim naming a Discord bot. The record alone does not prove control of that bot.">
 <style>
   :root {
     --bg: #f4f5f7;
@@ -72,18 +72,17 @@
 <body>
 <main>
   <h1>Fiador</h1>
-  <p class="descriptor">human-backed attestation for Discord bots</p>
+  <p class="descriptor">signed wallet claims about Discord bots</p>
 
   <section>
-    <h2>The founding attestation</h2>
+    <h2>The founding claim</h2>
     <p>
-      Fiador's first published attestation binds the Discord
-      application <code>1561422752521396254</code> (the bot
-      <strong>Nova</strong>) to its operator's wallet registration.
-      It is a signed JSON document: anyone can fetch it and verify,
-      live, that the wallet it names is registered to a unique
-      human, that the signature is the wallet's, and that the
-      attestation has not expired.
+      Fiador's first published record is a wallet-signed claim naming
+      Discord application <code>1561422752521396254</code> (the bot
+      <strong>Nova</strong>). Anyone can fetch the JSON document and check
+      its signature, expiry, and the wallet's live AgentBook registration.
+      Those checks do not establish that the signer controls the Discord
+      application or bot.
     </p>
     <p>
       <a href="/attestations/nova.json">Read the founding attestation</a>
@@ -92,14 +91,14 @@
   </section>
 
   <section>
-    <h2>What it proves, and what it does not</h2>
+    <h2>What the check establishes</h2>
     <p>
-      A verified attestation proves a unique human backs the
-      operator's wallet registration. It does not prove who that
-      human is, that any particular message was written by a
-      human, or that the software behind the bot behaves well.
-      The attestation carries a hash of the human identifier,
-      never the identifier itself.
+      A successful check establishes that a wallet registered to a unique
+      human signed this statement. The Discord application ID and display
+      name are claims supplied by the signer; application control has not
+      been proven. The check does not identify the human, prove that a
+      human wrote a bot message, or assess the bot's behavior. The record
+      carries a hash of the human identifier, never the identifier itself.
     </p>
   </section>
 
@@ -107,10 +106,9 @@
     <h2>The registry</h2>
     <p>
       Attestations are discovered through a small public registry:
-      one entry per Discord application, pointing at the
-      attestation's canonical URL. Listing is mechanical — if an
-      attestation verifies and the entry is well-formed, it is
-      listed.
+      one entry per claimed Discord application, pointing at the
+      record's canonical URL. Listing is mechanical; it does not endorse
+      the claimed application owner or establish control of that app.
     </p>
     <p>
       <a href="/registry.json">Read the registry</a>
