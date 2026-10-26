@@ -253,7 +253,20 @@ describe('transport parity', () => {
         name: 'verify_address',
         arguments: { address: A },
       });
-      expect(httpResult.structuredContent).toEqual(memoryResult.structuredContent);
+      // Parity is over the semantic result; rpcLatencyMs is measured
+      // per call and is the one field allowed to differ.
+      const stripLatency = (value: unknown) => {
+        const clone = JSON.parse(JSON.stringify(value)) as {
+          evidence: Record<string, unknown>;
+        };
+        const latency = clone.evidence.rpcLatencyMs;
+        expect(typeof latency).toBe('number');
+        delete clone.evidence.rpcLatencyMs;
+        return clone;
+      };
+      expect(stripLatency(httpResult.structuredContent)).toEqual(
+        stripLatency(memoryResult.structuredContent),
+      );
     } finally {
       httpServer.close();
     }
