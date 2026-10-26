@@ -9,6 +9,7 @@
 
 import { pathToFileURL } from 'node:url';
 import {
+  ApplicationCommandOptionType,
   Client,
   Events,
   GatewayIntentBits,
@@ -33,7 +34,7 @@ import {
 } from './commands.js';
 import { loadConfig, type BotConfig } from './config.js';
 import type { DiscordAdapter } from './discordAdapter.js';
-import { RoleSyncEngine } from './roles.js';
+import { RoleSyncEngine, warnLegacyRoleAudit } from './roles.js';
 import { SqliteStore, type Store } from './store.js';
 import { VerifyService, type VerifierLike } from './verifyService.js';
 
@@ -53,38 +54,6 @@ class DiscordJsAdapter implements DiscordAdapter {
     return role?.members.size ?? 0;
   }
 
-  async memberHasRole(guildId: string, userId: string, roleId: string): Promise<boolean> {
-    const guild = await this.guild(guildId);
-    const member = await guild.members.fetch(userId).catch(() => null);
-    return member?.roles.cache.has(roleId) ?? false;
-  }
-
-  async grantRole(guildId: string, userId: string, roleId: string, reason: string): Promise<void> {
-    const guild = await this.guild(guildId);
-    const member = await guild.members.fetch(userId);
-    await member.roles.add(roleId, reason);
-  }
-
-  async revokeRole(guildId: string, userId: string, roleId: string, reason: string): Promise<void> {
-    const guild = await this.guild(guildId);
-    const member = await guild.members.fetch(userId);
-    await member.roles.remove(roleId, reason);
-  }
-
-  async resolveBotUserId(guildId: string, applicationId: string): Promise<string | null> {
-    const guild = await this.guild(guildId);
-    // Bot members carry their application ID on the user object via the
-    // guild's member list; application IDs are snowflakes like user IDs
-    // but NOT equal to them, so match on the member's applicationId when
-    // Discord exposes it, else fall back to a member whose user is a bot
-    // and whose ID was bound at /attest time (binding.botUserId).
-    const members = await guild.members.fetch();
-    for (const member of members.values()) {
-      if (member.user.bot && member.user.id === applicationId) return member.user.id;
-    }
-    return null;
-  }
-
   async sendLogLine(guildId: string, line: string): Promise<void> {
     const logChannelId = this.store.getGuildConfig(guildId)?.logChannelId;
     if (!logChannelId) return;
@@ -95,16 +64,21 @@ class DiscordJsAdapter implements DiscordAdapter {
   }
 }
 
-function toContext(interaction: ChatInputCommandInteraction): CommandContext {
+export function toContext(interaction: ChatInputCommandInteraction): CommandContext {
   return {
     guildId: interaction.guildId ?? '',
     userId: interaction.user.id,
     hasManageGuild:
       interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false,
     getOption: (name) => {
-      const value =
-        interaction.options.getString(name) ?? interaction.options.getInteger(name);
-      return value === null || value === undefined ? null : String(value);
+      const option = interaction.options.get(name);
+      if (option?.type === ApplicationCommandOptionType.String && typeof option.value === 'string') {
+        return option.value;
+      }
+      if (option?.type === ApplicationCommandOptionType.Integer && typeof option.value === 'number') {
+        return String(option.value);
+      }
+      return null;
     },
   };
 }
@@ -217,14 +191,15 @@ export async function main(env: Record<string, string | undefined> = process.env
   });
 
   client.once(Events.ClientReady, (ready) => {
-    // Startup log: own user ID and guild count only — never the token.
+    // Login line: own user ID and guild count only — never the token.
     console.log(
       `fiador: logged in as ${ready.user.id}, serving ${ready.guilds.cache.size} guild(s).`,
     );
-    // A restart must not leave stale grants unexamined (DESIGN §5.2):
-    // full re-check of every configured guild before settling in.
+    // Re-check legacy bindings before the scheduler starts. This records
+    // evidence and warnings, without changing guild roles.
     void (async () => {
       for (const guildId of store.listGuildIds()) {
+        await warnLegacyRoleAudit(guildId, store, adapter);
         await engine.syncGuild(guildId).catch(() => undefined);
       }
     })();

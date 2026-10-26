@@ -16,7 +16,7 @@ export interface BotConfig {
   rpcUrl: string | null;
   /** Path to the SQLite state file. */
   dbPath: string;
-  /** Default role sync interval in minutes (DESIGN §5.5 default: 6h). */
+  /** Default interval for re-checking legacy bindings, in minutes. */
   syncIntervalMinutes: number;
 }
 

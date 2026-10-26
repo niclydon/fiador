@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SqliteStore } from '../src/store.js';
+import { InMemoryStore, SqliteStore } from '../src/store.js';
 
 describe('SqliteStore (node:sqlite, in-memory database)', () => {
   it('round-trips guild config, bindings, and check log', () => {
@@ -41,5 +41,36 @@ describe('SqliteStore (node:sqlite, in-memory database)', () => {
     expect(latest?.status).toBe('unknown');
     expect(latest?.failures).toEqual(['lookup_failed']);
     store.close();
+  });
+
+  it('includes a guild with legacy claims even if it has no config row', () => {
+    const store = new SqliteStore(':memory:');
+    store.upsertBinding({
+      guildId: 'legacy-only',
+      applicationId: 'a1',
+      attestationUrl: 'https://operator.example.com/attestation.json',
+      payloadHash: null,
+      boundVia: 'url',
+      boundBy: 'u1',
+      boundAt: '2026-10-25T00:00:00.000Z',
+      botUserId: null,
+    });
+    expect(store.listGuildIds()).toContain('legacy-only');
+    store.close();
+  });
+
+  it('keeps the in-memory store guild enumeration aligned with SQLite', () => {
+    const store = new InMemoryStore();
+    store.upsertBinding({
+      guildId: 'legacy-only',
+      applicationId: 'a1',
+      attestationUrl: 'https://operator.example.com/attestation.json',
+      payloadHash: null,
+      boundVia: 'url',
+      boundBy: 'u1',
+      boundAt: '2026-10-25T00:00:00.000Z',
+      botUserId: null,
+    });
+    expect(store.listGuildIds()).toContain('legacy-only');
   });
 });

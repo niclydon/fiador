@@ -203,7 +203,7 @@ export class SqliteStore implements Store {
 
   listGuildIds(): string[] {
     const rows = this.db
-      .prepare('SELECT guild_id FROM guild_config')
+      .prepare('SELECT guild_id FROM guild_config UNION SELECT guild_id FROM binding ORDER BY guild_id')
       .all() as unknown as { guild_id: string }[];
     return rows.map((r) => r.guild_id);
   }
@@ -327,7 +327,10 @@ export class InMemoryStore implements Store {
   }
 
   listGuildIds(): string[] {
-    return [...this.configs.keys()];
+    return [...new Set([
+      ...this.configs.keys(),
+      ...[...this.bindings.values()].map((binding) => binding.guildId),
+    ])].sort();
   }
 
   getBinding(guildId: string, applicationId: string): Binding | null {

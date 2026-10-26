@@ -6,16 +6,17 @@
 
 # Fiador
 
-A Discord bot's profile tells you a name, an avatar, and nothing
-about whether anyone real stands behind it. Fiador — human-backed attestation for Discord
-bots — is an open protocol and verifier that lets a bot operator prove, in a way any
-server admin can check, that their bot is backed by one unique,
-verified human, using [World ID](https://world.org) and AgentBook
-registrations on World Chain.
+A Discord bot's profile tells you a name and an avatar, but little about
+the person who operates it. Fiador is an open protocol for checking a
+signed claim from a wallet registered by a unique, verified human using
+[World ID](https://world.org) and AgentBook on World Chain. The claim
+names a Discord application. Current Fiador code cannot prove that the
+wallet holder controls that application.
 
-It proves exactly one thing: a unique human registered the wallet
-that signed this bot's attestation. It does not prove the human
-wrote any particular message, endorses any particular output, or
+The verifier establishes that a unique human registered the wallet
+that signed the attestation. It does not prove application control.
+It also does not prove that the human wrote any particular message,
+endorses any particular output, or
 controls the bot at this moment. Those limits are part of the
 design, stated everywhere the badge appears, because a trust mark
 that overstates itself is worse than none.
@@ -29,10 +30,10 @@ that overstates itself is worse than none.
    hash of the human identifier, never the identifier itself.
 2. The attestation is published at a URL and listed in a public
    registry mapping Discord application IDs to attestation URLs.
-3. A verifier a server admin installs once (or the no-install
-   static verify page) checks the signature, checks the expiry,
-   and resolves the wallet live in AgentBook. Passing bots receive
-   the server's "Human-backed" role.
+3. The self-hosted verifier bot and static verify page check the
+   signature, expiry, and wallet registration. They display the
+   operator claim with an application-control warning. The verifier
+   bot does not grant or revoke the server's `Human-backed` role.
 
 Verification is a live check at verification time, not a permanent
 stamp: the badge assets in this repo render verified, expired, and
@@ -53,8 +54,7 @@ mark has to be able to say "no longer true."
 ## Status
 
 Founding stage, October 2026. The protocol specification is
-written ([docs/SPEC.md](docs/SPEC.md)); implementation is in
-design. What exists today:
+written ([docs/SPEC.md](docs/SPEC.md)). This repository contains:
 
 - The full protocol spec, including the verification order, the
   discovery model (registry plus install-time claim), and the
@@ -62,13 +62,17 @@ design. What exists today:
 - The badge asset set (verified / expired / unverified, pill and
   icon, light and dark) under [assets/](assets/), with a dynamic
   served-badge design so the mark can reflect a live check
+- The verify package, self-hosted Discord verifier bot, static verify
+  page, and registry source. The bot's role automation is disabled
+  pending trusted proof of Discord application control.
 - A tested AgentKit free-trial integration in a private prototype,
   verified end to end against AgentBook with a real Orb-verified
-  registration (October 25, 2026); its verification code is being
-  extracted into this repo as the verify package
+  registration (October 25, 2026).
 
-What does not exist yet: the verifier bot, the static verify page,
-and the registry. The build order is in the spec.
+These sources and local tests do not establish a live production deployment.
+Guild admins upgrading the verifier bot must manually audit existing
+`Human-backed` role holders; stored legacy claims do not prove application
+control, and the bot changes no roles.
 
 ## Design decisions already settled
 
