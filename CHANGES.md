@@ -1,5 +1,32 @@
 # Changes
 
+## 2026-10-26: verify core and verify MCP implemented (W0)
+
+- Decision (Oct 26, 2026): no project-run public HTTP instance
+  of the verify MCP in v1 (W0 spec 11.9 M1, decided by Nic).
+  Discovery is via the MCP registry listings; the HTTP transport
+  ships for self-hosters only.
+
+- `packages/verify-ts` (`@fiador/verify` 0.1.0): the verify core
+  per the W0 spec — `verifyAddress`, `verifyAttestation`,
+  `resolveStatus`, the internal/public result split with
+  `toPublicVerifyResult` as the only public crossing, the
+  canonical attestation signing form and canonical `humanHash`,
+  and a direct viem AgentBook reader that keeps RPC failure
+  (`unknown`) distinct from non-registration (`unregistered`);
+  the AgentKit SDK 0.2.1 verifier collapses the two, so the core
+  does not wrap it. Deterministic synthetic fixtures and a
+  32-test failure-case suite.
+- `packages/verify-mcp` (`@fiador/verify-mcp` 0.1.0): the
+  section 11 MCP server — `verify_address`, `verify_attestation`
+  (with the per-check breakdown), `badge_status` (listed only
+  when a resolver is configured; badge URLs only when a badge
+  base is configured, per the open M2 default). stdio and
+  stateless streamable HTTP transports, parity-tested.
+- Live verification recorded in `docs/verification.md`: the
+  program wallet verifies against the real AgentBook contract,
+  through the library and through both MCP transports.
+
 ## 2026-10-25: renamed to Fiador; build design lands
 
 - Project renamed human-backed -> Fiador (the guarantor who
