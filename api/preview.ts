@@ -24,7 +24,10 @@ export async function handlePreviewRequest(
   const id = incoming.searchParams.get('fiador_id');
   const card = incoming.searchParams.get('fiador_card') === '1';
   if (!id || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
-    return new Response('not found', { status: 404 });
+    return new Response('not found', {
+      status: 404,
+      headers: { 'cache-control': 'no-store' },
+    });
   }
 
   const origin = baseUrl();

@@ -21,6 +21,11 @@ stays on that preview. In production the base URL defaults to
 system variable and fails if it is absent. Preview cards are staging evidence,
 not canonical Fiador links to publish.
 
+Every `/v/` response has `Cache-Control: no-store`. The same `/v/:id`
+URL returns Open Graph HTML for crawlers and a redirect for browsers; a
+shared cache of the crawler response can otherwise break click-through.
+SVG cards are also no-store because their verification verdicts can change.
+
 ## Local verification
 
 From the repository root:
@@ -63,8 +68,10 @@ npx --yes vercel@latest curl /v/aaaaaaaaaa/card.svg --deployment "$fiador_previe
 
 Inspect the `/v/` route both with a browser and a crawler user agent. The
 browser should reach `/verify/` on the same preview; the crawler should get
-Open Graph metadata and an SVG card. A live result can still be **Could not
-check** if the canonical attestation host or World Chain RPC is unavailable.
+Open Graph metadata and an SVG card. Check `Cache-Control: no-store` and
+repeat the browser request after the crawler request to detect a CDN cache
+collision. A live result can still be **Could not check** if the canonical
+attestation host or World Chain RPC is unavailable.
 Treat that as a failed live proof, not a deployment success.
 
 Before public `/v/` links or domain promotion, verify browser CORS and RPC

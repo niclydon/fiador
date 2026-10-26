@@ -66,12 +66,45 @@ describe('root Vercel preview adapter', () => {
     expect(await card.text()).toContain('Could not check');
   });
 
+  it('keeps crawler HTML and browser redirects at the same URL out of shared caches', async () => {
+    vi.stubEnv('VERCEL_ENV', 'preview');
+    vi.stubEnv('VERCEL_URL', 'fiador-preview.example.vercel.app');
+    const url = 'https://fiador-preview.example.vercel.app/api/preview?fiador_id=bbbbbbbbbb';
+
+    const crawler = await handlePreviewRequest(
+      new Request(url, { headers: { 'user-agent': 'Discordbot/2.0' } }),
+      deps(),
+    );
+    expect(crawler.status).toBe(200);
+    expect(crawler.headers.get('content-type')).toContain('text/html');
+    expect(crawler.headers.get('cache-control')).toBe('no-store');
+    expect(await crawler.text()).toContain('Attestation not found');
+
+    const browser = await handlePreviewRequest(
+      new Request(url, { headers: { 'user-agent': 'Mozilla/5.0' } }),
+      deps(),
+    );
+    expect(browser.status).toBe(302);
+    expect(browser.headers.get('location')).toBe('https://fiador-preview.example.vercel.app/verify/');
+    expect(browser.headers.get('cache-control')).toBe('no-store');
+
+    const card = await handlePreviewRequest(
+      new Request(`${url}&fiador_card=1`),
+      deps(),
+    );
+    expect(card.status).toBe(200);
+    expect(card.headers.get('content-type')).toContain('image/svg+xml');
+    expect(card.headers.get('cache-control')).toBe('no-store');
+    expect(await card.text()).toContain('Attestation not found');
+  });
+
   it('rejects an invalid route id before loading dependencies', async () => {
     const response = await handlePreviewRequest(
       new Request('https://example.invalid/api/preview?fiador_id=invalid%2Fpath'),
       deps(),
     );
     expect(response.status).toBe(404);
+    expect(response.headers.get('cache-control')).toBe('no-store');
   });
 
   it('fails rather than redirecting a preview visitor to production without its URL', async () => {

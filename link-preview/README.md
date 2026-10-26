@@ -50,6 +50,12 @@ card without depending on dead hosting.
   browser check at open time. Deployed click-through and browser
   CORS/RPC behavior remain to be verified before these links form
   a complete verification flow.
+- **Cache policy**: every `/v/` response, including crawler pages,
+  browser redirects, cards, and errors, uses `Cache-Control: no-store`.
+  The page and redirect share a URL but vary by User-Agent; caching
+  either response under that URL can send a browser crawler HTML.
+  Card verdicts also depend on the latest registry and verification
+  result. External platforms may still retain an unfurled snapshot.
 - **The card** is one designed SVG artifact in the Nova Glass language
   (badge states and colours matching §6.2): state artwork and word,
   the application name (signed into the attestation, else the
@@ -69,8 +75,8 @@ card without depending on dead hosting.
   a bare 404 with no meta. Any lookup failure at crawl time (registry,
   attestation host, or the check itself returning `unknown`) renders
   an explicit "could not check" card in the unverified visual family,
-  served `Cache-Control: no-store` — never a verified-looking card,
-  and never cached into looking settled. If a live registry entry
+  served under the same no-store policy — never a verified-looking
+  card, and never cached into looking settled. If a live registry entry
   cannot be fetched during resolution, the answer is "could not
   check", not "not found": the requested id might be that entry.
   A signed Discord profile mismatch renders **Not verified** with
