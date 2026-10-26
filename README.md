@@ -8,15 +8,18 @@
 
 A Discord bot's profile tells you a name, an avatar, and nothing
 about whether anyone real stands behind it. Fiador — human-backed attestation for Discord
-bots — is an open protocol and verifier that lets a bot operator prove, in a way any
-server admin can check, that their bot is backed by one unique,
-verified human, using [World ID](https://world.org) and AgentBook
-registrations on World Chain.
+bots — is an open protocol and verifier intended to let an operator
+prove that a bot is backed by one unique, verified human, using
+[World ID](https://world.org) and AgentBook registrations on World Chain.
+The current preview can verify the wallet's signed claim and live
+registration, but it has no trusted proof that the wallet holder
+controls the named Discord application.
 
-It proves exactly one thing: a unique human registered the wallet
-that signed this bot's attestation. It does not prove the human
-wrote any particular message, endorses any particular output, or
-controls the bot at this moment. Those limits are part of the
+The current cryptographic check proves that a unique human registered
+the wallet that signed a claim naming a Discord application. It does
+not prove the signer controls that application, that the human wrote
+any particular message, endorses any particular output, or controls
+the bot at this moment. Those limits are part of the
 design, stated everywhere the badge appears, because a trust mark
 that overstates itself is worse than none.
 
@@ -29,10 +32,9 @@ that overstates itself is worse than none.
    hash of the human identifier, never the identifier itself.
 2. The attestation is published at a URL and listed in a public
    registry mapping Discord application IDs to attestation URLs.
-3. A verifier a server admin installs once (or the no-install
-   static verify page) checks the signature, checks the expiry,
-   and resolves the wallet live in AgentBook. Passing bots receive
-   the server's "Human-backed" role.
+3. A self-hosted verifier checks the signature, checks the expiry,
+   and resolves the wallet live in AgentBook. A full no-install
+   verify page and a trusted application-control check are planned.
 
 Verification is a live check at verification time, not a permanent
 stamp: the badge assets in this repo render verified, expired, and
@@ -47,28 +49,35 @@ mark has to be able to say "no longer true."
   which is the one correlation the system intends to allow.
 - An optional operator display name exists for operators who want
   to be named. It is off by default and never required.
-- Nothing in this repo contains keys, tokens, or personal data.
-  Demo material uses synthetic identifiers only.
+- No private keys, tokens, or raw humanIds belong in this repo. The
+  published founding attestation necessarily includes its signing
+  wallet address; test fixtures use synthetic identifiers.
 
 ## Status
 
-Founding stage, October 2026. The protocol specification is
-written ([docs/SPEC.md](docs/SPEC.md)); implementation is in
-design. What exists today:
+Founding build, October 2026:
 
-- The full protocol spec, including the verification order, the
-  discovery model (registry plus install-time claim), and the
-  honest limits of the proof
-- The badge asset set (verified / expired / unverified, pill and
-  icon, light and dark) under [assets/](assets/), with a dynamic
-  served-badge design so the mark can reflect a live check
-- A tested AgentKit free-trial integration in a private prototype,
-  verified end to end against AgentBook with a real Orb-verified
-  registration (October 25, 2026); its verification code is being
-  extracted into this repo as the verify package
-
-What does not exist yet: the verifier bot, the static verify page,
-and the registry. The build order is in the spec.
+- [The protocol spec](docs/SPEC.md), design, and badge
+  assets are present. The TypeScript verify core and read-only MCP
+  package are implemented and tested; [live verification evidence](docs/verification.md)
+  records the core's AgentBook check and both MCP transports.
+- The reference signer, founding attestation, and first registry entry
+  are built. The registry's repo source is
+  [registry/registry.json](registry/registry.json), mirrored in the
+  static hosting root as `/registry.json`.
+- The self-hosted verifier bot has commands, local state, role sync,
+  and guarded attestation fetching. Its tests use fakes; a complete
+  live Discord guild run of this Fiador bot has not been verified.
+  Its application-control gate also remains to be established before
+  role grants can be treated as proof about a named bot.
+- The `/v/<short-id>` preview handler and cards are implemented and
+  locally tested. Core-valid claims render **Claim unconfirmed**;
+  malformed Discord profile claims render **Not verified**. The
+  current `verify-page/` is a static front door
+  serving the attestation and registry. The full interactive verify
+  page, served badge, and a live preview click-through remain to be
+  built and verified. The SVG Open Graph image also needs a raster
+  fallback for platforms that do not display SVG previews.
 
 ## Design decisions already settled
 

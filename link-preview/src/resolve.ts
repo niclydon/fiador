@@ -7,6 +7,7 @@
 // id at the requested length (prefix extension), minimum 10.
 
 import { attestationShortId } from './shortId.js';
+import { withAbort } from './deadline.js';
 import type { SignedAttestation } from '@fiador/verify';
 import type { RegistryEntry } from './registry.js';
 import { isTombstone } from './registry.js';
@@ -77,47 +78,84 @@ export type Resolution =
   | { kind: 'not_found' }
   | { kind: 'lookup_failed'; reason: string };
 
+const MAX_CONCURRENT_FETCHES = 4;
+
 /**
  * Resolve a short-id against the registry.
  *
  * Order matters: tombstones are matched first, without any fetch, so a
  * revoked entry's card never depends on its old hosting still answering.
- * Live entries are matched by fetching each attestation (through the
- * injected, guarded fetcher) and computing its id at the requested
- * length. Fail-closed: if any live entry cannot be fetched or parsed
+ * Live entries are scanned with at most four guarded fetches in flight.
+ * A match cancels the other fetches, so two stalled hosts cannot hide
+ * a later healthy match. Fail-closed: if any live entry cannot be fetched or parsed
  * and nothing matched, the answer is lookup_failed, not not_found —
  * the requested id might be exactly the entry that could not be read.
  */
 export async function resolveShortId(
   entries: RegistryEntry[],
   id: string,
-  attestationFetcher: (url: string) => Promise<unknown>,
+  attestationFetcher: (url: string, signal?: AbortSignal) => Promise<unknown>,
+  signal?: AbortSignal,
 ): Promise<Resolution> {
+  if (!/^[a-z2-7]{10,52}$/.test(id)) return { kind: 'not_found' };
+
   for (const entry of entries) {
     if (isTombstone(entry) && tombstoneMatches(entry, id)) {
       return { kind: 'revoked', entry };
     }
   }
 
+  const liveEntries = entries.filter((entry) => !isTombstone(entry));
+  const cancel = new AbortController();
+  const onDeadline = () => cancel.abort();
+  if (signal?.aborted) cancel.abort();
+  else signal?.addEventListener('abort', onDeadline, { once: true });
+  let nextIndex = 0;
   let sawFetchFailure = false;
-  for (const entry of entries) {
-    if (isTombstone(entry)) continue;
-    let fetched: unknown;
-    try {
-      fetched = await attestationFetcher(entry.attestation_url);
-    } catch {
-      sawFetchFailure = true;
-      continue;
+  let match: Extract<Resolution, { kind: 'live' }> | undefined;
+
+  const worker = async (): Promise<void> => {
+    while (!cancel.signal.aborted && !match) {
+      const entry = liveEntries[nextIndex++];
+      if (!entry) return;
+      let fetched: unknown;
+      try {
+        fetched = await withAbort(
+          () => attestationFetcher(entry.attestation_url, cancel.signal),
+          cancel.signal,
+        );
+      } catch {
+        if (!cancel.signal.aborted) sawFetchFailure = true;
+        continue;
+      }
+      if (!isPlausibleAttestation(fetched)) {
+        sawFetchFailure = true;
+        continue;
+      }
+      try {
+        if (attestationShortId(fetched, id.length) === id) {
+          match = { kind: 'live', entry, attestation: fetched };
+          cancel.abort();
+          return;
+        }
+      } catch {
+        sawFetchFailure = true;
+      }
     }
-    if (!isPlausibleAttestation(fetched)) {
-      sawFetchFailure = true;
-      continue;
-    }
-    if (attestationShortId(fetched, id.length) === id) {
-      return { kind: 'live', entry, attestation: fetched };
-    }
+  };
+
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_CONCURRENT_FETCHES, liveEntries.length) }, worker),
+    );
+  } finally {
+    signal?.removeEventListener('abort', onDeadline);
   }
 
+  if (signal?.aborted) {
+    return { kind: 'lookup_failed', reason: 'registry scan timed out' };
+  }
+  if (match) return match;
   if (sawFetchFailure) {
     return {
       kind: 'lookup_failed',
@@ -137,8 +175,8 @@ export function applicationNameFor(
   attestation?: SignedAttestation,
 ): string {
   const signed = attestation?.payload.extra?.discord_application_name;
-  if (signed && signed.trim().length > 0) return signed;
-  if (entry.name && entry.name.trim().length > 0) return entry.name;
+  if (typeof signed === 'string' && signed.trim().length > 0) return signed;
+  if (typeof entry.name === 'string' && entry.name.trim().length > 0) return entry.name;
   const appId = entry.discord_application_id;
   return appId.length > 14 ? `${appId.slice(0, 14)}…` : appId;
 }

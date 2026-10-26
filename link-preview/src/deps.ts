@@ -15,10 +15,19 @@ export interface LinkPreviewDeps {
    * (HTTPS only, public addresses only, no redirects, timeout, body
    * cap) — the same fetcher family as the badge service (W0 spec §4.7).
    */
-  attestationFetcher: (url: string) => Promise<unknown>;
+  attestationFetcher: (url: string, signal?: AbortSignal) => Promise<unknown>;
   /** The verify core. Its results cross to this surface only through
    *  toPublicVerifyResult — never as the internal shape. */
   verifier: Verifier;
+  /**
+   * Optional independent Discord lookup for the application bot user.
+   * The value must come from Discord, not the attestation or registry.
+   * Matching IDs are a profile cross-check, not application-control proof.
+   */
+  discordBotUserIdForApplication?: (
+    applicationId: string,
+    signal?: AbortSignal,
+  ) => Promise<string | null>;
   /** Canonical base, e.g. 'https://fiador.org' (no trailing slash). */
   baseUrl: string;
   /** Injectable clock for deterministic cards and tests. */

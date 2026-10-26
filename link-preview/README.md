@@ -17,7 +17,8 @@ attestation's canonical signing bytes. Any change to the payload
 changes the id, so a link names one exact attestation, not a slot
 whose contents can be swapped. Resolution needs no accounts and no
 database: the handler matches the id against the published registry
-(§3.4), fetching each live entry's attestation and computing its id,
+(§3.4), fetching live entries with at most four requests in flight
+and computing each id,
 with tombstones (entries marked `"status": "revoked"`) matched from
 their recorded payload hash so old links render an honest revoked
 card without depending on dead hosting.
@@ -27,14 +28,26 @@ card without depending on dead hosting.
 - **Crawlers** (Discordbot, Twitterbot, Slackbot, facebookexternalhit,
   and a documented heuristic list in `src/handler.ts`) get an OG page:
   meta plus a dynamically rendered 1200×630 card as `og:image`. The
-  verdict is computed at crawl time — the handler resolves the
-  attestation and runs the same verify core as the verify page
-  (`resolveStatus`, rendered only through `toPublicVerifyResult`).
-  There is no second implementation of the checks here.
+  handler runs `verifyAttestation` with the registry application as
+  the expected subject, then checks the signed Discord profile:
+  hash-only disclosure, an allowlist of Discord-specific signed fields,
+  the required lowercase human hash (against the live core result for
+  current attestations), the signed URL against the fetched URL, and
+  a valid bot user ID. Expired claims receive the same profile-shape
+  checks before an **Expired** card appears. An optional independent Discord lookup
+  can reject a reported bot user ID mismatch. Core results cross to
+  this surface only through `toPublicVerifyResult`.
+- **Application control remains unproven.** Neither a signed claim
+  naming a public Discord application nor a registry entry proves
+  that the wallet holder controls that application. Even a matching
+  Discord-reported bot user ID does not establish that relationship.
+  Until a trusted control assertion exists, a core-valid and
+  profile-valid claim renders a neutral **Claim unconfirmed** card,
+  never the gold **Verified** treatment.
 - **Browsers** get a 302 to the verify page with the attestation
-  prefilled (`{baseUrl}/verify/?attestation=<url>`); the page re-runs
-  all checks client-side at open time. Same verdict, two readers —
-  the standard link-preview arrangement, not cloaking.
+  prefilled (`{baseUrl}/verify/?attestation=<url>`). The full page is
+  pending; it must re-run all checks at open time before these links
+  form a complete verification flow.
 - **The card** is one designed SVG artifact in the Nova Glass language
   (badge states and colours matching §6.2): state artwork and word,
   the application name (signed into the attestation, else the
@@ -46,9 +59,9 @@ card without depending on dead hosting.
   crawl time, not the proof. Platform preview caches mean a later
   expiry or revocation may never refresh a preview already posted,
   and a lookalike domain can imitate a card pixel for pixel. The
-  verification is the click-through check on the canonical domain,
-  run live at open time. The caveat travels in the meta description
-  and on the destination page, not only in the design doc.
+  current verification requires a live click-through check on the
+  canonical domain. The caveat travels in the meta description,
+  not only in the design doc.
 - **Failure states, fail-closed**: an unknown id renders a neutral
   "attestation not found" card with full OG meta at HTTP 200 — never
   a bare 404 with no meta. Any lookup failure at crawl time (registry,
@@ -58,6 +71,9 @@ card without depending on dead hosting.
   and never cached into looking settled. If a live registry entry
   cannot be fetched during resolution, the answer is "could not
   check", not "not found": the requested id might be that entry.
+  A signed Discord profile mismatch renders **Not verified** with
+  the reason in words. A failed independent Discord lookup renders
+  **Could not check** with `no-store`.
 
 ## Shape
 
@@ -89,14 +105,28 @@ absorbed silently.
   A rasterisation adapter (e.g. resvg) that renders the same card to
   PNG at the edge is a deploy-time TODO; the card renderer is pure
   string generation precisely so that adapter has one input to wrap.
-- **Default deps fail closed.** `createDefaultDeps()` wires a plain
-  HTTPS registry/attestation fetch and a verifier that reports
-  `unknown` for everything until the caller passes a real verifier
-  (`createVerifier()` from `@fiador/verify` with a live AgentBook
-  reader). Before this surface is public, the plain attestation fetch
-  must be swapped for the §5.4 fetch-guard machinery (HTTPS only,
-  public-address pinning, no redirects, 5 s timeout, 64 KiB cap) —
-  the same fetcher family as the badge service (W0 spec §4.7).
+- **Default deps use the live core.** `createDefaultDeps()` loads the
+  published `/registry.json`, uses `createVerifier()` with its live
+  AgentBook reader, and guards attestation URLs with HTTPS-only fetch,
+  public-address DNS validation and connect-time pinning, no redirects,
+  a 5 s timeout, and a 64 KiB body cap (§5.4). `FIADOR_REGISTRY_URL`,
+  `FIADOR_RPC_URL`, and `FIADOR_BASE_URL` can override the defaults.
+  The registry fetch also refuses redirects and is bounded to 5 s and
+  64 KiB. The complete preview request has a 15 s budget, including
+  registry resolution, the core verifier, and an optional Discord bot-ID
+  lookup. A successful match cancels other active guarded fetches;
+  a timed-out request returns a no-store "could not check" response.
+  A signature RPC already started by the core may continue afterward:
+  the core's ERC-1271 read has no abort channel. Registry, DNS,
+  attestation host, and RPC failures render the same failure state. The default
+  wiring has no independent Discord bot-ID lookup or trusted
+  application-control assertion. Those require Discord integration
+  before a public claim can be called verified.
+- **Click-through destination is pending.** The static
+  `verify-page/` hosting root serves the founding attestation and
+  registry; it does not yet contain the full interactive `/verify/`
+  page that a browser redirect requires. Do not publish `/v/` links
+  as a finished verification flow until that page is built and tested.
 - **Canonical domain only.** The surface ships only on fiador.org;
   a preview card served from anywhere else is not this surface
   (DESIGN §6.4). DNS/hosting for the domain follow the deploy
@@ -109,11 +139,12 @@ absorbed silently.
 ## Tests
 
 ```
-npm test        # vitest, fakes only — no network, no chain
+npm test        # vitest fakes plus an ephemeral local HTTPS socket; no external network or chain
 npm run typecheck
 ```
 
-Fixtures use synthetic identifiers only, and the suite deep-scans
+The socket test generates a disposable self-signed certificate with
+OpenSSL. Fixtures use synthetic identifiers only, and the suite deep-scans
 response bodies to prove neither the fixture full humanId (which
 exists only inside the internal verify result) nor the full wallet
 address ever reaches this surface's output.

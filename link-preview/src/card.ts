@@ -9,6 +9,7 @@
 
 export type CardState =
   | 'verified'
+  | 'claim_unconfirmed'
   | 'expired'
   | 'unverified'
   | 'revoked'
@@ -32,6 +33,7 @@ export const TOKENS = {
 
 export const STATE_WORD: Record<CardState, string> = {
   verified: 'Verified',
+  claim_unconfirmed: 'Claim unconfirmed',
   expired: 'Expired',
   unverified: 'Not verified',
   revoked: 'Revoked',
@@ -41,6 +43,8 @@ export const STATE_WORD: Record<CardState, string> = {
 
 export const DEFAULT_VERDICT: Record<CardState, string> = {
   verified: 'Verified: a unique human backs this Discord application.',
+  claim_unconfirmed:
+    'Wallet signature and AgentBook registration passed; Discord application control is not established.',
   expired: 'This attestation has expired and no longer verifies.',
   unverified: 'This attestation does not currently verify.',
   revoked: 'This attestation has been revoked by its operator.',
