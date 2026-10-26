@@ -35,13 +35,14 @@ import {
   type ReplyPayload,
 } from './commands.js';
 import { AppControlService, createWalletSignatureVerifier } from './appControl.js';
-import { loadConfig, type BotConfig } from './config.js';
+import { loadConfig } from './config.js';
 import type { DiscordAdapter } from './discordAdapter.js';
+import { scheduleGuildSync, startCheckLogPruning, startControlChallengePruning } from './maintenance.js';
 import { RoleSyncEngine, warnLegacyRoleAudit } from './roles.js';
 import { SqliteStore, type Store } from './store.js';
 import { VerifyService, type VerifierLike } from './verifyService.js';
 
-class DiscordJsAdapter implements DiscordAdapter {
+export class DiscordJsAdapter implements DiscordAdapter {
   constructor(
     private readonly client: Client,
     private readonly store: Store,
@@ -51,7 +52,7 @@ class DiscordJsAdapter implements DiscordAdapter {
     const logChannelId = this.store.getGuildConfig(guildId)?.logChannelId;
     if (!logChannelId) return;
     const channel = await this.client.channels.fetch(logChannelId).catch(() => null);
-    if (channel && channel.isTextBased()) {
+    if (channel && 'guildId' in channel && channel.guildId === guildId && channel.isTextBased()) {
       await (channel as TextChannel).send(line).catch(() => undefined);
     }
   }
@@ -121,51 +122,11 @@ async function dispatch(interaction: ChatInputCommandInteraction, deps: CommandD
   else await interaction.reply({ ...response, ephemeral: reply.ephemeral });
 }
 
-/**
- * Recurring full sync with ±10% jitter (DESIGN §5.5). Each guild uses
- * its own configured interval when set; the timer is unref'd so it never
- * keeps a dying process alive.
- */
-function scheduleSync(
-  config: BotConfig,
-  store: Store,
-  engine: RoleSyncEngine,
-): NodeJS.Timeout[] {
-  const timers: NodeJS.Timeout[] = [];
-  const tick = async () => {
-    store.pruneControlChallenges(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
-    for (const guildId of store.listGuildIds()) {
-      await engine.syncGuild(guildId).catch((err: unknown) => {
-        console.error(
-          `fiador: sync failed for guild ${guildId}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
-    }
-  };
-  const intervalMinutes =
-    store.listGuildIds().length > 0
-      ? Math.min(
-          ...store
-            .listGuildIds()
-            .map((id) => store.getGuildConfig(id)?.syncIntervalMinutes ?? config.syncIntervalMinutes),
-        )
-      : config.syncIntervalMinutes;
-  const baseMs = intervalMinutes * 60 * 1000;
-  const arm = () => {
-    const jitter = baseMs * 0.1 * (Math.random() * 2 - 1);
-    const timer = setTimeout(() => {
-      void tick().finally(arm);
-    }, Math.max(30_000, baseMs + jitter));
-    timer.unref();
-    timers.push(timer);
-  };
-  arm();
-  return timers;
-}
-
 export async function main(env: Record<string, string | undefined> = process.env): Promise<void> {
   const config = loadConfig(env);
   const store = new SqliteStore(config.dbPath);
+  startCheckLogPruning(store);
+  startControlChallengePruning(store);
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
   });
@@ -219,16 +180,14 @@ export async function main(env: Record<string, string | undefined> = process.env
     console.log(
       `fiador: logged in as ${ready.user.id}, serving ${ready.guilds.cache.size} guild(s).`,
     );
-    store.pruneControlChallenges(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
-    // Re-check legacy bindings before the scheduler starts. This records
-    // evidence and warnings, without changing guild roles.
-    void (async () => {
-      for (const guildId of store.listGuildIds()) {
-        await warnLegacyRoleAudit(guildId, store, adapter);
-        await engine.syncGuild(guildId).catch(() => undefined);
-      }
-    })();
-    scheduleSync(config, store, engine);
+    // Each guild receives its audit warning before its first check. A slow
+    // legacy check does not hold up startup checks for other guilds.
+    scheduleGuildSync(
+      store,
+      engine,
+      config.syncIntervalMinutes,
+      (guildId) => warnLegacyRoleAudit(guildId, store, adapter),
+    );
   });
 
   await client.login(config.token);

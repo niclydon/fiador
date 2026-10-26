@@ -1,5 +1,24 @@
 # Changes
 
+## 2026-10-26: verifier bot safety and maintenance
+
+- The bot checks and logs operator claims without creating a new
+  binding or changing a Discord role. A valid wallet signature alone
+  does not establish control of the named application. This corrects
+  the role-sync description in the first-build entry below.
+- Audit delivery now checks that the configured log channel belongs
+  to the originating guild. A channel from another guild or a DM
+  cannot receive that guild's check line.
+- `/attest` and `/verify-agent` share a five-check budget per user,
+  guild, and ten-minute window. The bot prunes check-log rows older
+  than 90 days at startup and daily. Periodic checks run on each
+  guild's own schedule, with jitter and a four-guild concurrency cap.
+- The exact bot maintenance head passed local build, typecheck, and
+  51 bot tests. GitHub CI passed on Node 22 and 24; independent
+  correctness and security reviews found no blockers. No live
+  multi-guild Discord run or application-control proof is claimed.
+  See docs/narrative/2026-10-26-bot-safety.md.
+
 ## 2026-10-26: founding attestation published (§9 step 1)
 
 - registry/: the first entry — Discord application

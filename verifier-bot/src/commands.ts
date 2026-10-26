@@ -59,7 +59,7 @@ export interface CommandDeps {
   appControl?: AppControlService;
 }
 
-/** /attest rate limit (DESIGN §5.4): 5 attempts / user / guild / 10 min. */
+/** Shared /attest and /verify-agent limit: 5 checks / user / guild / 10 min. */
 export class AttemptRateLimiter {
   private readonly attempts = new Map<string, number[]>();
 
@@ -299,6 +299,9 @@ export async function handleVerifyAgent(
   if (!applicationId) {
     return ephemeral('Provide an `application_id` to check.');
   }
+  if (!deps.rateLimiter.tryAcquire(`${ctx.guildId}:${ctx.userId}`)) {
+    return ephemeral('Too many checks — try again in a few minutes.');
+  }
   const outcome = await deps.service.checkApplication(ctx.guildId, applicationId);
   return {
     ephemeral: true,
@@ -317,7 +320,7 @@ export async function handleAttest(
   deps: CommandDeps,
 ): Promise<ReplyPayload> {
   if (!deps.rateLimiter.tryAcquire(`${ctx.guildId}:${ctx.userId}`)) {
-    return ephemeral('Too many /attest attempts — try again in a few minutes.');
+    return ephemeral('Too many checks — try again in a few minutes.');
   }
 
   const url = ctx.getOption('url');

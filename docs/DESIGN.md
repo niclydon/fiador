@@ -3,6 +3,17 @@
 Status: DESIGN, 2026-10-25; revised the same day for the
 first-repo decision, the settled queue decisions, the repo's
 creation, and its rename to Fiador (all Oct 25, 2026).
+Implementation reconciliation, 2026-10-26: the verifier bot on
+`main` checks and logs operator attestations but never binds a new
+application or grants or revokes a Discord role. Draft PR #16 adds
+a limited wallet-signature and bot-response witness; it does not
+prove application-operator authority or change that role gate.
+Nova's founding attestation is signed and published, and
+`fiador.org` serves the site, registry, and attestation. The
+production `/verify/` and `/v/` routes remain unshipped; see
+`docs/verification.md` for the dated publication evidence.
+Sections 3.5, 4.6, 5, and 9 below distinguish the current behavior
+from a future, separately reviewed application-control protocol.
 Workstream W1 of the World Program.
 Governing doc: `~/workspace/world-program/PORTFOLIO.md`
 Source spec: `~/workspace/world-discord-attest/SPEC.md` (approved in shape, Nic, Oct 25, 2026)
@@ -63,25 +74,39 @@ AgentBook registration the same evening (live check: `registered:
 true`, superseding `registered: false` at Oct 24 23:45 ET), and the
 playground acceptance pass ran (granted on the free-trial calls,
 denied 402 once the trial exhausted, `agentkit_status` and
-`agentkit_self_test` passing). Public-facing copies of any of this
-use truncated identifiers only, per the portfolio boundary in §10.
-The full wallet address and humanId stay in the private estate
-record, never in this design's public-repo descendants.
+`agentkit_self_test` passing). Public narrative copies describe
+these checks by wallet role and dated status, without address or
+human-hash fragments (§10).
+Fiador's own records keep the raw humanId private; AgentBook's
+underlying registration is public on-chain (§3.3). The signed
+public attestation necessarily contains the dedicated program
+wallet's full address; public narrative evidence uses a label
+instead of repeating its address or hash fragments.
 
 ## 1. What this proves, and what it does not
 
 Printed in the README in these words, not buried. Copied from the
 spec's honest-limits section; the design adds no stronger claim.
 
-- Proves: a unique human backs the operator's wallet registration
-  in AgentBook on World Chain.
+- Proves: a unique human registered the signing wallet in AgentBook
+  on World Chain, and that wallet signed a claim naming a Discord
+  application and bot user.
 - Does not prove: the human wrote, read, or approved any given bot
   message; the bot's current runtime is the code the operator
-  claims; or who the human is. World ID is anonymous by design:
+  claims; that the signer controls the named Discord application
+  or bot; or who the human is. World ID is anonymous by design:
   the proof says "a unique human", never who.
+- AgentBook registrations are public on World Chain. A disclosed
+  wallet or Fiador's published human hash can be matched to the
+  pseudonymous identifier and other wallets registered to it.
+  Fiador's public results
+  omit the raw identifier, but an explicit private internal-result
+  option exists (§4). Neither can make the chain data private.
 - Freshness: registration is checked live at verification time,
-  but a granted Discord role is only as fresh as the verifier's
-  last sync. Every surface that reports a result — library return,
+  but Fiador does not currently certify or update a guild role.
+  Guild admins must review any existing Human-backed role holders
+  against independent application-control evidence. Every surface
+  that reports a result — library return,
   bot embed, verify page, served badge — carries `checkedAt`.
   The link preview (§6.4) is the weakest surface by construction:
   its card is a crawl-time snapshot inside a platform cache the
@@ -92,6 +117,11 @@ spec's honest-limits section; the design adds no stronger claim.
   attestation authenticates the operator's claim about an
   application ID, not the running process. Expiry (§3) bounds this,
   it does not eliminate it.
+- A wallet holder may sign a valid claim naming someone else's
+  application. A matching application ID, bot user ID, registry
+  entry, or response from a bot that echoes user input does not
+  establish that the signer has authority over that application.
+  No such claim can trigger an automatic role change (§5).
 
 Threat model, short form (full version lands in the repo as
 `docs/threat-model.md`, reviewed per portfolio quality bar 5):
@@ -151,7 +181,7 @@ wallet key --signs--> attestation JSON --published at--> attestation_url
                                                                | fetch + verify
 Discord application ID ----------------------------------------+---- verify package (TS / Python)
                                                                |---- static verify page (browser)
-Guild guild + verifier bot --- /attest, /verify-agent --------+---- role grant / revoke + sync loop
+Guild + verifier bot -------- /attest, /verify-agent ---------+---- claim check + log; no role writes
                                                                |
 World Chain (eip155:480)                                       |
   AgentBook 0xA23a...44dA -- lookupHuman(wallet) -------------+  live read at every verify
@@ -162,9 +192,10 @@ party's code:
 
 - Operator attests and publishes. Near-zero change to their bot.
 - Verifier checks: signature, expiry, live AgentBook read.
-- Guild enforces: runs its own verifier instance (§5,
+- Guild decides: runs its own verifier instance (§5,
   self-host, decided), owns the "Human-backed" role and its
-  policy. The guild never reviews operator code.
+  policy, and manually audits role holders. The guild never
+  treats a checked operator claim as application-control proof.
 
 Components built by this workstream:
 
@@ -302,7 +333,7 @@ the attestation to say so. Semantics:
   presents it as optional in those words.
 - Nic's own fleet opts in: his bots already operate publicly
   as his, so Nova's attestation (§9 step 1) carries
-  `operator_display_name: "Nic Lydon"`. That is one operator's
+  `payload.operatorDisplayName: "Nic Lydon"`. That is one operator's
   election under this rule, recorded so the test fixtures and
   the demo read consistently — it sets no expectation for any
   other operator, and the demo copy says so.
@@ -373,11 +404,13 @@ libraries and all fixtures follow exactly this:
 ### 3.3 humanId handling — hash only in public, settled
 
 This is THE HUMANID RULE (Nic-direct, Oct 25, 2026), the
-program's binding privacy rule: the full humanId is never
-published anywhere outside the estate — no repo, post, page,
-fixture, screenshot, log, or outward message — and public
-material carries a hash of it only. It is written into the
-portfolio (boundary section, as THE HUMANID RULE), into
+program's binding rule for its own artifacts: never copy the full
+humanId into a repo, post, page, fixture, screenshot, log, or
+outward message; publish only its hash in Fiador public outputs.
+AgentBook itself stores the pseudonymous identifier on a public
+chain, so this rule cannot make a disclosed wallet, published hash,
+or linked registrations private. It is written into the portfolio
+(boundary section, as THE HUMANID RULE), into
 `~/AGENTS.md` as a standing convention binding every agent,
 and into the W1 spec (verification step and decisions section:
 hash only, settled, no v1 override). This section is the
@@ -385,14 +418,15 @@ format-level settlement in this design; §10's launch checklist
 enforces it mechanically, and the leak-path audit at the end
 of this section is the checklist's map.
 
-- Where the full value lives: only in two private places — the
-  AgentBook contract itself, and a verifier's process memory
-  for the duration of one check. A verifier resolves the full
-  value privately, at check time, by calling
+- Where the full value lives: the public AgentBook contract and
+  a verifier's process memory for the duration of one check.
+  A verifier resolves the value at check time by calling
   `lookupHuman(agent_wallet_address)` on World Chain from the
-  wallet address in the payload. That is the only resolution
-  path; no public artifact is ever a source of the full value,
-  and no verifier persists, logs, displays, or returns it.
+  wallet address in the payload. Anyone can make that same public
+  read or inspect registration events. Fiador does not persist,
+  log, or display the full value in public outputs. Its default
+  public result omits it; trusted local callers may explicitly request
+  a raw internal result for ephemeral use (§4).
 - The hash construction the format specifies (normative; the
   package's exported `hashHumanId` implements exactly this,
   W0 spec §3.5): take the humanId in its canonical text form —
@@ -461,10 +495,10 @@ of this section is the checklist's map.
   | Signer flow | Operator pasting the value; CLI echoing it | The CLI derives the hash in-process from the wallet's registration and never prints the value (§3.2 item 5); the walkthrough never asks for it |
   | Fixtures | Real registrations recorded as test vectors | Hash only in attestation fixtures; fake-reader values are labelled synthetic sentinels (§4.4); §10 scan enforces |
   | Verifier internals | The resolved value reaching logs, errors, or storage | Value lives in process memory for one check only (§3.3); `check_log` stores the hash; failure details and exceptions carry codes, never values — a package test deep-scans result serialisations for it (§4.4) |
-  | Bot log channel | Grant/revoke lines quoting check output | Lines carry status + hash truncated, the same field set as the embeds (§5.3) |
+  | Bot log channel | Check or audit lines quoting private identifiers | Lines carry status and only identifiers needed for the admin audit; no raw humanId or full wallet (§5.3) |
   | Badge + verify page | Identifier in a URL, query, or rendered field | Routes key on application ID only (§6.3); page inputs are wallet / app / URL; results render `humanHash` truncated; the value is never a URL component anywhere |
   | Screenshots | Evidence shots of a surface showing the value | Public surfaces have no full value to show by construction; §9/§10 screenshots are of those surfaces |
-  | Verification evidence | `docs/verification.md` quoting a live lookup | Entries record status, wallet truncated, and hash truncated — the doc's entry format is specified that way (§9) |
+  | Verification evidence | `docs/verification.md` quoting a live lookup | Public narrative entries use a non-identifying label and dated status, without wallet or human-hash fragments for the dedicated program wallet. The signed attestation still carries the wallet address required by the protocol (§9). |
   | CI output | A failing test printing a live result | Package results contain no raw value to print (default mode, §4.3); live-chain tests run behind a flag with the same outputs |
   | Git history | A value committed early, deleted later | §10's scan runs over full history, and its humanId pattern check is part of that pass, not only the tree |
   | Outward messages | A post or showcase quoting a check | §10's outward-post gate (Nic approves exact text) plus the rule itself, which binds messages as much as files |
@@ -513,22 +547,22 @@ of this section is the checklist's map.
   anyone, merged on a failed verify plus a 7-day issue notice, or
   immediately on the operator's own PR. No maintainer discretion
   about who "deserves" listing: verifies + schema-valid = listed.
-- Revocation: there is no push revocation channel in v1. The
-  mechanisms are expiry (max 90 days), registry removal (stops
-  discovery, not guild-local bindings), and guild-local removal by
-  the verifier's sync loop when a check fails. The spec text says
-  this plainly so nobody designs around a revocation API that
-  does not exist.
+- Revocation: there is no push revocation channel in v1. Expiry
+  (max 90 days) makes an attestation fail, and registry removal
+  stops discovery; a legacy guild-local binding may still be
+  checked. Neither event removes a Discord role automatically.
+  Guild admins must audit existing role holders manually (§5.5).
 
 ### 3.5 Discovery flows
 
 1. Registry lookup: verifier has an application ID, looks it up
    in a registry copy, fetches `attestation_url`, verifies.
-2. Install-time claim: operator runs `/attest` in a guild (§5)
-   with a URL or a pasted payload. The verifier verifies, stores
-   the binding guild-locally (`application_id -> attestation_url`
-   plus the payload hash), and thereafter syncs from the URL.
-   Works for unlisted bots; never writes to the public registry.
+2. Presented claim: anyone runs `/attest` in a guild (§5) with a
+   URL or pasted payload. The verifier checks and logs the operator
+   claim, including one for an unlisted application. A passing
+   claim creates no new guild binding and changes no role. The
+   public registry is unchanged. Legacy bindings may still be
+   rechecked but are not proof of application control.
 
 ## 4. Component 1 — The verify package (W0 folded in)
 
@@ -699,8 +733,12 @@ established from the payload alone:
    and a successful verification records the nonce until expiry.
    Without a store, verification is stateless and replay inside
    the window is bounded by step 2's subject binding and step
-   4's expiry; the surfaces that need stronger (§5's bot, which
-   does supply a store backed by its `binding` table) get it.
+   4's expiry. The current §5 bot passes no `nonceStore`; its
+   `binding` table is not one. A published attestation is meant to
+   be checked repeatedly during its validity window, including
+   the bot's periodic legacy-binding rechecks. Applying the
+   core's one-use nonce option to that flow would reject those
+   later checks as replay.
 6. Registration (unless `checkRegistration: false`): the
    `verifyAddress` logic on `agentWalletAddress`. A resolved
    null humanId → `unregistered` + `not_registered`, even with a
@@ -782,7 +820,7 @@ never conflated with core codes of similar name.
   fixtures, keys published in the fixture README precisely because
   they control nothing and hold nothing) or, where a real
   registration is unavoidable, the dedicated demo wallet with
-  truncated identifiers in every human-readable file. Under the
+  a role label in public narrative files. Under the
   hash-only settlement (§3.3): attestation fixtures carry the
   hash only, and no real person's full humanId appears in any
   fixture — the humanId-shaped values a fake reader returns are
@@ -836,9 +874,10 @@ subpath/submodule and the bot/page code, never in the core:
   bot user Discord reports where available, `attestationUrl`
   matches the fetch URL where one exists, and
   `extra.human_id_hash` matches the live hash (§3.3).
-- Presentation mapping: core `status` → the guild decision
-  (grant only on `verified`; §5.5 owns the revoke asymmetries)
-  and → the embed/page wording via `failure-messages.json`.
+- Presentation mapping: core `status` → the operator-claim result
+  and its neutral embed/page wording via `failure-messages.json`.
+  Even `verified` describes the wallet signature and registration,
+  not application control or a role decision (§5.5).
   The one simplification consumers outside Discord may use:
   `valid` means exactly `status === 'verified'`; nothing else
   is a pass, and `unknown` is never rendered as a negative
@@ -955,12 +994,13 @@ nothing in this section should be read as one:
   application ID the attested identity: the verifier bot's own
   application is the operator's, not the project's.
 - The no-install check is the static page (§6.1). A guild that
-  wants the Human-backed role without running anything gets
-  manual verification there and grants the role by hand; the
-  role automation is what self-hosting buys. README copy must
-  present it in exactly that order — page first (no install),
-  bot second (automation, self-hosted) — so no reader is left
-  expecting a hosted bot the project does not run.
+  wants to consider a Human-backed role can check the operator
+  claim there, obtain separate evidence of application control,
+  and make its own role decision. Self-hosting adds Discord
+  claim checks, logging, and periodic rechecks; it does not
+  currently automate role decisions. README copy presents the
+  page first (no install), then the self-hosted bot, without
+  promising an automatic role grant.
 - The project's own §9 test instance is Nic self-hosting the
   package for his guild like any adopter, with his own token;
   it is a test of the shipped artifact, not a public service,
@@ -978,11 +1018,11 @@ nothing in this section should be read as one:
 
 - TypeScript on `discord.js` v14, using the verify package (§4)
   through its Discord subpath (workspace dependency — the bot is
-  the package's first consumer and its integration test). Node
-  20+, single process, no web server except the optional badge
-  endpoint (§6.3) which binds only when configured.
-- State: one SQLite file (`better-sqlite3` or Node's built-in
-  `node:sqlite` at build-time choice; schema below), in a data
+  the package's first consumer and its integration test). The
+  current implementation requires Node 22.13+ for `node:sqlite`;
+  it is a single process with no web server except the optional
+  badge endpoint (§6.3), which binds only when configured.
+- State: one SQLite file (Node's built-in `node:sqlite`) in a data
   directory the self-hoster controls. No hosted database, no
   external services beyond Discord, the registry/attestation
   hosts, and a World Chain RPC.
@@ -995,8 +1035,13 @@ nothing in this section should be read as one:
   the package's `VerificationStatus` (§4.1), stored verbatim so
   `unknown` and `unregistered` stay distinct in the guild's own
   history, exactly as they are in the result.
-  `check_log` is append-only and pruned by age (default 90 days)
-  so a self-hoster can answer "when did this role last verify?"
+  `binding` rows from earlier builds are legacy operator claims,
+  not application-control records. `check_log` is append-only
+  so a self-hoster can answer "when was this claim last checked?"
+  Current `main` prunes checks older than 90 days at process
+  startup and daily while running. The SQLite and in-memory
+  stores, startup call, and recurring timer have tests; this is
+  code evidence, not a live Discord test (§10).
 - Configuration is environment + a per-guild `/fiador
   setup` admin flow: bot token (env only, never in the DB),
   default registry URL, default RPC URL, sync interval default.
@@ -1006,38 +1051,41 @@ nothing in this section should be read as one:
 All slash commands, all responses ephemeral except status
 summaries an admin explicitly asks to post.
 
-- `/fiador` — status of this guild: which bots are bound,
-  each one's last check result and `checkedAt`, role member count.
-- `/fiador setup` (Manage Guild) — pick or create the
-  "Human-backed" role, set registry URL / sync interval / log
-  channel. Refuses, with instructions, when the bot's own role
-  sits below the Human-backed role in the hierarchy (it cannot
-  grant what it cannot manage) or when it lacks Manage Roles.
-- `/verify-agent <bot-user | application-id>` — one-off check,
-  no state change. Renders the result embed (§5.3) with the
-  failure sentence for any failure code.
-- `/attest <url | paste>` (operator flow, install-time claim) —
-  verifies, and on success creates/updates the guild binding and
-  triggers a role decision for that bot. On failure, reports the
-  failure sentence and stores nothing. Rate-limited per user
-  (§5.4). Anyone may run it (the cryptography, not the caller's
-  identity, is the gate), but role changes only ever follow a
-  passing verify.
-- `guildMemberAdd` / bot-join path: when a bot joins, the bot
-  attempts registry discovery by application ID; if found and
-  verified, it binds and grants, and logs the grant. If not
-  found, it logs "no attestation found" once — it never DMs the
-  bot owner (no unsolicited outreach surface in v1).
-- Role sync loop (§5.5) and, on startup, a full re-check before
-  announcing readiness in the log channel (a restart must not
-  leave stale grants unexamined longer than one interval).
+- `/fiador status [page]` — configured role, paged legacy claims,
+  last checks, and a manual role-audit warning. Stored claims
+  cannot enumerate all current role holders.
+- `/fiador setup` (Manage Guild) — record the existing
+  "Human-backed" role ID, registry URL, sync interval, and log
+  channel. This configuration does not create or manage roles.
+- `/verify-agent <application-id>` — one-off claim check that
+  appends a `check_log` row; it creates no binding or role change.
+  Its embed (§5.3) describes the operator claim.
+- `/attest <url | paste>` — checks a presented operator claim
+  and logs the result; it creates no binding or role decision,
+  even when the claim verifies. Anyone may run it; it is rate
+  limited per user (§5.4).
+- Existing guild-local bindings are rechecked at startup and
+  on the periodic loop (§5.5). The current bot has no bot-join
+  event handler: a join alone triggers no claim check or log.
+  Registry discovery happens during an explicit `/verify-agent`
+  check when no guild binding exists; stored legacy bindings are
+  rechecked separately. None of these paths creates a trusted
+  binding or grants a role. No unsolicited DM goes to a bot owner.
+
+Draft PR #16 adds `/fiador control-start` and
+`/fiador control-complete` for admins with Manage Guild. It records
+one fresh wallet signature and one exact response from the named
+bot after matching the guild integration. A bot that echoes user
+input can produce the response, so the witness is deliberately
+insufficient for operator authority. It creates no trusted binding
+and makes no role change; it is draft code until merged and live
+tested, not a command available from `main`.
 
 ### 5.3 Presentation
 
 - Result cards are designed in both Discord themes (§6.0):
-  embeds reuse the approved badge states in their dark and
-  light variants — verified (gold/cerulean), expired (muted +
-  "expired"), unverified (grey) — and are screenshot-checked
+  embeds state the operator attestation result neutrally, never
+  a verified-bot or role verdict, and are screenshot-checked
   against Discord light and dark in the §9 test. Colour tokens
   from `~/workspace/world-visual-assets/` (Nova Glass: starfield
   `#0A0B13`, graphite `#1C1C1E`, cerulean `#4A7FA5`, label cyan
@@ -1052,7 +1100,8 @@ summaries an admin explicitly asks to post.
   the value the verifier resolves privately for the check is
   never a display field at all.
 - The role is named exactly `Human-backed` by default (guilds may
-  rename; the bot tracks it by role ID, not name).
+  rename; the bot tracks it by role ID, not name). Fiador does
+  not assign that role in the current implementation.
 
 ### 5.4 Bot-side safety (mandatory, not optional polish)
 
@@ -1066,44 +1115,56 @@ summaries an admin explicitly asks to post.
   spec §4.7 is the same machinery); no redirect following (a 3xx
   is a failed fetch, because the redirect target was never
   vetted — operators host the attestation at its final URL);
-  5 s timeout; 64 KiB body cap; `application/json` expected but
-  not required (parse attempt decides); no credentials in URL.
-- `/attest` rate limit: 5 attempts / user / guild / 10 min,
-  in-memory. Registry and RPC traffic is cached per interval,
-  not per command, so a popular guild cannot be used to hammer
-  an operator's hosting or a public RPC.
+  5 s timeout; 64 KiB body cap; JSON content type required; no
+  credentials in URL.
+- `/attest` and `/verify-agent` share an in-memory limit of five
+  attempts per user per guild per ten minutes in the current bot;
+  the shared budget and reset are covered by local tests.
+  Neither the registry fetch nor the World Chain RPC lookup is
+  cached at the bot boundary, so repeated checks can still
+  multiply upstream requests. Bounded remote lookup load
+  (caching or an equivalent control) and live Discord smoke
+  remain open before broad guild use (§10).
 - Token hygiene: token from env, never logged, startup log prints
   the bot's own user ID and guild count only. Intents requested:
-  Guilds + GuildMembers (for bot-join and role work) — no message
-  content intent; this bot reads no messages, and the README
-  says so, because a verification bot that reads chat would
-  contradict the project's trust posture.
+  Guilds + GuildMembers, with no Message Content intent. The limited
+  witness fetches one exact message by ID using the verifier's own token;
+  it does not scan chat or request the target bot token.
 - Least privilege documented for self-hosters: the invite URL
   they generate for their own instance (adding their bot
-  application to their guild) requests Manage Roles + Slash
-  Commands only. There is no project-issued invite URL in v1
-  (§5 deployment model).
+  application to their guild) does not request Manage Roles for
+  the current check-and-log bot. The limited witness needs the
+  verifier's Manage Guild permission to read integrations, plus
+  View Channel and Read Message History for one message. It does
+  not need the target bot token. There is no project-issued
+  invite URL in v1 (§5 deployment model).
 
 ### 5.5 Sync loop semantics
 
-- Default interval 6 hours per binding, jittered ±10%, per-guild
-  override via setup. On each check: verify; if status is
-  `verified` and role missing, grant; if status is `invalid`,
-  `expired`, or `unregistered` and role present, revoke and log
-  with the failure sentence. Status `unknown` (the lookup itself
-  failed) revokes nothing, ever: it retries once 15 min later,
-  and a second consecutive `unknown` raises a log-channel
-  warning instead of a revocation — a transient RPC outage must
-  not mass-revoke a guild. Expiry and signature failures revoke
-  on first observation. This asymmetry is deliberate and
-  documented in the README: chain unavailability is our problem,
-  a lapsed attestation is the operator's. It is also only
-  expressible because the package keeps `unknown` distinct from
-  `unregistered` (§4.2); a boolean result would force the bot
-  to choose between mass-revoking on outages and never revoking
-  on real deregistrations.
-- Every grant/revoke writes `check_log` and, when a log channel
-  is configured, one compact line there. No other chatter.
+- The current loop rechecks stored legacy bindings at startup and
+  on each guild's own configured interval, with ±10% jitter after
+  the first check. It discovers new guilds and setup changes and
+  caps concurrent guild checks at four. Local tests cover separate
+  intervals, configuration changes, and a slow guild not delaying
+  another; live Discord timing remains to be checked (§10).
+  The loop logs the package status. Every status, including
+  `verified`, `invalid`, `expired`, and `unregistered`, preserves the existing
+  Discord role state. These rows lack trusted app-control proof,
+  so they cannot safely identify a role holder to grant or revoke.
+- `unknown` (lookup failure) is retried once after 15 minutes;
+  a second failure raises a log-channel warning. It also leaves
+  roles untouched. A configured role or legacy claims trigger a
+  startup `ADMIN AUDIT REQUIRED` warning. Admins must inspect
+  actual role holders in Discord and remove unsupported grants
+  manually; Fiador cannot infer the complete holder list from
+  stored claims.
+- Future role automation requires an independently reviewed way
+  to prove that the signing wallet has operator authority over
+  the exact Discord application and bot user without disclosing
+  the target bot token to Fiador. The limited bot-response witness
+  does not meet that condition. Any future policy for granting,
+  revoking, expiry, or lookup outages needs its own decision and
+  live verification before role writes are enabled.
 
 ## 6. Component 4 — Static verify page and served badge
 
@@ -1146,7 +1207,9 @@ designs ships in both light and dark mode:
   Discord themes (light and dark) in the §9 guild test, with the
   badge variant and accent colours chosen to hold contrast in
   each. Text carries the state in words in both themes, as
-  everywhere else in this design.
+  everywhere else in this design. A passing Discord operator
+  attestation uses the neutral `Claim unconfirmed` treatment,
+  never the verified-bot artwork (§6.1, §6.4).
 
 ### 6.1 Static page (`verify-page/`)
 
@@ -1173,9 +1236,13 @@ designs ships in both light and dark mode:
   §5.3 field set (including its display-name rule: shown only
   when the payload carries one, labelled self-asserted,
   §3.1.1), the failure sentence when invalid, and
-  `checkedAt`. Plus the honest-limits paragraph (§1) on the page
-  itself, above the fold of the result — the page is the demo
-  surface strangers will judge the claim by.
+  `checkedAt`. When the core returns `verified` for a passing
+  wallet claim, the Discord page presents `Claim unconfirmed`
+  with neutral, unverified-family badge art. The result never
+  asserts that the signer controls the named application. The
+  honest-limits paragraph (§1) is on the page itself, above the
+  fold of the result — the page is the demo surface strangers
+  will judge the claim by.
 - Styling: Nova Glass, the house style (§8.1 credit model) —
   the §5.3 tokens, the approved banner art as the page hero
   (§6.2), and the badge graphics for results, in both light and
@@ -1214,9 +1281,10 @@ Source of truth until repo creation:
   format used by the muse-discord banner, per the assets README).
 - `generated/fiador-server-icon.webp` (1600×1600): the demo
   guild / verifier bot avatar base.
-- Verify-result card set (verified / expired / failed embeds)
-  reuses the same states and tokens; no new art is commissioned
-  for v1.
+- Verify-result cards for a Discord claim use `Claim unconfirmed`
+  with neutral art on a passing wallet check, plus expired and
+  failed treatments. The verified artwork is not a passing-bot
+  state until application control is independently proven.
 
 ### 6.3 Dynamic served badge
 
@@ -1226,6 +1294,11 @@ Source of truth until repo creation:
   most 5 minutes), with the check time in small type on the
   badge, `Cache-Control` max-age in minutes, and the correct
   state even under copy-paste to another context (§1).
+  The state is the operator attestation's status, not proof of
+  Discord application control or eligibility for a guild role.
+  Until the control gate in §5.5 is met, a passing core result
+  must render neutral `Claim unconfirmed` art for the Discord
+  application, never the verified badge variant.
 - Implementation home in v1: a tiny standalone service in
   `badge-service/` consuming the verify package, runnable next
   to the verifier bot or alone. This service is W0's second
@@ -1275,15 +1348,14 @@ one short link in a channel; this surface is what makes that
 link speak for itself.
 
 - Canonical URL: `https://fiador.org/v/<short-id>`. (Domain
-  state, updated Oct 26, 2026: `fiador.org` is REGISTERED via
-  Cloudflare Registrar (active, auto-renew on), so the
-  canonical-domain blocker for this surface is cleared on the
-  registration side. DNS and hosting for it still await the
-  deploy decision through the coordinator (§6.4 hosting
-  posture); until then the endpoint is built and tested on a
-  staging host and no `/v/` link is published. The rule itself
-  stands: the surface ships only on the canonical domain — a
-  preview card served from anywhere else is not this surface.)
+  state, checked Oct 26, 2026: `fiador.org` is registered and
+  its DNS and Vercel production hosting are live for the site,
+  registry, and founding attestation (`docs/verification.md`).
+  The production `/v/` route still returns 404; its handler has
+  only protected-preview evidence, and no canonical `/v/` link
+  has been published. The surface ships only when that route is
+  deployed and verified on the canonical domain — a preview card
+  served from elsewhere is not this surface.)
 - Short-id: content-derived and tamper-evident. The id is the
   first 10 characters of the base32 encoding of
   SHA-256 over the attestation's canonical signing bytes
@@ -1306,9 +1378,8 @@ link speak for itself.
   no second implementation of the checks), and returns Open
   Graph meta plus a dynamically rendered `og:image` card
   (1200×630) in the Nova Glass language. Card contents: the
-  badge state artwork for the observed state (verified /
-  expired / unverified / revoked — colours and states matching
-  the §6.2 badge set exactly, rendered from the same assets),
+  state artwork for the observed Discord claim (`Claim unconfirmed`
+  on a passing core result, or expired / unverified / revoked),
   the Discord application name, the operator display name ONLY
   if the attestation opted in (§3.1.1), the descriptor line
   ("Fiador — human-backed attestation for Discord bots", per
@@ -1316,7 +1387,9 @@ link speak for itself.
   timestamp ("checked <time> UTC"). Meta: `og:title` carries
   Fiador + descriptor + application name + state; `og:description`
   carries the verdict sentence and the snapshot caveat below;
-  `twitter:card` is `summary_large_image`.
+  `twitter:card` is `summary_large_image`. `Claim unconfirmed`
+  uses neutral unverified-family artwork, never the gold verified
+  badge, even when the wallet check passes.
 - Human click-through: browsers (non-crawler user agents)
   land on the full verify page with the attestation prefilled;
   the page re-runs all checks client-side at open time.
@@ -1335,7 +1408,7 @@ link speak for itself.
   check on the canonical domain, run live at open time. The
   card itself carries its crawl time for exactly this reason,
   and no copy anywhere presents a preview screenshot as
-  evidence of current state.
+  evidence of current state or application ownership.
 - Failure states, fail-closed like the core (§4.2): an unknown
   id renders a neutral "attestation not found" card with full
   OG meta — never a bare 404 with no meta, and never anything
@@ -1556,15 +1629,13 @@ Preconditions (state at design time, re-check at test time):
 
 Steps:
 
-1. Publish Nova's attestation.
-   - Draft payload for the Nova Discord application (application
-     ID + bot user ID from the live bot, not from memory), sign
-     with the demo wallet, host at a public HTTPS URL with CORS
-     open, add the registry entry by PR in the (then-created)
-     repo. Record: payload hash, URL, signing date. The payload
-     carries `operator_display_name: "Nic Lydon"` — Nic's fleet
-     opt-in under §3.1.1, since his bots already operate
-     publicly as his.
+1. Publish Nova's attestation — COMPLETE, Oct 26, 2026.
+   - The founding payload was signed with the dedicated program
+     wallet, published at a public HTTPS URL, and indexed in the
+     registry. It carries `payload.operatorDisplayName: "Nic Lydon"`
+     under Nic's opt-in in §3.1.1. The signing, publication, and
+     live fetch-back are recorded in `docs/verification.md`;
+     this completion does not close the remaining steps below.
 2. Package and page verification, happy path.
    - Verify package via its Discord layer: by application ID
      (registry), by URL, by pasted payload — three results with
@@ -1576,8 +1647,11 @@ Steps:
      surface has live evidence too, not only unit fixtures.
    - Python port: same checks, results diffed against TS output.
    - Static page: same three modes in a clean browser profile;
-     screenshot the verified result for `docs/verification.md`
-     (identifiers truncated in the screenshot per §10), in both
+     confirm the core returns `verified` while the page renders
+     `Claim unconfirmed` with neutral artwork, then screenshot it
+     for `docs/verification.md`
+     (crop or obscure dedicated program wallet and human-hash
+     fragments in any public screenshot per §10), in both
      light and dark mode (§6.0): system-preference default, the
      toggle, and persistence each exercised once.
 3. Failure cases, package + page (each must produce the named
@@ -1602,41 +1676,51 @@ Steps:
      never as "not registered")
 4. Verifier bot in Nic's guild.
    - Invite a dev instance (separate application from any future
-     public instance), run `/fiador setup`, create the
-     Human-backed role.
-   - `/verify-agent` on Nova: embed shows verified state, in
+     public instance), run `/fiador setup`, and record the
+     existing Human-backed role ID for status display. Confirm
+     the verifier has no role-write permission.
+   - `/verify-agent` on Nova: embed shows the operator claim state
+     with an application-control warning, in
      both Discord client themes (light and dark screenshots,
      §6.0).
-   - `/attest` with Nova's URL: binding stored, role granted to
-     the Nova bot. Confirm the grant in the guild UI, not only in
-     bot logs.
-   - Swap the binding to the deliberately expired payload from
-     step 3: on the next sync tick (force one via the admin
-     re-check), role is removed and the log line carries the
-     `expired` sentence. Restore the good binding, role re-granted.
-   - Point the bot at a dead RPC for one sync tick: role is NOT
-     removed (status `unknown`, §5.5), the warning line is
-     logged, and restoring the RPC returns the binding to
-     `verified` with no manual re-bind.
+   - `/attest` with Nova's URL: the signed operator claim is
+     checked and logged, but no guild binding is added and no
+     role is granted. Confirm in the guild UI and local state.
+   - Recheck a legacy binding with an expired payload, then a
+     failed lookup: record the `expired` and `unknown` statuses,
+     the latter's retry and warning, and confirm neither status
+     writes a role. A passing recheck also leaves roles alone.
+   - On startup with a configured role or legacy claim, confirm
+     the `ADMIN AUDIT REQUIRED` warning and manually compare
+     actual role holders against independent control evidence.
    - Leave the sync loop running across one full natural interval
      (6 h default, or a shortened test interval recorded as such)
      and record the `check_log` rows for the interval in
      `docs/verification.md`.
+   - Separately run the wallet-signature and bot-response witness
+     with the dedicated verifier in a private test channel. Record
+     the exact message check and
+     confirm the witness changes no binding, public bot verdict,
+     or role. A local fixture pass alone does not close this live
+     test or the future application-control gate (§5.5).
 5. Served badge.
-   - Badge URL for Nova's application ID renders verified with a
-     current check time; swap to the expired binding and confirm
-     the badge decays to expired within its cache window; an
+   - Badge URL for Nova's application ID renders the neutral
+     `Claim unconfirmed` state with a current check time;
+     it never uses verified-bot art while application control is
+     unproven. Use the expired attestation and confirm the badge
+     decays to expired within its cache window; an
      invented application ID renders unverified, never an error
      image.
 5a. Link preview (§6.4).
    - Post Nova's `/v/` link in a test channel: the Discord
-     preview renders the verified card (badge state art matching
-     the §6.2 set, application name, operator display name —
+     preview renders the neutral `Claim unconfirmed` card (art
+     matching the unverified family, application name,
+     operator display name —
      present only because Nova's attestation opted in — the
      descriptor line, and the crawl timestamp).
    - Click through: lands on the verify page prefilled, which
      re-runs the check live and agrees with the card.
-   - Swap to the expired binding, post the (different, content-
+   - Use the expired attestation, post the (different, content-
      derived) link fresh: the card renders expired. Record the
      cache caveat live: the OLD message's preview does not
      update, which is the documented behaviour (§6.4), and the
@@ -1674,7 +1758,7 @@ checked, and re-apply to any future repo in the program:
       a World mark or implies endorsement (portfolio trademark
       rule). The creation-day availability checks were run from
       both seats, as recorded in §11's resolved list.
-- [ ] Creation go itself: the name and licence decisions were
+- [x] Creation go itself: the name and licence decisions were
       NOT the go. Creation happened only on Nic's explicit go
       through the coordinator, after the remaining §11 decisions
       land. Nothing in this design, and no earlier decision,
@@ -1714,8 +1798,11 @@ checked, and re-apply to any future repo in the program:
       possible v2 addition in §5 only. (The public/private gates
       in this checklist stand unchanged by this decision.)
 
-Before the first public push (all must pass, results recorded in
-the repo's `docs/narrative/` launch entry):
+For the remaining public demo launch and future release commits
+(the repo and founding attestation are already public; unchecked
+items below are open gates, not evidence that the first push is
+still pending). Record results in `docs/verification.md` and the
+repo's `docs/narrative/` launch entry:
 
 - [ ] Secret scan over the full tree AND full git history:
       `gitleaks` (or `trufflehog`) run by CI and once manually
@@ -1735,10 +1822,10 @@ the repo's `docs/narrative/` launch entry):
       and screenshots — and, in the secret-scan pass above,
       across full git history — where every hit must be a hash,
       a content hash, or a labelled synthetic sentinel, per the
-      leak-path audit in §3.3); wallet addresses
-      truncated in prose and screenshots (full addresses appear
-      only inside machine fixtures where the protocol requires
-      them, and only for synthetic or dedicated demo wallets);
+      leak-path audit in §3.3); public prose and screenshots use
+      labels rather than wallet or human-hash fragments for the
+      dedicated program wallet (the signed attestation retains
+      its protocol-required full wallet address);
       no Nexus data, no
       calendar / comms / health content; no homelab hostnames,
       IPs, or tailnet details; no Discord tokens or guild
@@ -1783,13 +1870,32 @@ the repo's `docs/narrative/` launch entry):
 - [ ] Live verification evidence current: `docs/verification.md`
       reflects a run against the launch commit, dated (§9 exit
       criteria).
+- [ ] Role gate checked against the launch commit: a passing
+      `/attest`, a rechecked legacy binding, and (if merged) a
+      completed bot-response witness create no trusted binding
+      and make no role write. A guild admin audits any existing
+      Human-backed role holders manually (§5.5).
+- [ ] Discord page and `/v/` link preview show `Claim unconfirmed`
+      with neutral art for a passing wallet claim in both themes;
+      no application page or preview shows verified-bot art while
+      the §5.5 control gate remains closed.
+- [ ] Bot load gate (§5.4): `/attest` and `/verify-agent` share a
+      tested per-user, per-guild limit, and registry/RPC lookup
+      load has a measured bound (cache or equivalent) before
+      broad guild use. The shared limit is implemented and locally
+      tested; the remote-load bound and live smoke remain open.
+- [x] Bot scheduling and retention code gate (§§5.1, 5.5): tests prove
+      independent per-guild intervals and startup plus recurring
+      90-day `check_log` pruning. This is merged code and local
+      test evidence; §9's live guild run remains open.
 
 Before any outward post (dev.to, Discord showcase, social):
 
 - [ ] Nic approves the exact text (portfolio gate; no standing
       rule replaces this yet).
-- [ ] Post links the repo, shows truncated identifiers only, and
-      makes no claim beyond §1.
+- [ ] Post links the repo, uses labels only for the dedicated
+      program wallet with no address or human-hash fragments,
+      and makes no claim beyond §1.
 - [ ] Descriptor rule (§7): the post's first use of Fiador
       carries "human-backed attestation for Discord bots"; the
       name never appears naked in any launch surface's first
@@ -1822,8 +1928,8 @@ spec's recommendation is used as a placeholder and flagged.
 
 Decision 1 is the spec's one remaining open item. Decisions
 2–3 surfaced during this design and are recorded here rather
-than settled. Repo creation itself is not a table row: it is a
-go, not a preference, and it has not been given (§10).
+than settled. Repo creation was an execution go, not a table
+preference; it was given and used on Oct 25, 2026 (§10).
 
 Resolved, recorded so nobody re-opens them, and deliberately
 not rows above because the table is only for what is still open:
@@ -1855,11 +1961,11 @@ not rows above because the table is only for what is still open:
   serialisation alone, with NO prefix line (§3.2; §13 D2
   adopts the W0 form). A `fiador-discord-attestation:v1`
   prefix existed only in this design's first revision and was
-  dropped with D2, before any attestation was signed (§9 has
-  not run); domain separation is carried by the subject type
-  inside the signed payload. After the first signed
-  attestation exists, the canonical form is frozen like any
-  other format constant.
+  dropped with D2 before the founding attestation was signed
+  (§9 step 1; `docs/verification.md`); domain separation is
+  carried by the subject type inside the signed payload. The
+  signed founding attestation freezes the canonical form like
+  any other format constant.
 - Licence. Apache-2.0 is the program default for the whole
   World Program, including this repo (Nic, Oct 25, 2026, via
   the coordinator, and recorded in the portfolio). Applied in
@@ -1875,7 +1981,7 @@ not rows above because the table is only for what is still open:
   themselves; the name is self-asserted under the operator's
   signature and verifiers display it only when present.
   Specified in §3.1.1. Nic's own fleet opts in — Nova's
-  attestation carries `operator_display_name: "Nic Lydon"` —
+  attestation carries `payload.operatorDisplayName: "Nic Lydon"` —
   because his bots already operate publicly as his.
 - Deployment model. Self-host only for v1, plus the static
   verify page (Nic, Oct 25, 2026, via the coordinator). No
@@ -1985,28 +2091,32 @@ dispute.
 4. Reference signer CLI (§3.2) + publish-your-attestation
    walkthrough (§7) — needed before any end-to-end test can
    produce a real attestation.
-5. Verifier bot (§5) with role sync, fetch guards, and the
-   `/attest` flow; badge service (§6.3, W0 spec §4) alongside it.
+5. Verifier bot (§5) with guarded claim checks, legacy-binding
+   rechecks, audit warnings, and no role writes; badge service
+   (§6.3, W0 spec §4) alongside it. The limited bot-response
+   witness is a separate test step, not an application-control gate
+   or authorization for role automation.
 5a. Link preview endpoint (§6.4) on the badge-service
    operational family: id resolution against the registry,
    crawl-time verification through the package, dynamic OG
    card rendering from the §6.2 assets, and the two failure
    cards (not found / could not check). Demo-milestone work:
    it is the surface the guild demonstration is performed
-   through (posting the link IS the demo), so it lands before
-   step 7's test, on a staging host until the canonical
-   domain is live.
+   through (posting the link IS the demo), so it must reach the
+   canonical domain before step 7's live test. Protected-preview
+   tests exist; the production `/v/` route remains unshipped.
 6. Registry, README, examples, threat model, CI incl. secret
    scan (§§3.4, 7, 8, 10).
 7. Nic's-guild end-to-end test (§9), adversarial review (§10),
-   launch checklist (§10), then — and only on Nic's go — repo
-   creation and first public push, in that order.
+   and the remaining public demo launch checks (§10). Repo
+   creation and the founding public push already occurred;
+   completing this step is a separate release decision.
 8. Community guild pitch (§9 step 6), on Nic's go, with the
    working demo as evidence.
 
-No step before 7 creates a repo, pushes publicly, changes a
-Discord server outside Nic's guild test in step 7's test phase,
-or sends anything outward.
+The repo and founding attestation are already public. Remaining
+steps do not authorize changes to a Discord server outside Nic's
+guild test or outward posts; those retain their §10 gates.
 
 ## 13. Coordination with W0 — divergence log
 
@@ -2042,19 +2152,20 @@ in writing in both documents.
   five-state `VerificationStatus`, evidence block, Node 20+.
   This revision adopts W0 (§4.1); the boolean survives only as
   a documented consumer mapping (`valid === (status ===
-  'verified')`, §4.6). The richer shape is what §5.5's revoke
-  asymmetry and W4's page both require, so this was not a close
-  call.
+  'verified')`, §4.6). The richer shape lets §5.5 distinguish
+  lookup failure from an invalid claim while logging, and W4's
+  page also needs it, so this was not a close call.
 - D4, resolver-null status. OPEN, coordinator decision (it is
   the W0 spec's own Q3). When a subject has no attestation at
   all, W0 provisionally proposes status `unknown` plus a new
   failure code `attestation_not_found`, with the badge rendering
   it as unverified. W1's surfaces need the distinction either
-  way (§4.2 note): the bot logs "no attestation found" on join,
-  and the guild pitch must not describe an operator who never
-  attested as having failed a check. W1 position: adopt the
-  W0 provisional answer, and give it its own plain-language
-  sentence, distinct from every failure sentence.
+  way (§4.2 note): a requested bot check must distinguish "no
+  attestation found" from a failed attestation; current `main`
+  has no bot-join handler. The guild pitch must not describe an
+  operator who never attested as having failed a check. W1
+  position: adopt the W0 provisional answer and give it a
+  plain-language sentence distinct from every failure sentence.
 - D5, `verifySignedMessage` export. OPEN, W0 chat to agree.
   This revision proposes one export beyond the W0 spec's
   closed list, because W3's seal verification needs a

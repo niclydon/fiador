@@ -43,9 +43,14 @@ mark has to be able to say "no longer true."
 ## Privacy rules
 
 - Attestations publish a hash of the humanId, never the full value.
-  Verifiers resolve the full value privately through the on-chain
-  lookup. Two bots backed by the same human produce the same hash,
-  which is the one correlation the system intends to allow.
+  Fiador verifiers read the on-chain value for a check. Their default
+  public results omit it; trusted local callers can explicitly request
+  a raw internal result, which must never be published. AgentBook
+  lookup and registration events are public. A disclosed registered
+  wallet or this published hash can be matched against that finite
+  public data to reveal the pseudonymous identifier and other wallets
+  registered to it.
+  Two bots backed by the same human also publish the same hash.
 - An optional operator display name exists for operators who want
   to be named. It is off by default and never required.
 - No live private keys, tokens, or personal data belong in this repo.
@@ -64,12 +69,13 @@ written ([docs/SPEC.md](docs/SPEC.md)). This repository contains:
   served-badge design so the mark can reflect a live check
 - The verify package, self-hosted Discord verifier bot, static verify
   page (`/verify/`), and registry source. The browser page
-  has local tests; deployed click-through and browser CORS/RPC behavior
-  remain to be checked. The bot's role automation is disabled pending
-  trusted proof of Discord application control.
+  has local tests and a protected preview route check; real browser
+  CORS/RPC behavior remains to be checked. The bot's role automation
+  is disabled pending trusted proof of Discord application control.
 - Root Vercel preview packaging for the site, browser page, registry,
   attestation, and `/v/` link previews ([runbook](docs/web-preview.md)).
-  Local route checks pass; a protected preview and live checks are next.
+  Local route checks and a protected preview smoke pass. Production still
+  serves an older deployment; public promotion and live Discord checks remain.
 - A tested AgentKit free-trial integration in a private prototype,
   verified end to end against AgentBook with a real Orb-verified
   registration (October 25, 2026).
