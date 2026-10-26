@@ -43,10 +43,12 @@ mark has to be able to say "no longer true."
 ## Privacy rules
 
 - Attestations publish a hash of the humanId, never the full value.
-  Fiador verifiers read the on-chain value for a check and omit it
-  from Fiador outputs. AgentBook lookup and registration events are
-  public: disclosing a registered wallet can reveal its pseudonymous
-  human identifier and other wallets registered to that identifier.
+  Fiador verifiers read the on-chain value for a check. Their default
+  public results omit it; trusted local callers can explicitly request
+  a raw internal result, which must never be published. AgentBook
+  lookup and registration events are public: disclosing a registered
+  wallet can reveal its pseudonymous human identifier and other
+  wallets registered to that identifier.
   Two bots backed by the same human also publish the same hash.
 - An optional operator display name exists for operators who want
   to be named. It is off by default and never required.

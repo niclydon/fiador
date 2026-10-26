@@ -77,7 +77,8 @@ denied 402 once the trial exhausted, `agentkit_status` and
 `agentkit_self_test` passing). Public narrative copies describe
 these checks by wallet role and dated status, without address or
 human-hash fragments (§10).
-The raw humanId stays in the private estate record. The signed
+Fiador's own records keep the raw humanId private; AgentBook's
+underlying registration is public on-chain (§3.3). The signed
 public attestation necessarily contains the dedicated program
 wallet's full address; public narrative evidence uses a label
 instead of repeating its address or hash fragments.
@@ -97,8 +98,9 @@ spec's honest-limits section; the design adds no stronger claim.
   the proof says "a unique human", never who.
 - AgentBook registrations are public on World Chain. A disclosed
   wallet can reveal its pseudonymous human identifier and other
-  wallets registered to the same identifier. Fiador omits the raw
-  identifier from its outputs but cannot make the chain data private.
+  wallets registered to the same identifier. Fiador's public results
+  omit the raw identifier, but an explicit private internal-result
+  option exists (§4). Neither can make the chain data private.
 - Freshness: registration is checked live at verification time,
   but Fiador does not currently certify or update a guild role.
   Guild admins must review any existing Human-backed role holders
@@ -403,11 +405,11 @@ libraries and all fixtures follow exactly this:
 This is THE HUMANID RULE (Nic-direct, Oct 25, 2026), the
 program's binding rule for its own artifacts: never copy the full
 humanId into a repo, post, page, fixture, screenshot, log, or
-outward message; publish only its hash in Fiador outputs. AgentBook
-itself stores the pseudonymous identifier on a public chain, so
-this rule cannot make a disclosed wallet or its linked registrations
-private. It is written into the
-portfolio (boundary section, as THE HUMANID RULE), into
+outward message; publish only its hash in Fiador public outputs.
+AgentBook itself stores the pseudonymous identifier on a public
+chain, so this rule cannot make a disclosed wallet or its linked
+registrations private. It is written into the portfolio
+(boundary section, as THE HUMANID RULE), into
 `~/AGENTS.md` as a standing convention binding every agent,
 and into the W1 spec (verification step and decisions section:
 hash only, settled, no v1 override). This section is the
@@ -421,7 +423,9 @@ of this section is the checklist's map.
   `lookupHuman(agent_wallet_address)` on World Chain from the
   wallet address in the payload. Anyone can make that same public
   read or inspect registration events. Fiador does not persist,
-  log, display, or return the full value in its outputs.
+  log, or display the full value in public outputs. Its default
+  public result omits it; trusted local callers may explicitly request
+  a raw internal result for ephemeral use (§4).
 - The hash construction the format specifies (normative; the
   package's exported `hashHumanId` implements exactly this,
   W0 spec §3.5): take the humanId in its canonical text form —

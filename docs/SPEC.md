@@ -214,8 +214,9 @@ community seat trial:
 - Hosted verifier instance later, or self-host only for v1
   (SETTLED Oct 25, 2026: self-host only for v1, plus the static
   verify page)
-- humanId display (SETTLED Oct 25, 2026: hash only; the full
-  humanId is never published anywhere, no v1 override)
+- humanId display (SETTLED Oct 25, 2026: Fiador public outputs
+  show the hash only; they never republish the full on-chain
+  identifier, with no v1 override)
 - Whether Nova's attestation publicly links the human to Nic
   (SETTLED Oct 25, 2026: yes for Nic's own fleet, as an explicit
   operator opt-in field; the protocol default stays name-free)
