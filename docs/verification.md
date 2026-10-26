@@ -72,7 +72,8 @@ decision: @worldcoin/agentkit-core 0.2.1.
 - Authenticated fetches on that preview returned 200 for `/`,
   `/verify/`, `/registry.json`, and the published attestation. The
   registry and attestation bytes matched the local web build.
-  Both JSON routes allowed cross-origin reads.
+  Both JSON responses included `Access-Control-Allow-Origin: *`;
+  browser cross-origin fetch remains untested.
 - The synthetic `/v/` link returned a 302 from a browser user agent
   back to `/verify/` on the same preview. A crawler user agent got
   200 Open Graph HTML and its SVG card returned 200. A link for the

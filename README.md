@@ -70,8 +70,8 @@ written ([docs/SPEC.md](docs/SPEC.md)). This repository contains:
 - The verify package, self-hosted Discord verifier bot, static verify
   page (`/verify/`), and registry source. The browser page
   has local tests and a protected preview route check; real browser
-  CORS/RPC behavior remains to be checked. The bot's role automation is disabled pending
-  trusted proof of Discord application control.
+  CORS/RPC behavior remains to be checked. The bot's role automation
+  is disabled pending trusted proof of Discord application control.
 - Root Vercel preview packaging for the site, browser page, registry,
   attestation, and `/v/` link previews ([runbook](docs/web-preview.md)).
   Local route checks and a protected preview smoke pass. Production still
