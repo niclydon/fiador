@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createVerifier, fakeControls, makeAttestation, resetFakeVerifier } from './fakeVerify.js';
 import { FakeDiscordAdapter } from './helpers.js';
-import { decideRoleAction, RoleSyncEngine } from '../src/roles.js';
+import { decideRoleAction, RoleSyncEngine, warnLegacyRoleAudit } from '../src/roles.js';
 import { InMemoryStore, type Binding } from '../src/store.js';
 import { VerifyService, type VerifierLike } from '../src/verifyService.js';
 
@@ -10,18 +10,18 @@ const APP = '123456789012345678';
 const BOT_USER = '987654321098765432';
 const ROLE = 'role-1';
 
-describe('decideRoleAction — the sync decision table (DESIGN §5.5)', () => {
-  it('verified -> grant', () => {
-    expect(decideRoleAction('verified')).toBe('grant');
+describe('decideRoleAction — no role action without application control', () => {
+  it('verified -> keep', () => {
+    expect(decideRoleAction('verified')).toBe('keep');
   });
-  it('invalid -> revoke', () => {
-    expect(decideRoleAction('invalid')).toBe('revoke');
+  it('invalid -> keep', () => {
+    expect(decideRoleAction('invalid')).toBe('keep');
   });
-  it('expired -> revoke', () => {
-    expect(decideRoleAction('expired')).toBe('revoke');
+  it('expired -> keep', () => {
+    expect(decideRoleAction('expired')).toBe('keep');
   });
-  it('unregistered -> revoke', () => {
-    expect(decideRoleAction('unregistered')).toBe('revoke');
+  it('unregistered -> keep', () => {
+    expect(decideRoleAction('unregistered')).toBe('keep');
   });
   it('unknown -> keep (a failed check revokes nothing, ever)', () => {
     expect(decideRoleAction('unknown')).toBe('keep');
@@ -69,29 +69,50 @@ describe('RoleSyncEngine', () => {
     });
   });
 
-  it('grants the role when the binding verifies and the bot lacks it', async () => {
+  it('never grants from a legacy binding, even when its attestation verifies', async () => {
     const [report] = await engine.syncGuild(GUILD);
-    expect(report).toMatchObject({ status: 'verified', action: 'grant', changed: true });
-    expect(adapter.grants).toHaveLength(1);
-    expect(adapter.grants[0]).toMatchObject({ userId: BOT_USER, roleId: ROLE });
-    expect(await adapter.memberHasRole(GUILD, BOT_USER, ROLE)).toBe(true);
-  });
-
-  it('revokes the role when the attestation has expired', async () => {
-    fakeControls.status = 'expired';
-    adapter.giveRole(GUILD, BOT_USER);
-    const [report] = await engine.syncGuild(GUILD);
-    expect(report).toMatchObject({ status: 'expired', action: 'revoke', changed: true });
-    expect(adapter.revokes).toHaveLength(1);
+    expect(report).toMatchObject({ status: 'verified', action: 'keep', changed: false });
+    expect(report.note).toContain('application control is unproven');
+    expect(adapter.grants).toHaveLength(0);
     expect(await adapter.memberHasRole(GUILD, BOT_USER, ROLE)).toBe(false);
   });
 
-  it('revokes the role when the wallet turns out unregistered', async () => {
+  it('leaves an existing role for manual review when legacy binding control is unproven', async () => {
+    fakeControls.status = 'expired';
+    adapter.giveRole(GUILD, BOT_USER);
+    const [report] = await engine.syncGuild(GUILD);
+    expect(report).toMatchObject({ status: 'expired', action: 'keep', changed: false });
+    expect(adapter.revokes).toHaveLength(0);
+    expect(await adapter.memberHasRole(GUILD, BOT_USER, ROLE)).toBe(true);
+  });
+
+  it('does not touch a role based on a legacy unregistered claim', async () => {
     fakeControls.status = 'unregistered';
     adapter.giveRole(GUILD, BOT_USER);
     const [report] = await engine.syncGuild(GUILD);
-    expect(report).toMatchObject({ status: 'unregistered', action: 'revoke', changed: true });
-    expect(adapter.revokes).toHaveLength(1);
+    expect(report).toMatchObject({ status: 'unregistered', action: 'keep', changed: false });
+    expect(adapter.revokes).toHaveLength(0);
+  });
+
+  it('warns at startup in process and configured log channel to audit legacy role holders', async () => {
+    const processWarnings: string[] = [];
+    await warnLegacyRoleAudit(GUILD, store, adapter, (line) => processWarnings.push(line));
+    expect(processWarnings).toHaveLength(1);
+    expect(processWarnings[0]).toContain('ADMIN AUDIT REQUIRED');
+    expect(processWarnings[0]).toContain('Manually review every existing Human-backed role holder');
+    expect(adapter.logLines).toEqual([{ guildId: GUILD, line: processWarnings[0] }]);
+    expect(adapter.grants).toHaveLength(0);
+    expect(adapter.revokes).toHaveLength(0);
+  });
+
+  it('warns even when a configured role has no stored legacy claims', async () => {
+    store.removeBinding(GUILD, APP);
+    const processWarnings: string[] = [];
+    await warnLegacyRoleAudit(GUILD, store, adapter, (line) => processWarnings.push(line));
+    expect(processWarnings).toHaveLength(1);
+    expect(processWarnings[0]).toContain('0 stored legacy operator claim(s)');
+    expect(processWarnings[0]).toContain('this count does not enumerate role holders');
+    expect(adapter.logLines).toHaveLength(1);
   });
 
   it('on unknown: keeps the role, retries once, and warns instead of revoking', async () => {

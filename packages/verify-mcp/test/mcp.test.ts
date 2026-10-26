@@ -191,6 +191,50 @@ describe('verify MCP tools', () => {
     expect(res.isError).toBe(true);
   });
 
+  it('advertises the same tool inputs and rejects invalid arguments', async () => {
+    const client = await connectInMemory(makeDeps());
+    const tools = (await client.listTools()).tools;
+    const schemas = Object.fromEntries(tools.map((tool) => [tool.name, tool.inputSchema]));
+
+    expect(schemas.verify_address).toMatchObject({
+      type: 'object',
+      required: ['address'],
+      additionalProperties: false,
+      properties: { address: { type: 'string', pattern: '^0x[0-9a-fA-F]{40}$' } },
+    });
+    expect(schemas.verify_attestation).toMatchObject({
+      type: 'object',
+      required: ['attestation'],
+      additionalProperties: false,
+      properties: {
+        attestation: { anyOf: [{ type: 'object' }, { type: 'string' }] },
+        subject: { required: ['type', 'id'], additionalProperties: false },
+        wallet: { type: 'string', pattern: '^0x[0-9a-fA-F]{40}$' },
+      },
+    });
+    expect(schemas.badge_status).toMatchObject({
+      type: 'object',
+      required: ['subjectType', 'subjectId'],
+      additionalProperties: false,
+      properties: {
+        subjectType: { minLength: 1, maxLength: 128 },
+        subjectId: { minLength: 1, maxLength: 256 },
+      },
+    });
+
+    const invalidCalls = [
+      { name: 'verify_address', arguments: { address: '0x123' } },
+      {
+        name: 'verify_attestation',
+        arguments: { attestation: '{}', subject: { type: 'discord_application', id: '1', extra: true } },
+      },
+      { name: 'badge_status', arguments: { subjectType: 'x'.repeat(129), subjectId: '1' } },
+    ];
+    for (const call of invalidCalls) {
+      expect((await client.callTool(call)).isError).toBe(true);
+    }
+  });
+
   it('no tool output contains the raw humanId, a humanId key, or a full address', async () => {
     const client = await connectInMemory(makeDeps({ badgeBaseUrl: 'https://badges.example' }));
     const calls: Array<Record<string, unknown>> = [

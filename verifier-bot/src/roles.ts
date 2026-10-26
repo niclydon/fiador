@@ -1,38 +1,47 @@
-// Role decisions and the sync engine (DESIGN §5.5).
-//
-// The asymmetry at the heart of this module is deliberate:
-//   verified                       -> grant
-//   invalid | expired | unregistered -> revoke (the claim itself failed)
-//   unknown                        -> keep   (the CHECK failed, not the claim)
-//
-// `unknown` revokes nothing, ever. A transient RPC outage must not
-// mass-revoke a guild; chain unavailability is our problem, a lapsed
-// attestation is the operator's. An `unknown` binding retries once after
-// 15 minutes; a second consecutive `unknown` raises a log-channel
-// warning instead of a revocation.
+// Attestation checks and the parked role sync engine. The verifier can
+// establish that a registered wallet signed a claim about an application,
+// but it cannot yet establish control of that Discord application. Until
+// a trusted app-control challenge exists, every status keeps role state.
+// `unknown` still retries once and warns on a second failure.
 
 import type { VerificationStatus } from '@fiador/verify';
 import type { DiscordAdapter } from './discordAdapter.js';
-import { failureSentence } from './embeds.js';
 import type { Binding, Store } from './store.js';
 import type { CheckOutcome, VerifyService } from './verifyService.js';
 
 export type RoleAction = 'grant' | 'revoke' | 'keep';
 
-export function decideRoleAction(status: VerificationStatus): RoleAction {
-  switch (status) {
-    case 'verified':
-      return 'grant';
-    case 'invalid':
-    case 'expired':
-    case 'unregistered':
-      return 'revoke';
-    case 'unknown':
-      return 'keep';
-  }
+export function decideRoleAction(_status: VerificationStatus): RoleAction {
+  // The signed claim and its self-asserted bot ID are not app-control proof.
+  return 'keep';
 }
 
 export const UNKNOWN_RETRY_DELAY_MS = 15 * 60 * 1000;
+
+/** Announce the upgrade risk once per guild at startup, before any re-checks. */
+export async function warnLegacyRoleAudit(
+  guildId: string,
+  store: Store,
+  adapter: DiscordAdapter,
+  warn: (line: string) => void = console.warn,
+): Promise<void> {
+  const claimCount = store.listBindings(guildId).length;
+  // A configured role may have holders even if the local binding table is
+  // empty (for example, after a database migration or manual role grant).
+  if (claimCount === 0 && !store.getGuildConfig(guildId)?.roleId) return;
+  const line =
+    `FIADOR ADMIN AUDIT REQUIRED for guild ${guildId}: ${claimCount} stored legacy operator claim(s); this count does not enumerate role holders or prove Discord application control. ` +
+    'Manually review every existing Human-backed role holder and remove unsupported roles. Fiador will not grant or revoke roles.';
+  // A process warning survives a missing or misconfigured log channel.
+  warn(line);
+  if (store.getGuildConfig(guildId)?.logChannelId) {
+    try {
+      await adapter.sendLogLine(guildId, line);
+    } catch (error) {
+      warn(`Fiador could not post the role-audit warning to the configured log channel for guild ${guildId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
 
 export interface BindingSyncReport {
   applicationId: string;
@@ -89,8 +98,6 @@ export class RoleSyncEngine {
     binding: Binding,
     outcome: CheckOutcome,
   ): Promise<BindingSyncReport> {
-    const config = this.store.getGuildConfig(guildId);
-    const roleId = config?.roleId ?? null;
     const action = decideRoleAction(outcome.result.status);
     const key = RoleSyncEngine.key(guildId, binding.applicationId);
 
@@ -107,66 +114,13 @@ export class RoleSyncEngine {
     }
     this.consecutiveUnknowns.delete(key);
 
-    if (!roleId) {
-      return {
-        applicationId: binding.applicationId,
-        status: outcome.result.status,
-        action,
-        changed: false,
-        unknownWarning: false,
-        note: 'No Human-backed role configured for this guild; run /fiador setup.',
-      };
-    }
-
-    const botUserId =
-      binding.botUserId ??
-      outcome.botUserId ??
-      (await this.adapter.resolveBotUserId(guildId, binding.applicationId));
-    if (!botUserId) {
-      return {
-        applicationId: binding.applicationId,
-        status: outcome.result.status,
-        action,
-        changed: false,
-        unknownWarning: false,
-        note: 'Could not resolve the bot user for this application in this guild.',
-      };
-    }
-
-    const hasRole = await this.adapter.memberHasRole(guildId, botUserId, roleId);
-    let changed = false;
-    if (action === 'grant' && !hasRole) {
-      await this.adapter.grantRole(
-        guildId,
-        botUserId,
-        roleId,
-        'Fiador: attestation verified against AgentBook.',
-      );
-      changed = true;
-    } else if (action === 'revoke' && hasRole) {
-      const sentence = outcome.result.failures.map(failureSentence).join(' ');
-      await this.adapter.revokeRole(
-        guildId,
-        botUserId,
-        roleId,
-        `Fiador: ${outcome.result.status}. ${sentence}`.trim(),
-      );
-      changed = true;
-    }
-
-    if (changed) {
-      await this.adapter.sendLogLine(
-        guildId,
-        `Fiador: ${action === 'grant' ? 'granted' : 'revoked'} Human-backed for application ${binding.applicationId} (${outcome.result.status}).`,
-      );
-    }
-
     return {
       applicationId: binding.applicationId,
       status: outcome.result.status,
       action,
-      changed,
+      changed: false,
       unknownWarning: false,
+      note: 'Discord application control is unproven; Human-backed role sync is disabled.',
     };
   }
 

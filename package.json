@@ -2,13 +2,14 @@
   "author": "Nic Lydon",
   "description": "Fiador \u2014 human-backed attestation for Discord bots",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13.0"
   },
   "license": "Apache-2.0",
   "name": "fiador",
   "private": true,
   "scripts": {
-    "build": "npm run build --workspace @fiador/verify && npm run build --workspaces --if-present",
+    "prebuild": "npm run build --workspace=@fiador/verify",
+    "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },

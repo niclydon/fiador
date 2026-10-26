@@ -61,8 +61,8 @@ export interface CheckOutcome {
   result: PublicVerifyResult;
   /** The attestation that was checked, when one was presented or found. */
   attestation: SignedAttestation | null;
-  /** Bot user ID from the payload's signed extra field, when present. */
-  botUserId: string | null;
+  /** No trusted proof yet links the signer to the Discord application. */
+  applicationControl: 'unproven';
 }
 
 export interface VerifyServiceDeps {
@@ -190,7 +190,7 @@ export class VerifyService {
       applicationId,
       result: pub,
       attestation,
-      botUserId: attestation?.payload.extra?.discord_bot_user_id ?? null,
+      applicationControl: 'unproven',
     };
   }
 }

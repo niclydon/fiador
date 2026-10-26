@@ -7,8 +7,8 @@
 // full address and any raw humanId, never reaches this module: there is
 // nothing here to leak because the leakable fields are not inputs.
 //
-// Colours are the Nova Glass badge-state tokens: verified eye gold,
-// expired amber, unverified grey, unknown cerulean.
+// Application control has no trusted proof path yet. A passing core
+// attestation therefore uses a neutral presentation, never badge green.
 
 import type {
   FailureCode,
@@ -35,7 +35,7 @@ export interface EmbedObject {
 }
 
 const STATUS_COLORS: Record<VerificationStatus, number> = {
-  verified: 0xd4a55d, // eye gold
+  verified: 0x6e6e73, // neutral: operator proof alone cannot verify an app
   expired: 0xc9933a, // amber
   invalid: 0x6e6e73, // grey
   unregistered: 0x6e6e73, // grey
@@ -43,7 +43,7 @@ const STATUS_COLORS: Record<VerificationStatus, number> = {
 };
 
 const STATUS_TITLES: Record<VerificationStatus, string> = {
-  verified: 'Verified — human-backed',
+  verified: 'Application control unproven',
   expired: 'Attestation expired',
   invalid: 'Attestation invalid',
   unregistered: 'Not registered in AgentBook',
@@ -87,7 +87,8 @@ export function buildResultEmbed(input: ResultEmbedInput): EmbedObject {
   const payload = input.attestation?.payload;
   const fields: EmbedField[] = [
     { name: 'Application ID', value: input.applicationId, inline: true },
-    { name: 'Status', value: result.status, inline: true },
+    { name: 'Operator attestation', value: result.status, inline: true },
+    { name: 'Discord application control', value: 'Unproven', inline: true },
     { name: 'Wallet', value: result.addressTruncated, inline: true },
   ];
   if (result.humanHash !== null) {
@@ -110,7 +111,7 @@ export function buildResultEmbed(input: ResultEmbedInput): EmbedObject {
 
   const description =
     result.status === 'verified'
-      ? 'A unique human backs this bot: its operator attestation verified against AgentBook just now.'
+      ? 'The signing wallet is registered in AgentBook and signed this claim. The wallet has not been linked to control of this Discord application; no Human-backed role is granted.'
       : result.failures.map(failureSentence).join(' ');
 
   return {
