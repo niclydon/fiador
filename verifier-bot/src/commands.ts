@@ -8,6 +8,7 @@
 // Commands:
 //   /fiador status    paged legacy claims, last checks, manual role audit
 //   /fiador setup     (Manage Guild) configure role / registry / interval / log channel
+//   /fiador control-start, control-complete  limited bot-response witness
 //   /verify-agent     one-off check of one application, no state change
 //   /attest           operator claim check; app control remains unproven
 
@@ -17,6 +18,7 @@ import {
 } from 'discord.js';
 import type { SignedAttestation } from '@fiador/verify';
 import type { DiscordAdapter } from './discordAdapter.js';
+import { canonicalChallengeText, type AppControlService } from './appControl.js';
 import { buildResultEmbed, failureSentence, type EmbedObject } from './embeds.js';
 import { RoleSyncEngine } from './roles.js';
 import type { Store } from './store.js';
@@ -35,6 +37,7 @@ function statusField(value: string, limit: number): string {
 
 export interface CommandContext {
   guildId: string;
+  channelId: string;
   userId: string;
   hasManageGuild: boolean;
   getOption(name: string): string | null;
@@ -53,6 +56,7 @@ export interface CommandDeps {
   sync: RoleSyncEngine;
   rateLimiter: AttemptRateLimiter;
   defaultSyncIntervalMinutes: number;
+  appControl?: AppControlService;
 }
 
 /** /attest rate limit (DESIGN §5.4): 5 attempts / user / guild / 10 min. */
@@ -110,7 +114,18 @@ export function buildCommandDefinitions(): RESTPostAPIChatInputApplicationComman
         .addStringOption((opt) =>
           opt.setName('log_channel_id').setDescription('Channel ID for check warnings'),
         ),
-    );
+    )
+    .addSubcommand((sub) => sub
+      .setName('control-start')
+      .setDescription('Start a private wallet and bot-response witness (Manage Guild)')
+      .addStringOption((opt) => opt.setName('url')
+        .setDescription('HTTPS URL of the signed Discord attestation').setRequired(true)))
+    .addSubcommand((sub) => sub
+      .setName('control-complete')
+      .setDescription('Check a signed challenge and one exact bot message (Manage Guild)')
+      .addStringOption((opt) => opt.setName('nonce').setDescription('Nonce from control-start').setRequired(true))
+      .addStringOption((opt) => opt.setName('signature').setDescription('Wallet signature over exact challenge text').setRequired(true))
+      .addStringOption((opt) => opt.setName('message_id').setDescription('Target bot message ID').setRequired(true)));
 
   const verifyAgent = new SlashCommandBuilder()
     .setName('verify-agent')
@@ -222,9 +237,55 @@ export async function handleFiadorSetup(
       `• Registry URL: ${config.registryUrl ?? '(instance default)'}`,
       `• Sync interval: ${config.syncIntervalMinutes} minutes`,
       `• Log channel ID: ${config.logChannelId ?? '(none)'}`,
-      'Application-control proof is not implemented. Role automation is disabled.',
+      'Bot-response witnessing is available through /fiador control-start. It is not app-control proof. Role automation is disabled.',
     ].join('\n'),
   );
+}
+
+export async function handleFiadorControlStart(
+  ctx: CommandContext,
+  deps: CommandDeps,
+): Promise<ReplyPayload> {
+  if (!ctx.hasManageGuild) return ephemeral('`/fiador control-start` requires Manage Guild.');
+  if (!deps.appControl) return ephemeral('Challenge witness is unavailable on this verifier.');
+  if (!deps.rateLimiter.tryAcquire(`control:${ctx.guildId}:${ctx.userId}`)) {
+    return ephemeral('Too many challenge attempts — try again in a few minutes.');
+  }
+  const url = ctx.getOption('url');
+  if (!url) return ephemeral('Provide the signed attestation `url`.');
+  try {
+    const challenge = await deps.appControl.start(ctx.guildId, ctx.channelId, url);
+    return ephemeral([
+      `Challenge nonce: \`${challenge.nonce}\`. Expires ${challenge.expiresAt}.`,
+      'Sign the exact text below with the attestation wallet. Have the named bot post that same exact text in this channel, then run `/fiador control-complete` with the signature and bot message ID.',
+      'This records a bot response only. It does not establish application-operator control or grant a role.',
+      `\`\`\`text\n${canonicalChallengeText(challenge)}\n\`\`\``,
+    ].join('\n'));
+  } catch (error) {
+    return ephemeral(`No challenge was started: ${error instanceof Error ? error.message : 'verification unavailable'}`);
+  }
+}
+
+export async function handleFiadorControlComplete(
+  ctx: CommandContext,
+  deps: CommandDeps,
+): Promise<ReplyPayload> {
+  if (!ctx.hasManageGuild) return ephemeral('`/fiador control-complete` requires Manage Guild.');
+  if (!deps.appControl) return ephemeral('Challenge witness is unavailable on this verifier.');
+  if (!deps.rateLimiter.tryAcquire(`control:${ctx.guildId}:${ctx.userId}`)) {
+    return ephemeral('Too many challenge attempts — try again in a few minutes.');
+  }
+  try {
+    const witnessed = await deps.appControl.complete(
+      ctx.guildId, ctx.getOption('nonce') ?? '', ctx.getOption('signature') ?? '',
+      ctx.getOption('message_id') ?? '',
+    );
+    return ephemeral(witnessed
+      ? 'Fresh signed-wallet and bot-response witness recorded. Application-operator control remains unproven; no binding or role was changed.'
+      : 'No witness recorded. The challenge may be invalid, expired, used, or the wallet and Discord evidence may not match.');
+  } catch {
+    return ephemeral('No witness recorded because an external check was unavailable. Retry while the challenge is still live.');
+  }
 }
 
 export async function handleVerifyAgent(

@@ -10,6 +10,15 @@ export class FakeDiscordAdapter implements DiscordAdapter {
   readonly grants: { guildId: string; userId: string; roleId: string; reason: string }[] = [];
   readonly revokes: { guildId: string; userId: string; roleId: string; reason: string }[] = [];
   readonly logLines: { guildId: string; line: string }[] = [];
+  ownBotId = '555555555555555555';
+  integrations: unknown = [];
+  channelGuildId: string | null = 'guild-1';
+  message: unknown = null;
+
+  verifierBotUserId(): string | null { return this.ownBotId; }
+  async getGuildIntegrations(): Promise<unknown> { return this.integrations; }
+  async getChannelGuildId(): Promise<string | null> { return this.channelGuildId; }
+  async getChannelMessage(): Promise<unknown> { return this.message; }
 
   private static key(guildId: string, userId: string): string {
     return `${guildId}:${userId}`;
@@ -44,6 +53,7 @@ export function makeCtx(
 ): CommandContext {
   return {
     guildId: 'guild-1',
+    channelId: 'channel-1',
     userId: 'user-1',
     hasManageGuild: true,
     getOption: (name) => options[name] ?? null,

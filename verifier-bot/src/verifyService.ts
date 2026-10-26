@@ -3,7 +3,7 @@
 //
 // It wraps the verify core (@fiador/verify, W0 spec §3) and supplies the
 // consumer-side pieces the core deliberately does not own: finding the
-// attestation (guild binding first, then the registry), fetching it
+// attestation (registry revocation first, then an untrusted legacy URL), fetching it
 // through the SSRF guard, and writing every check to check_log.
 //
 // Everything this service returns for display has passed through
@@ -50,6 +50,7 @@ export interface VerifierLike {
 export interface RegistryEntry {
   discord_application_id: string;
   attestation_url: string;
+  payload_hash?: string;
   status?: string;
   submitted_by?: string;
   added_at?: string;
@@ -119,28 +120,47 @@ export class VerifyService {
   ): Promise<RegistryEntry | null> {
     const doc = (await this.fetchJson(registryUrl)) as { entries?: RegistryEntry[] } | null;
     if (!doc || !Array.isArray(doc.entries)) return null;
-    return doc.entries.find((e) => e.discord_application_id === applicationId) ?? null;
+    const matches = doc.entries.filter((e) => e?.discord_application_id === applicationId);
+    if (matches.length > 1) throw new Error('Duplicate registry application entries.');
+    const entry = matches[0] ?? null;
+    if (entry && (typeof entry.attestation_url !== 'string' ||
+        (entry.payload_hash !== undefined && !/^[0-9a-f]{64}$/.test(entry.payload_hash)) ||
+        (entry.status !== undefined && entry.status !== 'revoked'))) {
+      throw new Error('Malformed registry entry.');
+    }
+    return entry;
+  }
+
+  /** A configured registry cannot be bypassed by a different local URL or payload. */
+  async isPublishedClaimCurrent(
+    guildId: string, applicationId: string, attestationUrl: string, canonicalPayloadHash: string,
+  ): Promise<boolean> {
+    const registryUrl = this.store.getGuildConfig(guildId)?.registryUrl ?? this.defaultRegistryUrl;
+    if (!registryUrl) return true;
+    const entry = await this.fetchRegistryEntry(registryUrl, applicationId);
+    if (!entry) return true;
+    return entry.status !== 'revoked' && entry.attestation_url === attestationUrl &&
+      (entry.payload_hash === undefined || entry.payload_hash === canonicalPayloadHash);
   }
 
   /**
-   * Discovery (DESIGN §3.5): guild binding first, then the guild's
-   * registry (falling back to the instance default registry).
+   * Discovery: a registry tombstone always blocks a legacy binding.
+   * Active registry entries precede legacy local URLs; neither proves app control.
    * Returns null when no attestation is published for the application.
    */
   async resolveAttestation(
     guildId: string,
     applicationId: string,
   ): Promise<SignedAttestation | null> {
-    const binding = this.store.getBinding(guildId, applicationId);
-    if (binding) {
-      return this.fetchAttestation(binding.attestationUrl);
-    }
     const registryUrl =
       this.store.getGuildConfig(guildId)?.registryUrl ?? this.defaultRegistryUrl;
-    if (!registryUrl) return null;
-    const entry = await this.fetchRegistryEntry(registryUrl, applicationId);
-    if (!entry || entry.status === 'revoked') return null;
-    return this.fetchAttestation(entry.attestation_url);
+    if (registryUrl) {
+      const entry = await this.fetchRegistryEntry(registryUrl, applicationId);
+      if (entry?.status === 'revoked') return null;
+      if (entry) return this.fetchAttestation(entry.attestation_url);
+    }
+    const binding = this.store.getBinding(guildId, applicationId);
+    return binding ? this.fetchAttestation(binding.attestationUrl) : null;
   }
 
   /** One-off check of an application ID. No state change beyond check_log. */
