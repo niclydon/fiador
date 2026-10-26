@@ -86,3 +86,20 @@ decision: @worldcoin/agentkit-core 0.2.1.
   release. Production `fiador.org` still served an older deployment
   with `/verify/` and `/v/` returning 404. Browser CORS/RPC behavior,
   Discord unfurl and app-control evidence remain launch gates.
+
+## 2026-10-26 — local browser check with the live attestation and chain
+
+- Built Fiador main `ebdbd3d` with `npm run build:web` and served its
+  ignored `public/` tree on loopback. Chromium loaded `/verify/` with
+  HTTP 200 and checked the founding public Discord application ID through
+  the locally served canonical registry.
+- The browser fetched the published attestation from `fiador.org` and
+  used the page's default `worldchain-mainnet.g.alchemy.com` RPC. There
+  were no failed browser requests or page errors. The result was
+  **Claim unconfirmed**: wallet signature, signed Discord profile, and
+  live AgentBook registration passed; Discord application control was
+  not established.
+- This establishes that the browser CORS and live RPC path worked from
+  a local build at check time. It does not test the protected Vercel
+  preview, the still-missing production `/verify/` and `/v/` routes,
+  a Discord unfurl, or application control.
