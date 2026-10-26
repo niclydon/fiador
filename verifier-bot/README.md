@@ -31,8 +31,9 @@ Fiador verifies *operator* attestations: the claim being checked is
 "a unique human backs the operator of this bot application". It does not
 run World ID proofs for individual users. It never displays or stores a
 raw humanId: public results carry the humanId hash only, and the hashes
-and wallet addresses in public check results are truncated. The private
-challenge text necessarily includes the signing wallet address.
+and wallet addresses in public check results are truncated. The ephemeral
+wallet-signature text includes the full signing wallet address; the separate
+public bot message contains only the verifier mention and a random nonce.
 
 ## The Human-backed role
 
@@ -78,11 +79,13 @@ The two control commands share a separate per-user, per-guild limit.
    its exact HTTPS `attestationUrl`.
 2. A member with Manage Guild runs `/fiador control-start url:<URL>` in a
    channel belonging to the verifier's guild.
-3. Sign the **exact** returned challenge text with the attestation wallet
-   as an EIP-191 personal message. Have the named bot post that **same
-   exact** text in the same channel, then copy the bot message ID. The text
+3. Sign the **private wallet-signature text** with the attestation wallet
+   as an EIP-191 personal message. Do not post it. Have the named bot post
+   only the separate **public bot-response text** in the same channel, then
+   copy the bot message ID. The public text includes a random nonce and
    mentions the verifier bot so Discord can reveal its content without a
-   privileged Message Content intent.
+   privileged Message Content intent. It does not include the wallet,
+   attestation hash or URL, application ID, or bot ID.
 4. Run `/fiador control-complete` with the nonce, wallet signature, and
    message ID before the ten-minute deadline.
 
@@ -95,8 +98,12 @@ list at 50, so a list of 50 fails closed. Exactly one enabled
 `type=discord` integration must have the claimed `application.id` and
 `application.bot.id`; an omitted bot field fails.
 
-Completion repeats the attestation and live AgentBook check, recomputes
-the signed payload hash, checks registry revocation, verifies the wallet
+The private signature text binds the full wallet, signed payload hash,
+application and bot IDs, guild and channel IDs, verifier ID, nonce, and
+deadline. The nonce links it to the public bot response without publishing
+those identifiers in the bot's message. Completion repeats the attestation
+and live AgentBook check, recomputes the signed payload hash, checks registry
+revocation, verifies the wallet
 signature on World Chain, checks the channel's guild, fetches the exact
 fresh DEFAULT bot message, and rereads the integration before atomically
 consuming the nonce. Webhook, edited, forwarded, crossposted, and

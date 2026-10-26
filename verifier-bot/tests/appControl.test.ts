@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { verifyMessage } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { AppControlService, canonicalChallengeText, matchesDiscordIntegration, matchesDiscordMessage } from '../src/appControl.js';
+import { AppControlService, canonicalBotResponseText, canonicalChallengeText, matchesDiscordIntegration, matchesDiscordMessage } from '../src/appControl.js';
 import { InMemoryStore } from '../src/store.js';
 import { FakeDiscordAdapter } from './helpers.js';
 import { createVerifier, hashHumanId, makeAttestation, resetFakeVerifier, SYNTHETIC_HUMAN_ID } from './fakeVerify.js';
@@ -70,7 +70,7 @@ describe('Discord app response witness', () => {
       payloadHash: 'bb'.repeat(32), attestationUrl: 'https://example.com/a.json',
       issuedAt: '2026-10-26T20:00:00.000Z', expiresAt: '2026-10-26T20:10:00.000Z',
       consumedAt: null, messageId: null };
-    const text = canonicalChallengeText(challenge);
+    const text = canonicalBotResponseText(challenge);
     const message = { id: MESSAGE, channel_id: CHANNEL, author: { id: BOT, bot: true },
       type: 0, content: text, timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
     expect(matchesDiscordMessage(message, challenge, message.id)).toBe(true);
@@ -82,6 +82,7 @@ describe('Discord app response witness', () => {
     expect(matchesDiscordMessage({ ...message, guild_id: '999999999999999999' }, challenge, message.id)).toBe(false);
     expect(matchesDiscordMessage(message, challenge, '888888888888888888')).toBe(false);
     expect(matchesDiscordMessage({ ...message, content: ` ${text}` }, challenge, message.id)).toBe(false);
+    expect(matchesDiscordMessage({ ...message, content: canonicalChallengeText(challenge) }, challenge, message.id)).toBe(false);
     expect(matchesDiscordMessage({ ...message, channel_id: GUILD }, challenge, message.id)).toBe(false);
     expect(matchesDiscordMessage({ ...message, type: 1 }, challenge, message.id)).toBe(false);
     expect(matchesDiscordMessage({ ...message, flags: 2 }, challenge, message.id)).toBe(false);
@@ -89,15 +90,37 @@ describe('Discord app response witness', () => {
     expect(matchesDiscordMessage({ ...message, message_reference: {} }, challenge, message.id)).toBe(false);
   });
 
+  it('keeps the signed wallet and claim identifiers out of the public bot response', async () => {
+    const f = fixture();
+    const challenge = await f.service.start(GUILD, CHANNEL, URL);
+    const privateText = canonicalChallengeText(challenge);
+    const publicText = canonicalBotResponseText(challenge);
+    expect(privateText).toContain(challenge.wallet);
+    expect(privateText).toContain(challenge.payloadHash);
+    expect(privateText).toContain(challenge.applicationId);
+    expect(privateText).toContain(challenge.botUserId);
+    expect(privateText).toContain(challenge.guildId);
+    expect(privateText).toContain(challenge.channelId);
+    expect(publicText).toContain(`<@${VERIFIER}>`);
+    expect(publicText).toContain(challenge.nonce);
+    for (const privateValue of [challenge.wallet, challenge.payloadHash, challenge.attestationUrl,
+      challenge.applicationId, challenge.botUserId, challenge.guildId, challenge.channelId]) {
+      expect(publicText).not.toContain(privateValue);
+    }
+    expect(publicText).not.toBe(privateText);
+  });
+
   it('records one wallet-signed and Discord-authenticated witness without binding or roles', async () => {
     const f = fixture();
     const challenge = await f.service.start(GUILD, CHANNEL, URL);
     expect(challenge.wallet).toBe(account.address);
-    expect(canonicalChallengeText(challenge)).toContain(`<@${VERIFIER}>`);
+    expect(canonicalBotResponseText(challenge)).toContain(`<@${VERIFIER}>`);
     f.adapter.message = { id: MESSAGE, channel_id: CHANNEL, author: { id: BOT, bot: true },
-      type: 0, content: canonicalChallengeText(challenge), timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
+      type: 0, content: canonicalBotResponseText(challenge), timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
+    const publicTextSignature = await account.signMessage({ message: canonicalBotResponseText(challenge) });
     const signature = await account.signMessage({ message: canonicalChallengeText(challenge) });
     f.setNow('2026-10-26T20:02:00.000Z');
+    expect(await f.service.complete(GUILD, challenge.nonce, publicTextSignature, MESSAGE)).toBe(false);
     expect(await f.service.complete(GUILD, challenge.nonce, signature, MESSAGE)).toBe(true);
     expect(await f.service.complete(GUILD, challenge.nonce, signature, MESSAGE)).toBe(false);
     expect(f.store.getControlChallenge(challenge.nonce)).toMatchObject({ messageId: MESSAGE, consumedAt: '2026-10-26T20:02:00.000Z' });
@@ -118,7 +141,7 @@ describe('Discord app response witness', () => {
     const f = fixture();
     const challenge = await f.service.start(GUILD, CHANNEL, URL);
     f.adapter.message = { id: MESSAGE, channel_id: CHANNEL, author: { id: BOT, bot: true },
-      type: 0, content: canonicalChallengeText(challenge), timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
+      type: 0, content: canonicalBotResponseText(challenge), timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
     const signature = await account.signMessage({ message: canonicalChallengeText(challenge) });
     f.setNow('2026-10-26T20:02:00.000Z');
     const otherAccount = privateKeyToAccount(generatePrivateKey());
@@ -141,7 +164,7 @@ describe('Discord app response witness', () => {
     const f = fixture();
     const challenge = await f.service.start(GUILD, CHANNEL, URL);
     f.adapter.message = { id: MESSAGE, channel_id: CHANNEL, author: { id: BOT, bot: true },
-      type: 0, content: canonicalChallengeText(challenge), timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
+      type: 0, content: canonicalBotResponseText(challenge), timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
     const signature = await account.signMessage({ message: canonicalChallengeText(challenge) });
     f.setNow('2026-10-26T20:02:00.000Z');
     expect((await Promise.all([
@@ -154,7 +177,7 @@ describe('Discord app response witness', () => {
     const f = fixture();
     const challenge = await f.service.start(GUILD, CHANNEL, URL);
     f.adapter.message = { id: MESSAGE, channel_id: CHANNEL, author: { id: BOT, bot: true },
-      type: 0, content: canonicalChallengeText(challenge), timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
+      type: 0, content: canonicalBotResponseText(challenge), timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
     const signature = await account.signMessage({ message: canonicalChallengeText(challenge) });
     f.setNow('2026-10-26T20:02:00.000Z');
     const originalRead = f.adapter.getGuildIntegrations.bind(f.adapter);
@@ -226,10 +249,14 @@ describe('Discord app response witness', () => {
     expect(started.content).toContain('does not establish application-operator control');
     const challenge = f.store.getControlChallenge('aa'.repeat(32))!;
     expect(started.content).toContain(canonicalChallengeText(challenge));
+    expect(started.content).toContain(canonicalBotResponseText(challenge));
+    expect(started.content).toContain('Do not post it');
+    expect(started.content).toContain('post only the separate public text');
+    expect(started.content?.split('Public bot-response text:')[1]).not.toContain(challenge.wallet);
     expect(started.content?.length).toBeLessThanOrEqual(2000);
     const signature = await account.signMessage({ message: canonicalChallengeText(challenge) });
     f.adapter.message = { id: MESSAGE, channel_id: CHANNEL, author: { id: BOT, bot: true },
-      type: 0, content: canonicalChallengeText(challenge), timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
+      type: 0, content: canonicalBotResponseText(challenge), timestamp: '2026-10-26T20:01:00.000Z', edited_timestamp: null };
     f.setNow('2026-10-26T20:02:00.000Z');
     const completed = await handleFiadorControlComplete(makeCtx({ nonce: challenge.nonce,
       signature, message_id: MESSAGE }, { guildId: GUILD, channelId: CHANNEL }), deps);

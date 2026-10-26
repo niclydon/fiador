@@ -18,7 +18,7 @@ import {
 } from 'discord.js';
 import type { SignedAttestation } from '@fiador/verify';
 import type { DiscordAdapter } from './discordAdapter.js';
-import { canonicalChallengeText, type AppControlService } from './appControl.js';
+import { canonicalBotResponseText, canonicalChallengeText, type AppControlService } from './appControl.js';
 import { buildResultEmbed, failureSentence, type EmbedObject } from './embeds.js';
 import { RoleSyncEngine } from './roles.js';
 import type { Store } from './store.js';
@@ -257,9 +257,12 @@ export async function handleFiadorControlStart(
     const challenge = await deps.appControl.start(ctx.guildId, ctx.channelId, url);
     return ephemeral([
       `Challenge nonce: \`${challenge.nonce}\`. Expires ${challenge.expiresAt}.`,
-      'Sign the exact text below with the attestation wallet. Have the named bot post that same exact text in this channel, then run `/fiador control-complete` with the signature and bot message ID.',
+      'Sign the private text below with the attestation wallet. Do not post it. Have the named bot post only the separate public text in this channel, then run `/fiador control-complete` with the signature and bot message ID.',
       'This records a bot response only. It does not establish application-operator control or grant a role.',
+      'Private wallet-signature text:',
       `\`\`\`text\n${canonicalChallengeText(challenge)}\n\`\`\``,
+      'Public bot-response text:',
+      `\`\`\`text\n${canonicalBotResponseText(challenge)}\n\`\`\``,
     ].join('\n'));
   } catch (error) {
     return ephemeral(`No challenge was started: ${error instanceof Error ? error.message : 'verification unavailable'}`);

@@ -1,5 +1,5 @@
 // A deliberately limited two-party witness. It records that the attestation
-// wallet signed a fresh challenge and the named bot posted it. A bot may echo
+// wallet signed a fresh challenge and the named bot posted its nonce. A bot may echo
 // arbitrary users, so this is NOT application-operator control proof.
 import { randomBytes } from 'node:crypto';
 import { createPublicClient, http, type Hex } from 'viem';
@@ -18,11 +18,11 @@ function record(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown> : null;
 }
 
-/** Exact UTF-8 message signed by the wallet AND posted by the target bot. */
+/** Private UTF-8 message signed by the wallet. Never ask the target bot to post it. */
 export function canonicalChallengeText(challenge: ControlChallenge): string {
-  return `<@${challenge.verifierBotUserId}>\nFiador bot-response witness v1\n${JSON.stringify({
+  return `Fiador private wallet-signature witness v2\n${JSON.stringify({
     domain: 'fiador.org',
-    version: 1,
+    version: 2,
     guildId: challenge.guildId,
     channelId: challenge.channelId,
     verifierBotUserId: challenge.verifierBotUserId,
@@ -34,6 +34,11 @@ export function canonicalChallengeText(challenge: ControlChallenge): string {
     issuedAt: challenge.issuedAt,
     expiresAt: challenge.expiresAt,
   })}`;
+}
+
+/** Public text posted by the target bot. The random nonce links it to the private signed row. */
+export function canonicalBotResponseText(challenge: ControlChallenge): string {
+  return `<@${challenge.verifierBotUserId}>\nFiador public bot-response witness v2\nnonce:${challenge.nonce}`;
 }
 
 /** Discord caps the list at 50. Exactly 50 is ambiguous, so fail closed. */
@@ -62,7 +67,7 @@ export function matchesDiscordMessage(value: unknown, challenge: ControlChalleng
     message.id === messageId && message.channel_id === challenge.channelId &&
     (message.guild_id === undefined || message.guild_id === challenge.guildId) &&
     message.type === 0 && (message.flags === undefined || message.flags === 0) &&
-    message.content === canonicalChallengeText(challenge) &&
+    message.content === canonicalBotResponseText(challenge) &&
     message.edited_timestamp === null &&
     (message.webhook_id === undefined || message.webhook_id === null) &&
     message.message_reference === undefined && message.message_snapshots === undefined &&
