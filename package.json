@@ -1,0 +1,1 @@
+{"author":"Nic Lydon","engines":{"node":">=20"},"license":"Apache-2.0","name":"fiador","private":true,"scripts":{"build":"npm run build -w @fiador/verify && npm run build -w @fiador/verify-mcp","test":"npm run test -w @fiador/verify && npm run test -w @fiador/verify-mcp"},"version":"0.1.0","workspaces":["packages/*"]}
