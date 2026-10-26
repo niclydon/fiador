@@ -23,7 +23,7 @@ const APP = '123456789012345678';
 const BOT_USER = '987654321098765432';
 const ROLE = 'role-1';
 
-function buildDeps(): { deps: CommandDeps; store: InMemoryStore; adapter: FakeDiscordAdapter } {
+function buildDeps(): { deps: CommandDeps; store: InMemoryStore; adapter: FakeDiscordAdapter; fetches: { count: number } } {
   const store = new InMemoryStore();
   store.upsertGuildConfig({
     guildId: GUILD,
@@ -33,10 +33,14 @@ function buildDeps(): { deps: CommandDeps; store: InMemoryStore; adapter: FakeDi
     logChannelId: null,
   });
   const adapter = new FakeDiscordAdapter();
+  const fetches = { count: 0 };
   const service = new VerifyService({
     verifier: createVerifier() as unknown as VerifierLike,
     store,
-    fetchJson: async () => makeAttestation(),
+    fetchJson: async () => {
+      fetches.count++;
+      return makeAttestation();
+    },
   });
   const sync = new RoleSyncEngine({ store, service, adapter, sleep: async () => undefined });
   const deps: CommandDeps = {
@@ -47,7 +51,7 @@ function buildDeps(): { deps: CommandDeps; store: InMemoryStore; adapter: FakeDi
     rateLimiter: new AttemptRateLimiter(),
     defaultSyncIntervalMinutes: 360,
   };
-  return { deps, store, adapter };
+  return { deps, store, adapter, fetches };
 }
 
 describe('/attest — the operator claim flow (DESIGN §5.2, §3.5)', () => {
@@ -232,5 +236,48 @@ describe('/verify-agent — one-off check, no state change', () => {
     expect(store.listCheckLog(GUILD, APP)).toHaveLength(1);
     expect(adapter.grants).toHaveLength(0);
     expect(adapter.revokes).toHaveLength(0);
+  });
+
+  it('shares the check budget with /attest and refuses before a remote fetch', async () => {
+    const { deps, store, adapter, fetches } = buildDeps();
+    store.upsertBinding({
+      guildId: GUILD,
+      applicationId: APP,
+      attestationUrl: 'https://operator.example.com/attestation.json',
+      payloadHash: null,
+      boundVia: 'url',
+      boundBy: 'user-1',
+      boundAt: '2026-10-25T00:00:00.000Z',
+      botUserId: BOT_USER,
+    });
+    const attest = () => handleAttest(
+      makeCtx({ attestation: JSON.stringify(makeAttestation()) }), deps,
+    );
+    const verify = () => handleVerifyAgent(makeCtx({ application_id: APP }), deps);
+    for (let i = 0; i < 4; i++) await attest();
+    expect((await verify()).embeds).toHaveLength(1);
+    expect((await verify()).content).toContain('Too many checks');
+    expect((await attest()).content).toContain('Too many checks');
+    expect(fetches.count).toBe(1);
+    expect(store.listCheckLog(GUILD, APP)).toHaveLength(5);
+    expect(adapter.grants).toHaveLength(0);
+    expect(adapter.revokes).toHaveLength(0);
+
+    // The budget is isolated by user and guild, while still shared by command.
+    expect((await handleVerifyAgent(makeCtx({ application_id: APP }, { userId: 'user-2' }), deps)).embeds).toHaveLength(1);
+    expect((await handleVerifyAgent(makeCtx({ application_id: APP }, { guildId: 'guild-2' }), deps)).embeds).toHaveLength(1);
+    expect(fetches.count).toBe(2); // guild-2 has no stored binding or registry URL
+  });
+
+  it('reopens the shared check budget after ten minutes', async () => {
+    const { deps, store } = buildDeps();
+    let nowMs = 0;
+    deps.rateLimiter = new AttemptRateLimiter(5, 10 * 60 * 1000, () => nowMs);
+    const ctx = () => makeCtx({ application_id: APP });
+    for (let i = 0; i < 5; i++) await handleVerifyAgent(ctx(), deps);
+    expect((await handleVerifyAgent(ctx(), deps)).content).toContain('Too many checks');
+    nowMs = 10 * 60 * 1000;
+    expect((await handleVerifyAgent(ctx(), deps)).embeds).toHaveLength(1);
+    expect(store.listCheckLog(GUILD, APP)).toHaveLength(6);
   });
 });

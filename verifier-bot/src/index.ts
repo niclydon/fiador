@@ -31,8 +31,9 @@ import {
   type CommandDeps,
   type ReplyPayload,
 } from './commands.js';
-import { loadConfig, type BotConfig } from './config.js';
+import { loadConfig } from './config.js';
 import type { DiscordAdapter } from './discordAdapter.js';
+import { scheduleGuildSync, startCheckLogPruning } from './maintenance.js';
 import { RoleSyncEngine, warnLegacyRoleAudit } from './roles.js';
 import { SqliteStore, type Store } from './store.js';
 import { VerifyService, type VerifierLike } from './verifyService.js';
@@ -94,50 +95,10 @@ async function dispatch(interaction: ChatInputCommandInteraction, deps: CommandD
   });
 }
 
-/**
- * Recurring full sync with ±10% jitter (DESIGN §5.5). Each guild uses
- * its own configured interval when set; the timer is unref'd so it never
- * keeps a dying process alive.
- */
-function scheduleSync(
-  config: BotConfig,
-  store: Store,
-  engine: RoleSyncEngine,
-): NodeJS.Timeout[] {
-  const timers: NodeJS.Timeout[] = [];
-  const tick = async () => {
-    for (const guildId of store.listGuildIds()) {
-      await engine.syncGuild(guildId).catch((err: unknown) => {
-        console.error(
-          `fiador: sync failed for guild ${guildId}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
-    }
-  };
-  const intervalMinutes =
-    store.listGuildIds().length > 0
-      ? Math.min(
-          ...store
-            .listGuildIds()
-            .map((id) => store.getGuildConfig(id)?.syncIntervalMinutes ?? config.syncIntervalMinutes),
-        )
-      : config.syncIntervalMinutes;
-  const baseMs = intervalMinutes * 60 * 1000;
-  const arm = () => {
-    const jitter = baseMs * 0.1 * (Math.random() * 2 - 1);
-    const timer = setTimeout(() => {
-      void tick().finally(arm);
-    }, Math.max(30_000, baseMs + jitter));
-    timer.unref();
-    timers.push(timer);
-  };
-  arm();
-  return timers;
-}
-
 export async function main(env: Record<string, string | undefined> = process.env): Promise<void> {
   const config = loadConfig(env);
   const store = new SqliteStore(config.dbPath);
+  startCheckLogPruning(store);
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
   });
@@ -191,8 +152,8 @@ export async function main(env: Record<string, string | undefined> = process.env
         await warnLegacyRoleAudit(guildId, store, adapter);
         await engine.syncGuild(guildId).catch(() => undefined);
       }
+      scheduleGuildSync(store, engine, config.syncIntervalMinutes);
     })();
-    scheduleSync(config, store, engine);
   });
 
   await client.login(config.token);
