@@ -10,14 +10,9 @@ export class FakeDiscordAdapter implements DiscordAdapter {
   readonly grants: { guildId: string; userId: string; roleId: string; reason: string }[] = [];
   readonly revokes: { guildId: string; userId: string; roleId: string; reason: string }[] = [];
   readonly logLines: { guildId: string; line: string }[] = [];
-  roleMemberCount = 0;
 
   private static key(guildId: string, userId: string): string {
     return `${guildId}:${userId}`;
-  }
-
-  async getRoleMemberCount(): Promise<number> {
-    return this.roleMemberCount;
   }
 
   async memberHasRole(guildId: string, userId: string): Promise<boolean> {

@@ -6,7 +6,7 @@
 // to this shape, which is what makes every flow testable without a token.
 //
 // Commands:
-//   /fiador status    paged legacy claims, last checks, role members
+//   /fiador status    paged legacy claims, last checks, manual role audit
 //   /fiador setup     (Manage Guild) configure role / registry / interval / log channel
 //   /verify-agent     one-off check of one application, no state change
 //   /attest           operator claim check; app control remains unproven
@@ -157,8 +157,7 @@ export async function handleFiadorStatus(
       `No Human-backed role is configured yet — an admin can run \`/fiador setup\`. (The role is named "${HUMAN_BACKED_ROLE_NAME}" by default and tracked by ID, so it can be renamed freely.)`,
     );
   } else {
-    const count = await deps.adapter.getRoleMemberCount(ctx.guildId, config.roleId);
-    lines.push(`Human-backed role: <@&${statusField(config.roleId, 64)}> — ${count} member(s).`);
+    lines.push(`Human-backed role: <@&${statusField(config.roleId, 64)}> — admin must inspect all role holders in Discord; this bot does not have a complete member count.`);
   }
   lines.push(
     `Legacy claim check interval: ${config?.syncIntervalMinutes ?? deps.defaultSyncIntervalMinutes} minutes. Registry: ${statusField(config?.registryUrl ?? '(instance default)', 120)}.`,

@@ -6,19 +6,23 @@
 //   2. The hostname is resolved first; if ANY resolved address is
 //      loopback, RFC1918, link-local (incl. the cloud metadata range),
 //      unique-local, or otherwise non-public, the fetch is refused.
-//      Literal IP hosts are checked directly, without resolution.
+//      Literal IP hosts are checked directly, without resolution. The
+//      HTTPS socket uses a vetted address, so DNS cannot change after
+//      the check; TLS still validates the original hostname.
 //   3. No redirect following (DESIGN §5.4): a 3xx is a failed fetch,
 //      because the redirect target was never vetted. Operators host
 //      the attestation at its final URL.
-//   4. 5s timeout per request; 64 KiB body cap, enforced while reading.
+//   4. 5s total deadline (including DNS); 64 KiB body cap while reading.
 //   5. The body must parse as JSON; a JSON content type is expected
 //      but not required (the parse attempt decides, per §5.4).
 //
-// Both the fetch implementation and the DNS lookup are injectable so the
+// Both the HTTPS transport and the DNS lookup are injectable so the
 // guard is fully testable without network access.
 
 import { lookup } from 'node:dns/promises';
+import { request } from 'node:https';
 import { isIP } from 'node:net';
+import type { ClientRequest, IncomingMessage } from 'node:http';
 
 export const MAX_BODY_BYTES = 64 * 1024;
 export const FETCH_TIMEOUT_MS = 5000;
@@ -26,7 +30,7 @@ export const FETCH_TIMEOUT_MS = 5000;
 export type DnsLookup = (hostname: string) => Promise<string[]>;
 
 export interface GuardedFetchOptions {
-  fetchImpl?: typeof fetch;
+  requestImpl?: typeof request;
   lookupImpl?: DnsLookup;
   timeoutMs?: number;
   maxBodyBytes?: number;
@@ -102,24 +106,35 @@ export function isNonPublicAddress(address: string): boolean {
   }
   if (kind === 6) {
     const lower = address.toLowerCase();
-    if (lower === '::' || lower === '::1') return true; // unspecified / loopback
-    if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb'))
-      return true; // fe80::/10 link-local
-    if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // fc00::/7 unique-local
-    if (lower.startsWith('ff')) return true; // multicast
     const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
     if (mapped) return isNonPublicAddress(mapped[1]);
+    const mappedHex = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (mappedHex) {
+      const value = parseInt(mappedHex[1], 16) * 65536 + parseInt(mappedHex[2], 16);
+      return isNonPublicAddress(
+        `${(value >>> 24) & 255}.${(value >>> 16) & 255}.${(value >>> 8) & 255}.${value & 255}`,
+      );
+    }
+    // Only global unicast (2000::/3) is fetchable. Reject transition
+    // mechanisms that can route to private IPv4 destinations and docs.
+    const first = parseInt(lower.split(':')[0], 16);
+    if (!Number.isFinite(first) || first < 0x2000 || first > 0x3fff) return true;
+    if (first === 0x2002) return true; // 6to4
+    if (first === 0x2001) {
+      const second = parseInt(lower.split(':')[1] || '0', 16);
+      if (second === 0 || second === 0x0db8) return true; // Teredo, docs
+    }
     return false;
   }
   return true; // Not an IP at all: treat as unsafe.
 }
 
-async function assertUrlIsFetchable(rawUrl: string, lookupImpl: DnsLookup): Promise<URL> {
+function parseTarget(rawUrl: string): URL {
   let url: URL;
   try {
     url = new URL(rawUrl);
   } catch {
-    throw new FetchGuardError('invalid_url', `Not a valid URL: ${rawUrl}`);
+    throw new FetchGuardError('invalid_url', 'Not a valid URL.');
   }
   if (url.protocol !== 'https:') {
     throw new FetchGuardError('not_https', `Refusing non-HTTPS URL: ${url.origin}${url.pathname}`);
@@ -128,72 +143,37 @@ async function assertUrlIsFetchable(rawUrl: string, lookupImpl: DnsLookup): Prom
     throw new FetchGuardError('url_credentials', 'Refusing URL with embedded credentials.');
   }
 
-  const hostname = url.hostname.replace(/^\[|\]$/g, '');
-  if (isIP(hostname)) {
-    if (isNonPublicAddress(hostname)) {
-      throw new FetchGuardError(
-        'private_address',
-        `Refusing URL whose host is a non-public address: ${hostname}`,
-      );
-    }
-    return url;
-  }
-
-  let addresses: string[];
-  try {
-    addresses = await lookupImpl(hostname);
-  } catch (err) {
-    throw new FetchGuardError(
-      'dns_failure',
-      `DNS resolution failed for ${hostname}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-  if (addresses.length === 0) {
-    throw new FetchGuardError('dns_failure', `DNS resolution returned no addresses for ${hostname}.`);
-  }
-  for (const address of addresses) {
-    if (isNonPublicAddress(address)) {
-      throw new FetchGuardError(
-        'private_address',
-        `Refusing URL: ${hostname} resolves to a non-public address (${address}).`,
-      );
-    }
-  }
   return url;
 }
 
-async function readBodyCapped(response: Response, maxBodyBytes: number): Promise<string> {
-  const declared = response.headers.get('content-length');
-  if (declared !== null && Number(declared) > maxBodyBytes) {
+async function readBodyCapped(
+  response: IncomingMessage,
+  req: ClientRequest,
+  maxBodyBytes: number,
+): Promise<string> {
+  const declared = response.headers['content-length'];
+  if (declared !== undefined && Number(declared) > maxBodyBytes) {
+    response.destroy();
+    req.destroy();
     throw new FetchGuardError(
       'body_too_large',
       `Response declares ${declared} bytes, over the ${maxBodyBytes}-byte cap.`,
     );
   }
-  if (!response.body) {
-    const text = await response.text();
-    if (Buffer.byteLength(text, 'utf8') > maxBodyBytes) {
-      throw new FetchGuardError('body_too_large', `Response body exceeds the ${maxBodyBytes}-byte cap.`);
-    }
-    return text;
-  }
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
+  const chunks: Buffer[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      total += value.byteLength;
-      if (total > maxBodyBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw new FetchGuardError(
-          'body_too_large',
-          `Response body exceeds the ${maxBodyBytes}-byte cap.`,
-        );
-      }
-      chunks.push(value);
+  for await (const chunk of response) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += bytes.length;
+    if (total > maxBodyBytes) {
+      response.destroy();
+      req.destroy();
+      throw new FetchGuardError(
+        'body_too_large',
+        `Response body exceeds the ${maxBodyBytes}-byte cap.`,
+      );
     }
+    chunks.push(bytes);
   }
   return Buffer.concat(chunks).toString('utf8');
 }
@@ -206,48 +186,97 @@ export async function guardedFetchJson(
   rawUrl: string,
   options: GuardedFetchOptions = {},
 ): Promise<unknown> {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const requestImpl = options.requestImpl ?? request;
   const lookupImpl = options.lookupImpl ?? defaultLookup;
   const timeoutMs = options.timeoutMs ?? FETCH_TIMEOUT_MS;
   const maxBodyBytes = options.maxBodyBytes ?? MAX_BODY_BYTES;
-
-  const url = await assertUrlIsFetchable(rawUrl, lookupImpl);
-
-  let response: Response;
+  const url = parseTarget(rawUrl);
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), timeoutMs);
   try {
-    response = await fetchImpl(url, {
-      method: 'GET',
-      redirect: 'manual',
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: { accept: 'application/json' },
-    });
-  } catch (err) {
-    if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+    let addresses: string[];
+    if (isIP(hostname)) {
+      addresses = [hostname];
+    } else {
+      try {
+        addresses = await Promise.race([
+          lookupImpl(hostname),
+          new Promise<never>((_, reject) => {
+            abort.signal.addEventListener('abort', () => reject(new FetchGuardError(
+              'timeout', `Fetch of ${url.origin}${url.pathname} timed out after ${timeoutMs}ms.`,
+            )), { once: true });
+          }),
+        ]);
+      } catch (error) {
+        if (abort.signal.aborted) {
+          throw new FetchGuardError('timeout', `Fetch of ${url.origin}${url.pathname} timed out after ${timeoutMs}ms.`);
+        }
+        throw new FetchGuardError('dns_failure', `DNS resolution failed for ${hostname}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (addresses.length === 0) {
+      throw new FetchGuardError('dns_failure', `DNS resolution returned no addresses for ${hostname}.`);
+    }
+    for (const address of addresses) {
+      if (isNonPublicAddress(address)) {
+        throw new FetchGuardError('private_address', `Refusing URL: ${hostname} resolves to a non-public address (${address}).`);
+      }
+    }
+    if (abort.signal.aborted) {
       throw new FetchGuardError('timeout', `Fetch of ${url.origin}${url.pathname} timed out after ${timeoutMs}ms.`);
     }
-    throw new FetchGuardError(
-      'http_status',
-      `Fetch of ${url.origin}${url.pathname} failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  if (response.status >= 300 && response.status < 400) {
-    // §5.4: no redirect following. The redirect target was never vetted;
-    // operators host the attestation at its final URL.
-    throw new FetchGuardError(
-      'redirect_refused',
-      `HTTP ${response.status} from ${url.origin}${url.pathname}: redirects are not followed.`,
-    );
-  }
-
-  if (!response.ok) {
-    throw new FetchGuardError('http_status', `HTTP ${response.status} from ${url.origin}${url.pathname}.`);
-  }
-
-  const text = await readBodyCapped(response, maxBodyBytes);
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    throw new FetchGuardError('not_json', `Response from ${url.origin}${url.pathname} is not valid JSON.`);
+    const pinned = addresses[0];
+    const family = isIP(pinned) as 4 | 6;
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = requestImpl(url, {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+        agent: false,
+        signal: abort.signal,
+        servername: hostname,
+        lookup: (_host, lookupOptions, callback) => {
+          if (lookupOptions.all) {
+            const reply = callback as (
+              error: NodeJS.ErrnoException | null,
+              records: { address: string; family: 4 | 6 }[],
+            ) => void;
+            reply(null, [{ address: pinned, family }]);
+          } else {
+            callback(null, pinned, family);
+          }
+        },
+      }, (response) => {
+        const status = response.statusCode;
+        if (status !== undefined && status >= 300 && status < 400) {
+          response.destroy();
+          req.destroy();
+          reject(new FetchGuardError('redirect_refused', `HTTP ${status} from ${url.origin}${url.pathname}: redirects are not followed.`));
+          return;
+        }
+        if (status === undefined || status < 200 || status >= 300) {
+          response.destroy();
+          req.destroy();
+          reject(new FetchGuardError('http_status', `HTTP ${status ?? 'unknown'} from ${url.origin}${url.pathname}.`));
+          return;
+        }
+        void readBodyCapped(response, req, maxBodyBytes).then(resolve, reject);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new FetchGuardError('not_json', `Response from ${url.origin}${url.pathname} is not valid JSON.`);
+    }
+  } catch (err) {
+    if (abort.signal.aborted) {
+      throw new FetchGuardError('timeout', `Fetch of ${url.origin}${url.pathname} timed out after ${timeoutMs}ms.`);
+    }
+    if (err instanceof FetchGuardError) throw err;
+    throw new FetchGuardError('http_status', `Fetch of ${url.origin}${url.pathname} failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    clearTimeout(timer);
   }
 }

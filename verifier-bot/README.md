@@ -41,12 +41,14 @@ and wallet addresses shown in Discord are truncated.
   and `invalid`/`expired`/`unregistered`, because a legacy binding's
   self-asserted bot ID is unsafe to use for revocation. Check existing
   Human-backed role holders manually when upgrading this package.
-- On startup, a guild with stored legacy claims gets an `ADMIN AUDIT REQUIRED`
-  warning in the process log and, when configured, its log channel.
+- On startup, a guild with a configured role or stored legacy claims
+  gets an `ADMIN AUDIT REQUIRED` warning in the process log and, when
+  configured, its log channel.
   This is an instruction to compare the actual role holders with trusted
   application-control evidence and remove unsupported roles manually.
-  It does not change roles. Run `/fiador status` to see the role count and
-  every stored claim; use `page` for additional rows.
+  It does not change roles. Run `/fiador status` to see stored claims;
+  use `page` for additional rows. An admin must inspect the actual role
+  holders in Discord because the bot does not have a complete count.
 - `unknown` still retries once after 15 minutes and warns in the log
   channel after a second failed check. It never changes a role.
 
@@ -56,7 +58,7 @@ All responses are ephemeral.
 
 | Command | Who | What |
 | --- | --- | --- |
-| `/fiador status [page]` | anyone | Six legacy claims per page, last operator checks, role member count, manual audit warning |
+| `/fiador status [page]` | anyone | Six legacy claims per page, last operator checks, manual role-audit warning |
 | `/fiador setup` | Manage Guild | Set the Human-backed role ID, registry URL, sync interval, log channel |
 | `/verify-agent <application_id>` | anyone | One-off check of one application; no state change |
 | `/attest <url \| attestation>` | anyone | Check a presented operator attestation and log the result; never bind or change a role |
@@ -101,11 +103,12 @@ claim last checked?".
 - Every operator-influenced URL is fetched through an SSRF guard
   (`src/fetchGuard.ts`): HTTPS only, DNS results vetted against
   loopback/RFC1918/link-local/metadata ranges (literal IPs too),
-  redirects re-vetted and capped at 3, 5s timeout, 256 KiB body cap,
-  JSON only.
-- Startup logs the bot's own user ID and guild count. Guilds with stored
-  legacy claims also get a role-audit warning with the guild ID and claim
-  count. The token, wallet IDs, and attestation URLs are not logged.
+  connection pinned to a vetted address with TLS hostname validation,
+  no redirects, 5s total timeout, 64 KiB body cap, JSON only.
+- Startup logs the bot's own user ID and guild count. Guilds with a
+  configured role or stored legacy claims also get a role-audit warning
+  with the guild ID and claim count. The token, wallet IDs, and
+  attestation URLs are not logged.
 - A passing operator attestation never produces a verified bot badge,
   a new binding, or a role write. Existing bindings are checked but
   cannot cause grants or revocations.

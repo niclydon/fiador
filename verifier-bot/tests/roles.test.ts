@@ -105,12 +105,14 @@ describe('RoleSyncEngine', () => {
     expect(adapter.revokes).toHaveLength(0);
   });
 
-  it('does not post a legacy audit warning when no legacy claims exist', async () => {
+  it('warns even when a configured role has no stored legacy claims', async () => {
     store.removeBinding(GUILD, APP);
     const processWarnings: string[] = [];
     await warnLegacyRoleAudit(GUILD, store, adapter, (line) => processWarnings.push(line));
-    expect(processWarnings).toHaveLength(0);
-    expect(adapter.logLines).toHaveLength(0);
+    expect(processWarnings).toHaveLength(1);
+    expect(processWarnings[0]).toContain('0 stored legacy operator claim(s)');
+    expect(processWarnings[0]).toContain('this count does not enumerate role holders');
+    expect(adapter.logLines).toHaveLength(1);
   });
 
   it('on unknown: keeps the role, retries once, and warns instead of revoking', async () => {

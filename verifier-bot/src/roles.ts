@@ -26,9 +26,11 @@ export async function warnLegacyRoleAudit(
   warn: (line: string) => void = console.warn,
 ): Promise<void> {
   const claimCount = store.listBindings(guildId).length;
-  if (claimCount === 0) return;
+  // A configured role may have holders even if the local binding table is
+  // empty (for example, after a database migration or manual role grant).
+  if (claimCount === 0 && !store.getGuildConfig(guildId)?.roleId) return;
   const line =
-    `FIADOR ADMIN AUDIT REQUIRED for guild ${guildId}: ${claimCount} stored legacy operator claim(s) do not prove Discord application control. ` +
+    `FIADOR ADMIN AUDIT REQUIRED for guild ${guildId}: ${claimCount} stored legacy operator claim(s); this count does not enumerate role holders or prove Discord application control. ` +
     'Manually review every existing Human-backed role holder and remove unsupported roles. Fiador will not grant or revoke roles.';
   // A process warning survives a missing or misconfigured log channel.
   warn(line);

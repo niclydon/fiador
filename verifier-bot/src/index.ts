@@ -17,7 +17,6 @@ import {
   REST,
   Routes,
   type ChatInputCommandInteraction,
-  type Guild,
   type TextChannel,
 } from 'discord.js';
 import { createVerifier } from '@fiador/verify';
@@ -43,16 +42,6 @@ class DiscordJsAdapter implements DiscordAdapter {
     private readonly client: Client,
     private readonly store: Store,
   ) {}
-
-  private async guild(guildId: string): Promise<Guild> {
-    return this.client.guilds.fetch(guildId);
-  }
-
-  async getRoleMemberCount(guildId: string, roleId: string): Promise<number> {
-    const guild = await this.guild(guildId);
-    const role = await guild.roles.fetch(roleId);
-    return role?.members.size ?? 0;
-  }
 
   async sendLogLine(guildId: string, line: string): Promise<void> {
     const logChannelId = this.store.getGuildConfig(guildId)?.logChannelId;

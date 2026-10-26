@@ -150,6 +150,8 @@ describe('/fiador status — legacy claims', () => {
     expect(lines).not.toContain('Bound bots:');
     expect(reply.content).toContain('ADMIN AUDIT REQUIRED');
     expect(reply.content).toContain('remove unsupported roles');
+    expect(reply.content).toContain('admin must inspect all role holders');
+    expect(reply.content).not.toMatch(/\b0 member\(s\)/);
     expect(claimLines).toHaveLength(2);
     for (const line of claimLines) {
       expect(line).toContain('application control unproven; no role automation');
