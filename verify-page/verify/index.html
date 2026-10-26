@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' https:; form-action 'none'; base-uri 'none'; object-src 'none'">
+  <meta name="description" content="Check a Fiador Discord bot attestation in your browser. This live check reports the signed wallet claim, AgentBook registration, and the limits of what they prove.">
+  <title>Verify a Discord bot attestation — Fiador</title>
+  <link rel="stylesheet" href="/verify/style.css">
+  <script defer src="/verify/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#check">Skip to verification</a>
+  <header class="site-header">
+    <a class="wordmark" href="/">Fiador</a>
+    <button id="theme-toggle" class="theme-toggle" type="button">Use dark mode</button>
+  </header>
+  <main>
+    <div class="hero-art" aria-hidden="true"><img src="/assets/fiador-banner.webp" alt=""></div>
+    <div class="hero-copy">
+      <p class="eyebrow">Fiador · browser verification</p>
+      <h1>Check the claim yourself.</h1>
+      <p>Fiador — human-backed attestation for Discord bots. Opening a preview link starts a fresh browser check; the preview itself is only a snapshot from crawl time.</p>
+    </div>
+
+    <section class="limits" aria-labelledby="limits-title">
+      <h2 id="limits-title">What this check can tell you</h2>
+      <p>A passing wallet check means a unique human registered the wallet that signed a claim naming a Discord application. It does not establish that the signer controls that application, identify the human, prove a human wrote a message, or judge the bot’s behavior. Until application control has independent proof, the result is <strong>Claim unconfirmed</strong>.</p>
+      <p>Previews can stay cached after expiry or revocation, and lookalike domains can imitate a card. Rely on a fresh check at the canonical <strong>fiador.org</strong> domain for the current status.</p>
+    </section>
+
+    <section id="check" class="check-card" aria-labelledby="check-title">
+      <div class="section-heading">
+        <p class="eyebrow">Live check</p>
+        <h2 id="check-title">Verify an attestation</h2>
+      </div>
+      <form id="check-form">
+        <noscript><p>This browser check needs JavaScript. The public attestation JSON and registry remain available from the Fiador home page.</p></noscript>
+        <fieldset class="mode-picker">
+          <legend>Choose an input</legend>
+          <label><input type="radio" name="mode" value="application" checked> Application ID</label>
+          <label><input id="mode-url-choice" type="radio" name="mode" value="url"> Attestation URL</label>
+          <label><input type="radio" name="mode" value="paste"> Paste or drop JSON</label>
+        </fieldset>
+
+        <div id="mode-application" class="mode-fields">
+          <label for="application-id">Discord application ID</label>
+          <input id="application-id" name="application-id" type="text" inputmode="numeric" pattern="[0-9]{17,20}" autocomplete="off" placeholder="17–20 digits">
+        </div>
+        <div id="mode-url" class="mode-fields" hidden>
+          <label for="attestation-url">Public attestation URL</label>
+          <input id="attestation-url" name="attestation-url" type="url" inputmode="url" spellcheck="false" autocomplete="url" placeholder="https://example.org/attestation.json">
+        </div>
+        <div id="mode-paste" class="mode-fields" hidden>
+          <label for="payload">Signed attestation JSON</label>
+          <textarea id="payload" name="payload" spellcheck="false" rows="8" placeholder="Paste the signed JSON document here, or drop a .json file onto this area."></textarea>
+          <label class="file-label" for="payload-file">Or select a .json file</label>
+          <input id="payload-file" name="payload-file" type="file" accept=".json,application/json">
+        </div>
+
+        <div class="settings">
+          <details>
+            <summary>Network settings</summary>
+            <div class="setting-fields">
+              <label for="registry-url">Registry URL</label>
+              <input id="registry-url" type="url" spellcheck="false" autocomplete="off">
+              <label for="rpc-url">World Chain RPC URL</label>
+              <input id="rpc-url" type="url" spellcheck="false" autocomplete="off">
+            </div>
+          </details>
+        </div>
+        <button id="check-button" class="primary-button" type="submit">Check now <span aria-hidden="true">↗</span></button>
+      </form>
+      <p id="status" class="status-line" role="status" aria-live="polite">Ready to check.</p>
+      <p class="network-note">Checks run in your browser. This page has no analytics or third-party assets. It contacts only the registry, attestation host, and RPC endpoint used for a check you start (including a check started by opening a prefilled link). Those hosts receive the request and may log it. Hosts without cross-origin access can block a browser fetch; paste the public signed JSON as the fallback. Operators should serve attestation JSON with <code>Access-Control-Allow-Origin: *</code>.</p>
+    </section>
+
+    <section id="result" class="result-card" aria-labelledby="result-title" hidden>
+      <div class="result-top">
+        <div>
+          <p class="eyebrow">Observed result</p>
+          <h2 id="result-title"></h2>
+        </div>
+        <img id="result-badge" src="/assets/badges/fiador-pill-light-unverified.svg" alt="" width="148" height="40">
+      </div>
+      <p id="result-verdict" class="verdict"></p>
+      <p id="result-note" class="result-note"></p>
+      <dl id="result-fields" class="result-fields"></dl>
+      <p class="result-caveat">This is a check at the time shown above. The raw human identifier is never displayed, and a cached preview is not proof of the current state.</p>
+    </section>
+  </main>
+  <footer><p>Created by Nic Lydon · Independent open source</p></footer>
+</body>
+</html>

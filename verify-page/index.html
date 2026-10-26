@@ -3,20 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; base-uri 'none'; object-src 'none'">
 <title>Fiador — human-backed attestation for Discord bots</title>
 <meta name="description" content="Fiador is human-backed attestation for Discord bots: a signed statement, verifiable by anyone, that a unique human backs the bot operator's wallet registration.">
 <style>
   :root {
+    color-scheme: light;
     --bg: #f4f5f7;
     --surface: #ffffff;
     --ink: #1C1C1E;
     --muted: #4c5a66;
-    --accent: #4A7FA5;
+    --accent: #245f82;
     --label: #33617e;
     --line: #d8dee4;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme]) {
       --bg: #0A0B13;
       --surface: #1C1C1E;
       --ink: #eef2f5;
@@ -26,6 +29,17 @@
       --line: #2c3540;
     }
   }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0A0B13;
+    --surface: #1C1C1E;
+    --ink: #eef2f5;
+    --muted: #a7b6c0;
+    --accent: #8ABAD3;
+    --label: #8ABAD3;
+    --line: #2c3540;
+  }
+  :root[data-theme="light"] { color-scheme: light; }
   body {
     margin: 0;
     background: var(--bg);
@@ -67,12 +81,31 @@
     font-size: 0.9rem;
     margin-top: 2rem;
   }
+  .theme-toggle {
+    display: block;
+    margin: 0 0 1.5rem auto;
+    padding: 0.45rem 0.8rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+    cursor: pointer;
+  }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 </style>
 </head>
 <body>
 <main>
+  <button id="theme-toggle" class="theme-toggle" type="button">Use dark mode</button>
   <h1>Fiador</h1>
   <p class="descriptor">human-backed attestation for Discord bots</p>
+
+  <section>
+    <h2>Check an attestation</h2>
+    <p>Run a fresh browser check by application ID, attestation URL, or signed JSON. A passing wallet claim is labelled <strong>Claim unconfirmed</strong> until control of the named Discord application has independent proof.</p>
+    <p><a href="/verify/">Open the verification page</a></p>
+  </section>
 
   <section>
     <h2>The founding attestation</h2>
@@ -119,8 +152,9 @@
   </section>
 
   <footer>
-    <p>Created by Nic Lydon. Source and specification are in the public Fiador repository.</p>
+    <p>Created by Nic Lydon. Independent open source. Source and specification are in the public Fiador repository.</p>
   </footer>
 </main>
+<script src="/theme.js" defer></script>
 </body>
 </html>

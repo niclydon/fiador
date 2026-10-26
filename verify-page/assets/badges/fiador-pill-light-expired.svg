@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="168" height="28" viewBox="0 0 168 28" role="img" aria-label="fiador">
+  <rect x="0.5" y="0.5" width="167" height="27" rx="13.5" fill="#FFFFFF" stroke="#b9b9be"/>
+  <circle cx="15" cy="14" r="6.5" fill="none" stroke="#a08b62" stroke-width="2"/><circle cx="15" cy="14" r="2.6" fill="#a08b62"/>
+  <text x="30" y="18" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" letter-spacing="0.2" fill="#6e6e73">fiador</text>
+  <text x="158" y="18" text-anchor="end" font-size="8.5" fill="#6e6e73" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif">expired</text>
+</svg>

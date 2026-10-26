@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
@@ -49,6 +50,15 @@ describe('fixture vectors', () => {
   it('committed vectors match a fresh deterministic generation', async () => {
     const fresh = await buildVectors();
     expect(fresh).toEqual(vectors);
+  });
+});
+
+describe('browser-safe human hashing', () => {
+  it('matches the original Node SHA-256 implementation byte-for-byte', () => {
+    for (const value of ['', '0x1234', 'human-one', '世界 🌍']) {
+      const expected = createHash('sha256').update(`w0-human-v1:${value}`, 'utf8').digest('hex');
+      expect(hashHumanId(value)).toBe(expected);
+    }
   });
 });
 

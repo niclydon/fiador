@@ -1,0 +1,23 @@
+{
+  "name": "@fiador/verify-page",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "author": "Nic Lydon",
+  "license": "Apache-2.0",
+  "description": "Static browser verification page for Fiador Discord attestations",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fiador/verify": "*",
+    "viem": "^2.38.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  }
+}

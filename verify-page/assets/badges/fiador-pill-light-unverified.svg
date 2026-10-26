@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="28" viewBox="0 0 128 28" role="img" aria-label="not verified">
+  <rect x="0.5" y="0.5" width="127" height="27" rx="13.5" fill="#FFFFFF" stroke="#c2c5ca"/>
+  <circle cx="15" cy="14" r="6.5" fill="none" stroke="#9a9ea6" stroke-width="2"/><circle cx="15" cy="14" r="2.6" fill="#9a9ea6"/>
+  <text x="30" y="18" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" letter-spacing="0.2" fill="#6e6e73">not verified</text>
+
+</svg>
