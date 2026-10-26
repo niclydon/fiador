@@ -66,11 +66,14 @@ Verification, in order:
    re-verify against current World docs at build time)
 4. The verifier displays a hash of the humanId so a guild can see
    when two different bots trace to the same human. SETTLED PRIVACY
-   RULE (Nic-direct Oct 25, 2026): the full humanId is never
-   published, in this payload or anywhere public. Hash only, no
-   operator override in v1. Any agent working from this spec: do
-   not place the raw humanId in code fixtures, docs, screenshots,
-   logs, or messages outside the estate.
+   RULE (Nic-direct Oct 25, 2026): Fiador never copies the full
+   humanId into its payload, repo, or public outputs. Hash only, no
+   operator override in v1. AgentBook itself is public on World
+   Chain: a disclosed registered wallet or this published hash can
+   be matched to public registration data and link other wallets
+   registered to that identifier. Any agent working from
+   this spec: do not place the raw humanId in code fixtures, docs,
+   screenshots, logs, or messages outside the estate.
 
 Discovery, the genuinely hard part. A verifier asked about a
 Discord application has its ID, but Discord profiles carry no
@@ -171,6 +174,11 @@ Consequences for this project:
 - World ID is anonymous. The proof says "a unique human," never who.
   An operator publicly claiming "this human is me" is a separate
   signed statement from an identity people already know
+- AgentBook registrations are public on World Chain. A disclosed
+  wallet or the published human hash can be matched to its
+  pseudonymous human identifier and other wallets registered to
+  that identifier; anonymity does not make those registrations
+  unlinkable.
 - Registration is checked live and the verify page shows the
   check time. The current verifier does not certify or update a
   guild role. Admins must review existing role holders manually.
@@ -208,8 +216,9 @@ community seat trial:
 - Hosted verifier instance later, or self-host only for v1
   (SETTLED Oct 25, 2026: self-host only for v1, plus the static
   verify page)
-- humanId display (SETTLED Oct 25, 2026: hash only; the full
-  humanId is never published anywhere, no v1 override)
+- humanId display (SETTLED Oct 25, 2026: Fiador public outputs
+  show the hash only; they never republish the full on-chain
+  identifier, with no v1 override)
 - Whether Nova's attestation publicly links the human to Nic
   (SETTLED Oct 25, 2026: yes for Nic's own fleet, as an explicit
   operator opt-in field; the protocol default stays name-free)
