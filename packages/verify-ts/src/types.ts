@@ -1,54 +1,60 @@
-// Verify core types — W0 spec (~/workspace/world-program/w0-verify-core/SPEC.md) §3.0–3.2.
-// This package is the W0 verify core's home in the Fiador repo. Public outputs
-// carry the humanId HASH only; the full humanId never crosses toPublicVerifyResult.
-
-import { createHash } from 'node:crypto';
+// Core types for @fiador/verify. This file is the type-level form of
+// SPEC.md section 3.0 (W0 verify core spec). The internal/public split
+// defined here is a hard boundary, not a display preference: see
+// toPublicVerifyResult in projection.ts.
 
 export type EvmAddress = `0x${string}`;
 
 export type VerificationStatus =
-  | 'verified'
-  | 'unregistered'
-  | 'expired'
-  | 'invalid'
-  | 'unknown';
+  | 'verified' // checked live: registration (and attestation, if any) valid
+  | 'unregistered' // checked live: no AgentBook entry for the address
+  | 'expired' // attestation exists but is past expiresAt
+  | 'invalid' // attestation malformed, mis-signed, or mis-bound
+  | 'unknown'; // the check itself failed (RPC, network, timeout)
 
 export type FailureCode =
   | 'malformed_address'
   | 'malformed_attestation'
   | 'unsupported_version'
-  | 'signature_mismatch'
-  | 'subject_mismatch'
-  | 'wallet_mismatch'
-  | 'not_yet_valid'
+  | 'signature_mismatch' // signature does not recover to the claimed wallet
+  | 'subject_mismatch' // attestation binds a different subject than asked
+  | 'wallet_mismatch' // attestation wallet != address under check
+  | 'not_yet_valid' // issuedAt in the future beyond skew
   | 'expired'
   | 'not_registered'
-  | 'replay_detected'
-  | 'attestation_not_found'
-  | 'lookup_failed'
-  | 'lookup_timeout';
+  | 'replay_detected' // nonce already seen (only when a nonce store is supplied)
+  | 'lookup_failed' // RPC / transport failure -> status 'unknown'
+  | 'lookup_timeout'
+  // Added when the attested_subject path was built, per SPEC 3.5:
+  // a resolver found no attestation for the subject at all.
+  | 'attestation_not_found';
 
 export interface CheckEvidence {
-  checkedAt: string;
+  checkedAt: string; // ISO 8601, when the live check ran
   source: 'live' | 'cache' | 'fixture';
   agentBook: { network: 'eip155:480'; contract: EvmAddress };
   rpcLatencyMs?: number;
 }
 
 export interface VerifyResult {
+  // INTERNAL shape: server-side only, between trusted components.
   status: VerificationStatus;
-  address: EvmAddress;
-  addressTruncated: string;
-  humanHash: string | null;
-  /** INTERNAL ONLY. Present only when built with includeRawHumanId. Never serialised publicly. */
-  humanId?: string | null;
-  /** INTERNAL ONLY. The attestation's disclosure choice, when the result came from one. */
-  disclosure?: 'hash' | 'none';
-  failures: FailureCode[];
+  address: EvmAddress; // checksummed, as checked
+  addressTruncated: string; // '0x7d7D…6097f' form, safe for public output
+  humanHash: string | null; // see SPEC 3.5; null unless status is 'verified'
+  humanId?: string | null; // INTERNAL ONLY: present only when the verifier
+  // was built with includeRawHumanId. Never serialised to a public surface.
+  failures: FailureCode[]; // empty iff status is 'verified'
   evidence: CheckEvidence;
+  // INTERNAL ONLY: the attestation's recorded disclosure choice, when this
+  // result derives from an attestation. Read by toPublicVerifyResult (which
+  // omits humanHash when it is 'none') and never copied into the public
+  // shape. New internal fields are private by default (SPEC 3.0).
+  disclosure?: 'hash' | 'none';
 }
 
 export interface PublicVerifyResult {
+  // PUBLIC shape: the only form any public output may take.
   status: VerificationStatus;
   addressTruncated: string;
   humanHash: string | null;
@@ -60,100 +66,82 @@ export interface AttestationPayloadV1 {
   version: 1;
   subject: { type: string; id: string };
   agentWalletAddress: EvmAddress;
-  attestationUrl?: string;
-  operatorDisplayName?: string;
-  humanIdDisclosure: 'hash' | 'none';
-  issuedAt: string;
-  expiresAt: string;
-  nonce: string;
-  extra?: Record<string, string>;
+  attestationUrl?: string; // where this payload is hosted
+  operatorDisplayName?: string; // self-asserted, always labelled as such
+  humanIdDisclosure: 'hash' | 'none'; // whether public outputs may show the
+  // humanHash for this attestation, or no human identifier at all.
+  // There is no 'raw' (SPEC 3.2).
+  issuedAt: string; // ISO 8601
+  expiresAt: string; // ISO 8601, at most 90 days after issuedAt
+  nonce: string; // >= 128 bits of entropy, hex or base64url
+  extra?: Record<string, string>; // subject-specific fields; signed,
+  // not interpreted by this package
 }
 
 export interface SignedAttestation {
   payload: AttestationPayloadV1;
-  signature: string;
+  signature: string; // 0x-prefixed EIP-191 signature over the canonical form
   signatureType: 'eip191' | 'eip1271';
 }
 
-export const AGENTBOOK_CONTRACT: EvmAddress =
-  '0xA23aB2712eA7BBa896930544C7d6636a96b944dA';
-export const WORLD_CHAIN_NETWORK = 'eip155:480' as const;
-
-const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
-
-export function isEvmAddress(value: unknown): value is EvmAddress {
-  return typeof value === 'string' && ADDRESS_RE.test(value);
+export interface AgentBookReader {
+  // Returns the raw humanId for the core's internal use, or null when the
+  // contract read succeeded and there is no entry. MUST throw on
+  // transport/RPC failure so the core can return 'unknown' instead of
+  // misreporting 'unregistered' (SPEC 3.1).
+  lookupHuman(address: EvmAddress): Promise<string | null>;
+  // Provenance label copied into result evidence. Live readers use 'live';
+  // fixture-replay readers use 'fixture'.
+  source?: 'live' | 'fixture';
 }
 
-/** Display truncation: 0x + 4 … last 5. Never a full address on public surfaces. */
-export function truncateAddress(address: string): string {
-  if (!isEvmAddress(address)) return '0x…';
-  return `${address.slice(0, 6)}…${address.slice(-5)}`;
+export interface VerifyCoreOptions {
+  reader?: AgentBookReader; // default: direct viem readContract reader (reader.ts)
+  rpcUrl?: string; // World Chain RPC; default: the chain's public RPC
+  contractAddress?: EvmAddress; // default: canonical AgentBook (SPEC section 2)
+  timeoutMs?: number; // per-lookup deadline, default 5000
+  now?: () => Date;
+  clockSkewMs?: number; // default 60_000
+  includeRawHumanId?: boolean; // default false. When false, the core hashes
+  // the lookup value and retains no raw humanId in the result at all. When
+  // true, the INTERNAL result carries it for trusted server-side callers.
+  // It never affects the public shape.
 }
 
-/**
- * The one sanctioned public hash of a humanId (W0 spec §3.5 / W1 DESIGN §3.3):
- * sha256 over utf8("w0-human-v1:" + humanId), digest as lowercase hex, no 0x.
- */
-export function hashHumanId(humanId: string): string {
-  return createHash('sha256')
-    .update(`w0-human-v1:${humanId.toLowerCase()}`, 'utf8')
-    .digest('hex');
-}
-
-/**
- * Canonical signing form (W0 spec §3.2): JSON with keys in the protocol order
- * shown there, `extra` keys sorted, no insignificant whitespace.
- */
-export function canonicalAttestationBytes(payload: AttestationPayloadV1): string {
-  const ordered: Record<string, unknown> = {};
-  ordered.version = payload.version;
-  ordered.subject = { type: payload.subject.type, id: payload.subject.id };
-  ordered.agentWalletAddress = payload.agentWalletAddress;
-  if (payload.attestationUrl !== undefined) ordered.attestationUrl = payload.attestationUrl;
-  if (payload.operatorDisplayName !== undefined)
-    ordered.operatorDisplayName = payload.operatorDisplayName;
-  ordered.humanIdDisclosure = payload.humanIdDisclosure;
-  ordered.issuedAt = payload.issuedAt;
-  ordered.expiresAt = payload.expiresAt;
-  ordered.nonce = payload.nonce;
-  if (payload.extra !== undefined) {
-    const extra: Record<string, string> = {};
-    for (const key of Object.keys(payload.extra).sort()) extra[key] = payload.extra[key];
-    ordered.extra = extra;
-  }
-  return JSON.stringify(ordered);
-}
-
-const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
-
-/** Short-id for /v/ links (DESIGN §6.4): first 10 chars of base32(sha256(canonical bytes)). */
-export function attestationShortId(attestation: SignedAttestation, length = 10): string {
-  const digest = createHash('sha256')
-    .update(canonicalAttestationBytes(attestation.payload), 'utf8')
-    .digest();
-  let bits = 0;
-  let value = 0;
-  let out = '';
-  for (const byte of digest) {
-    value = (value << 8) | byte;
-    bits += 8;
-    while (bits >= 5) {
-      out += BASE32[(value >>> (bits - 5)) & 31];
-      bits -= 5;
-    }
-    if (out.length >= length) break;
-  }
-  return out.slice(0, length);
-}
-
-/** The only sanctioned crossing from internal to public shape (W0 spec §3.0). */
-export function toPublicVerifyResult(result: VerifyResult): PublicVerifyResult {
-  return {
-    status: result.status,
-    addressTruncated: result.addressTruncated,
-    humanHash: result.disclosure === 'none' ? null : result.humanHash,
-    failures: [...result.failures],
-    evidence: { ...result.evidence, agentBook: { ...result.evidence.agentBook } },
+export interface VerifyAttestationOptions {
+  expectedSubject?: { type: string; id: string };
+  expectedWallet?: EvmAddress;
+  nonceStore?: {
+    has(nonce: string, wallet: EvmAddress): Promise<boolean>;
+    add(nonce: string, wallet: EvmAddress, expiresAt: string): Promise<void>;
   };
+  checkRegistration?: boolean; // default true: also run the AgentBook lookup
+  signal?: AbortSignal;
+}
+
+export type StatusSubject =
+  | { kind: 'address'; address: string }
+  | { kind: 'attestation'; attestation: SignedAttestation }
+  | {
+      kind: 'attested_subject';
+      subject: { type: string; id: string };
+      resolveAttestation: (subject: {
+        type: string;
+        id: string;
+      }) => Promise<SignedAttestation | null>;
+    };
+
+export interface Verifier {
+  verifyAddress(
+    address: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<VerifyResult>;
+  verifyAttestation(
+    attestation: unknown,
+    opts?: VerifyAttestationOptions,
+  ): Promise<VerifyResult>;
+  resolveStatus(
+    subject: StatusSubject,
+    opts?: { signal?: AbortSignal },
+  ): Promise<VerifyResult>;
 }

@@ -1,8 +1,8 @@
 // Test double for '@fiador/verify' (aliased in vitest.config.ts).
 //
 // Re-exports the REAL public-shape helpers from the verify package's
-// types module — toPublicVerifyResult, hashHumanId, truncateAddress,
-// canonicalAttestationBytes — so the projection behaviour under test is
+// entry point — toPublicVerifyResult, hashHumanId, truncateAddress,
+// canonicalAttestationMessage — so the projection behaviour under test is
 // the production code, not a copy. Only createVerifier is faked, with
 // programmable per-application results.
 //
@@ -17,9 +17,9 @@ import {
   type AttestationPayloadV1,
   type SignedAttestation,
   type VerifyResult,
-} from '../../packages/verify-ts/src/types.ts';
+} from '../../packages/verify-ts/src/index.ts';
 
-export * from '../../packages/verify-ts/src/types.ts';
+export * from '../../packages/verify-ts/src/index.ts';
 export { hashHumanId, toPublicVerifyResult, truncateAddress };
 
 export const SYNTHETIC_HUMAN_ID = `0x${'11'.repeat(32)}`;

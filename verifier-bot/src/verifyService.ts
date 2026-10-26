@@ -13,7 +13,7 @@
 
 import { createHash } from 'node:crypto';
 import {
-  canonicalAttestationBytes,
+  canonicalAttestationMessage,
   toPublicVerifyResult,
   type PublicVerifyResult,
   type SignedAttestation,
@@ -86,7 +86,7 @@ export function isSignedAttestation(value: unknown): value is SignedAttestation 
 
 export function payloadHash(attestation: SignedAttestation): string {
   return createHash('sha256')
-    .update(canonicalAttestationBytes(attestation.payload), 'utf8')
+    .update(canonicalAttestationMessage(attestation.payload), 'utf8')
     .digest('hex');
 }
 

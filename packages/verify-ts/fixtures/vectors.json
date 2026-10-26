@@ -1,0 +1,160 @@
+{
+  "note": "SYNTHETIC FIXTURES ONLY. Generated deterministically by scripts/gen-fixtures.ts. No real wallet, humanId, or key material appears in this file.",
+  "fixedNow": "2026-01-15T12:00:00.000Z",
+  "humans": {
+    "human1": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "human2": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+  },
+  "wallets": {
+    "operatorA": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3",
+    "operatorB": "0xeb0862719Cc879c7a20d47C937c0986ff97B23b6",
+    "operatorD": "0x89A0Bcc2b57170a0Aa471D177710a846F23510f9",
+    "strangerC": "0x5Bac4B79a20613588E22a44b8e4c8596cDaB0710"
+  },
+  "lookups": [
+    {
+      "address": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3",
+      "humanId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    },
+    {
+      "address": "0xeb0862719Cc879c7a20d47C937c0986ff97B23b6",
+      "humanId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    },
+    {
+      "address": "0x89A0Bcc2b57170a0Aa471D177710a846F23510f9",
+      "humanId": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    },
+    {
+      "address": "0x5Bac4B79a20613588E22a44b8e4c8596cDaB0710",
+      "humanId": null
+    }
+  ],
+  "attestations": {
+    "valid": {
+      "payload": {
+        "version": 1,
+        "subject": {
+          "type": "discord_application",
+          "id": "111111111111111111"
+        },
+        "agentWalletAddress": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3",
+        "attestationUrl": "https://example.invalid/attestations/operator-a.json",
+        "operatorDisplayName": "Synthetic Operator A",
+        "humanIdDisclosure": "hash",
+        "issuedAt": "2026-01-14T12:00:00.000Z",
+        "expiresAt": "2026-02-14T12:00:00.000Z",
+        "nonce": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "extra": {
+          "discord_bot_user_id": "222222222222222222"
+        }
+      },
+      "signature": "0x0e2fb692788895acd733feb06e66ed514cd983d6f1288d0dfc6a1a98787f1b31231a5cce33b6ab23a2e1c0af34dd0bf8d0037e4bb5fbea6f824b9b1aa021aa511c",
+      "signatureType": "eip191"
+    },
+    "validDisclosureNone": {
+      "payload": {
+        "version": 1,
+        "subject": {
+          "type": "discord_application",
+          "id": "111111111111111111"
+        },
+        "agentWalletAddress": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3",
+        "attestationUrl": "https://example.invalid/attestations/operator-a.json",
+        "operatorDisplayName": "Synthetic Operator A",
+        "humanIdDisclosure": "none",
+        "issuedAt": "2026-01-14T12:00:00.000Z",
+        "expiresAt": "2026-02-14T12:00:00.000Z",
+        "nonce": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+        "extra": {
+          "discord_bot_user_id": "222222222222222222"
+        }
+      },
+      "signature": "0x8c9a4e2415c1f7325f2b5765b6c9295bd6163b1d2392eaec177c9e41b301d06e4e8f0e68311f1aac1ea98a779fe18fd9c6f59870538856eb06d0bc9d6fbbe7811c",
+      "signatureType": "eip191"
+    },
+    "expired": {
+      "payload": {
+        "version": 1,
+        "subject": {
+          "type": "discord_application",
+          "id": "111111111111111111"
+        },
+        "agentWalletAddress": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3",
+        "attestationUrl": "https://example.invalid/attestations/operator-a.json",
+        "operatorDisplayName": "Synthetic Operator A",
+        "humanIdDisclosure": "hash",
+        "issuedAt": "2026-01-05T12:00:00.000Z",
+        "expiresAt": "2026-01-15T11:59:59.000Z",
+        "nonce": "abababababababababababababababababababababababababababababababab",
+        "extra": {
+          "discord_bot_user_id": "222222222222222222"
+        }
+      },
+      "signature": "0x3f2d9b590f152a8985d6b38df2595ca99099b49e63499b2f0e103d4a61dbd48c1aaba134c1aed53218adf0460d5b004ab71ee2638276e923634ee4db76c8a84f1b",
+      "signatureType": "eip191"
+    },
+    "notYetValid": {
+      "payload": {
+        "version": 1,
+        "subject": {
+          "type": "discord_application",
+          "id": "111111111111111111"
+        },
+        "agentWalletAddress": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3",
+        "attestationUrl": "https://example.invalid/attestations/operator-a.json",
+        "operatorDisplayName": "Synthetic Operator A",
+        "humanIdDisclosure": "hash",
+        "issuedAt": "2026-01-15T14:00:00.000Z",
+        "expiresAt": "2026-02-14T12:00:00.000Z",
+        "nonce": "babababababababababababababababababababababababababababababababa",
+        "extra": {
+          "discord_bot_user_id": "222222222222222222"
+        }
+      },
+      "signature": "0xf077a03e2dadff2f4888b82fbaf6ab1e793f97d2e7ae8306658da5154acf35800a043c3add81d1e75490bb3a709326820894bfac2431830f983d439326caf9731b",
+      "signatureType": "eip191"
+    },
+    "longLifetime": {
+      "payload": {
+        "version": 1,
+        "subject": {
+          "type": "discord_application",
+          "id": "111111111111111111"
+        },
+        "agentWalletAddress": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3",
+        "attestationUrl": "https://example.invalid/attestations/operator-a.json",
+        "operatorDisplayName": "Synthetic Operator A",
+        "humanIdDisclosure": "hash",
+        "issuedAt": "2026-01-14T12:00:00.000Z",
+        "expiresAt": "2026-04-16T12:00:00.000Z",
+        "nonce": "dcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdc",
+        "extra": {
+          "discord_bot_user_id": "222222222222222222"
+        }
+      },
+      "signature": "0xffb904f3c526cb3b0d14ae69b23908258db4bd478c02897d9c95f56a03b074d745ecdce4a5f02589ce1aa9365d7bc4d8afefcfaf6925317ea72f1c7993e4cc091c",
+      "signatureType": "eip191"
+    },
+    "wrongSigner": {
+      "payload": {
+        "version": 1,
+        "subject": {
+          "type": "discord_application",
+          "id": "111111111111111111"
+        },
+        "agentWalletAddress": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3",
+        "attestationUrl": "https://example.invalid/attestations/operator-a.json",
+        "operatorDisplayName": "Synthetic Operator A",
+        "humanIdDisclosure": "hash",
+        "issuedAt": "2026-01-14T12:00:00.000Z",
+        "expiresAt": "2026-02-14T12:00:00.000Z",
+        "nonce": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "extra": {
+          "discord_bot_user_id": "222222222222222222"
+        }
+      },
+      "signature": "0xc73b0de05fd810138c1d1062ed9b00170e5795548d39ac42268379ec8ac448bc0b78174befb951d7e8c62989c6c36c56b9cf36df96d7435b009b3950cd2619761c",
+      "signatureType": "eip191"
+    }
+  }
+}

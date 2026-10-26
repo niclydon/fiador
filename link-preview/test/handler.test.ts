@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
-  AGENTBOOK_CONTRACT,
-  attestationShortId,
-  canonicalAttestationBytes,
+  canonicalAttestationMessage,
   hashHumanId,
   truncateAddress,
 } from '@fiador/verify';
+import { attestationShortId } from '../src/shortId.js';
+
+const AGENTBOOK_CONTRACT = '0xA23aB2712eA7BBa896930544C7d6636a96b944dA' as const;
 import type {
   SignedAttestation,
   Verifier,
@@ -263,7 +264,7 @@ describe('revoked tombstone', () => {
       nonce: 'fixture-nonce-revoked',
     });
     const payloadHash = createHash('sha256')
-      .update(canonicalAttestationBytes(revokedAttestation.payload), 'utf8')
+      .update(canonicalAttestationMessage(revokedAttestation.payload), 'utf8')
       .digest('hex');
     const tombstone: RegistryEntry = {
       discord_application_id: '555000111222333444',

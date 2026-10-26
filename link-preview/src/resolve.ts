@@ -6,7 +6,7 @@
 // attestation. Longer ids are supported by computing each candidate's
 // id at the requested length (prefix extension), minimum 10.
 
-import { attestationShortId } from '@fiador/verify';
+import { attestationShortId } from './shortId.js';
 import type { SignedAttestation } from '@fiador/verify';
 import type { RegistryEntry } from './registry.js';
 import { isTombstone } from './registry.js';

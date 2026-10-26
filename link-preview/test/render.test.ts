@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
-import { attestationShortId, canonicalAttestationBytes } from '@fiador/verify';
+import { canonicalAttestationMessage } from '@fiador/verify';
+import { attestationShortId } from '../src/shortId.js';
 import type { SignedAttestation } from '@fiador/verify';
 import { shortIdFromDigestHex } from '../src/resolve.js';
 import { escapeXml, renderCard, wrapText } from '../src/card.js';
@@ -22,7 +23,7 @@ const attestation: SignedAttestation = {
 describe('short-id derivation', () => {
   it('digest-hex path agrees with attestationShortId at several lengths', () => {
     const hex = createHash('sha256')
-      .update(canonicalAttestationBytes(attestation.payload), 'utf8')
+      .update(canonicalAttestationMessage(attestation.payload), 'utf8')
       .digest('hex');
     for (const len of [10, 12, 16]) {
       expect(shortIdFromDigestHex(hex, len)).toBe(attestationShortId(attestation, len));

@@ -12,7 +12,12 @@
 //   caller wires the real verify core via createVerifier() from
 //   @fiador/verify with a live AgentBook reader.
 
-import { AGENTBOOK_CONTRACT, WORLD_CHAIN_NETWORK } from '@fiador/verify';
+import type { EvmAddress } from '@fiador/verify';
+
+// Public chain constants (W0 spec section 2). Defined locally: the
+// verify core does not export them as values.
+const AGENTBOOK_CONTRACT: EvmAddress = '0xA23aB2712eA7BBa896930544C7d6636a96b944dA';
+const WORLD_CHAIN_NETWORK = 'eip155:480' as const;
 import type { Verifier } from '@fiador/verify';
 import type { LinkPreviewDeps } from './deps.js';
 import type { RegistryDocument } from './registry.js';

@@ -21,11 +21,43 @@
   verify page.
 - 66 tests across the three packages, all against fakes and
   synthetic fixtures; no live Discord, chain, or DNS in tests.
+- Merged the same morning (Oct 26): the stub verify-ts above
+  was replaced by the W0 implementation in the entry below,
+  per the pre-agreed reconciliation; the verifier bot and
+  link preview stand as built, adapted to the core's export
+  names (canonicalAttestationMessage). Narrative:
+  docs/narrative/2026-10-26-first-build.md.
 - Doc correction: docs/DESIGN.md's decisions summary no longer
   describes a canonical signing prefix (the D2 resolution
   adopted the W0 canonical form — the serialised payload
   alone is the message); the Oct 25 entry below carries the
   matching correction note.
+## 2026-10-26: verify core and verify MCP implemented (W0)
+
+- Decision (Oct 26, 2026): no project-run public HTTP instance
+  of the verify MCP in v1 (W0 spec 11.9 M1, decided by Nic).
+  Discovery is via the MCP registry listings; the HTTP transport
+  ships for self-hosters only.
+
+- `packages/verify-ts` (`@fiador/verify` 0.1.0): the verify core
+  per the W0 spec — `verifyAddress`, `verifyAttestation`,
+  `resolveStatus`, the internal/public result split with
+  `toPublicVerifyResult` as the only public crossing, the
+  canonical attestation signing form and canonical `humanHash`,
+  and a direct viem AgentBook reader that keeps RPC failure
+  (`unknown`) distinct from non-registration (`unregistered`);
+  the AgentKit SDK 0.2.1 verifier collapses the two, so the core
+  does not wrap it. Deterministic synthetic fixtures and a
+  32-test failure-case suite.
+- `packages/verify-mcp` (`@fiador/verify-mcp` 0.1.0): the
+  section 11 MCP server — `verify_address`, `verify_attestation`
+  (with the per-check breakdown), `badge_status` (listed only
+  when a resolver is configured; badge URLs only when a badge
+  base is configured, per the open M2 default). stdio and
+  stateless streamable HTTP transports, parity-tested.
+- Live verification recorded in `docs/verification.md`: the
+  program wallet verifies against the real AgentBook contract,
+  through the library and through both MCP transports.
 
 ## 2026-10-25: renamed to Fiador; build design lands
 
