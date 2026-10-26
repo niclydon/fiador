@@ -1844,12 +1844,19 @@ not rows above because the table is only for what is still open:
   Fiador. Descriptor rule (Nic, Oct 25, 2026): Fiador never
   appears naked in public copy; on first use in every surface
   it travels with "human-backed attestation for Discord bots"
-  (§7). One cryptographic consequence, recorded here because
-  it must not drift: the Discord profile's canonical signing
-  prefix is `fiador-discord-attestation:v1` (§3.2) — safe to
-  fix now because no attestation has been signed under the old
-  prefix (§9 has not run); after the first signed attestation
-  exists, the prefix is frozen like any other format constant.
+  (§7). One cryptographic point, recorded here because it
+  must not drift (corrected Oct 26, 2026 — an earlier wording
+  of this summary still described a signing prefix; the
+  normative text never carried one after the D2 resolution):
+  the Discord profile's canonical form is the W0 ordered-keys
+  serialisation alone, with NO prefix line (§3.2; §13 D2
+  adopts the W0 form). A `fiador-discord-attestation:v1`
+  prefix existed only in this design's first revision and was
+  dropped with D2, before any attestation was signed (§9 has
+  not run); domain separation is carried by the subject type
+  inside the signed payload. After the first signed
+  attestation exists, the canonical form is frozen like any
+  other format constant.
 - Licence. Apache-2.0 is the program default for the whole
   World Program, including this repo (Nic, Oct 25, 2026, via
   the coordinator, and recorded in the portfolio). Applied in
