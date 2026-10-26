@@ -20,7 +20,8 @@ export interface VerifyMcpDeps {
   verifier: Verifier;
   // Base URL of a badge service deployment. When unset, badge_status
   // returns its status body with badge URLs omitted, never fabricated
-  // (SPEC 11.9 M2: undecided, behind configuration).
+  // (SPEC 11.9 M2, DECIDED Oct 26, 2026: badge_status ships in v1
+  // with exactly this omission behaviour).
   badgeBaseUrl?: string;
   // Subject -> attestation resolver for badge_status. When unset, the
   // badge_status tool is not listed at all (fail-closed capability).
