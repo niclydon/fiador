@@ -6,7 +6,8 @@
       "discord_application_id": "1561422752521396254",
       "attestation_url": "https://fiador.org/attestations/nova.json",
       "submitted_by": "niclydon",
-      "added_at": "2026-10-26T10:10:50Z"
+      "added_at": "2026-10-26T10:10:50Z",
+      "payload_hash": "8bfeb9f9182de3ce63cdf42bdff941277250d96089982c65f0f97761f195a031"
     }
   ]
 }

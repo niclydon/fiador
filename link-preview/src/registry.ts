@@ -28,6 +28,8 @@ export interface RegistryDocument {
   entries: RegistryEntry[];
 }
 
+const CANONICAL_PAYLOAD_HASH = /^[0-9a-f]{64}$/;
+
 /** registrySource may hand back the full document or a bare entry list. */
 export function normalizeEntries(
   doc: RegistryDocument | RegistryEntry[],
@@ -46,7 +48,9 @@ export function normalizeEntries(
       typeof entry.attestation_url !== 'string' ||
       (entry.status !== undefined && entry.status !== 'revoked') ||
       (entry.name !== undefined && typeof entry.name !== 'string') ||
-      (entry.payload_hash !== undefined && typeof entry.payload_hash !== 'string') ||
+      (entry.payload_hash !== undefined &&
+        (typeof entry.payload_hash !== 'string' || !CANONICAL_PAYLOAD_HASH.test(entry.payload_hash))) ||
+      (entry.status === 'revoked' && entry.payload_hash === undefined) ||
       (entry.short_id !== undefined && typeof entry.short_id !== 'string')
     ) {
       throw new Error('Malformed registry entry.');

@@ -1,11 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import {
   canonicalAttestationMessage,
   hashHumanId,
   truncateAddress,
 } from '@fiador/verify';
 import { attestationShortId } from '../src/shortId.js';
+import { resolveShortId } from '../src/resolve.js';
 
 const AGENTBOOK_CONTRACT = '0xA23aB2712eA7BBa896930544C7d6636a96b944dA' as const;
 import type {
@@ -15,7 +17,7 @@ import type {
 } from '@fiador/verify';
 import { handleRequest } from '../src/handler.js';
 import type { LinkPreviewDeps } from '../src/deps.js';
-import type { RegistryEntry } from '../src/registry.js';
+import { normalizeEntries, type RegistryEntry } from '../src/registry.js';
 
 // Fixture secrets/identifiers: synthetic only. The deep-scan tests assert
 // neither ever appears in any response body — the full humanId is internal
@@ -475,6 +477,51 @@ describe('failure states fail closed', () => {
 });
 
 describe('revoked tombstone', () => {
+  it('keeps the current published short link resolvable after revocation', async () => {
+    const registry = JSON.parse(readFileSync(new URL('../../registry/registry.json', import.meta.url), 'utf8'));
+    const mirror = JSON.parse(readFileSync(new URL('../../verify-page/registry.json', import.meta.url), 'utf8'));
+    const publishedAttestation = JSON.parse(readFileSync(new URL('../../verify-page/attestations/nova.json', import.meta.url), 'utf8')) as SignedAttestation;
+    const entries = normalizeEntries(registry);
+    const payloadHash = createHash('sha256')
+      .update(canonicalAttestationMessage(publishedAttestation.payload), 'utf8')
+      .digest('hex');
+    expect(entries).toHaveLength(1);
+    expect(entries[0].payload_hash).toBe(payloadHash);
+    expect(normalizeEntries(mirror)[0].payload_hash).toBe(payloadHash);
+
+    const oldId = attestationShortId(publishedAttestation);
+    const before = await resolveShortId(entries, oldId, async () => publishedAttestation);
+    expect(before.kind).toBe('live');
+
+    const tombstone: RegistryEntry = { ...entries[0], status: 'revoked' };
+    const fetcher = vi.fn(async () => { throw new Error('Revoked attestation must not be fetched'); });
+    const { deps } = makeHarness({
+      registrySource: async () => ({ version: 1, entries: [tombstone] }),
+      attestationFetcher: fetcher,
+    });
+    const res = await handleRequest(req(`/v/${oldId}/card`, DISCORD_UA), deps);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('Revoked');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['prefixed', `0x${'a'.repeat(64)}`],
+    ['uppercase', 'A'.repeat(64)],
+    ['short', 'a'.repeat(63)],
+    ['nonhex', 'g'.repeat(64)],
+  ])('rejects a %s payload hash', (_label, payloadHash) => {
+    expect(() => normalizeEntries({ version: 1, entries: [{ ...liveEntry, payload_hash: payloadHash }] }))
+      .toThrow('Malformed registry entry.');
+  });
+
+  it('rejects a tombstone without a payload hash even if it has a short id', () => {
+    expect(() => normalizeEntries({
+      version: 1,
+      entries: [{ ...liveEntry, status: 'revoked', short_id: 'a'.repeat(10) }],
+    })).toThrow('Malformed registry entry.');
+  });
+
   it('renders the revoked card without ever fetching the attestation', async () => {
     const revokedAttestation = makeAttestation({
       subject: { type: 'discord_application', id: '555000111222333444' },
