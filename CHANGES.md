@@ -1,5 +1,33 @@
 # Changes
 
+## 2026-10-26: reference signer CLI (tools/signer)
+
+- tools/signer: the reference signer from DESIGN §3.2 —
+  draft, sign, and verify subcommands built entirely on the
+  merged verify core (canonicalAttestationMessage,
+  createVerifier); no cryptography or hashing is reimplemented.
+- draft runs the core live against the wallet and copies the
+  internal result humanHash into the payload (human_id_hash in
+  extra, disclosure pinned to hash, operator display name only
+  via explicit opt-in, expiry capped at 90 days, 192-bit nonce).
+- sign refuses before signing when the key does not control
+  the draft wallet, the wallet is unregistered at signing
+  time, the payload hash is stale against a fresh lookup, the
+  draft is expired, or disclosure is not hash. The key is
+  loaded from an env file, never an argument, never printed;
+  the CLI never handles a raw humanId.
+- verify prints only the public projection of the result.
+- Founding draft produced with this CLI for the Nova Discord
+  application (payload hash
+  8bfeb9f9182de3ce63cdf42bdff941277250d96089982c65f0f97761f195a031);
+  signing and publication land in the follow-up publish PR.
+- 11 tests (root suite 93 passed, 3 skipped): draft shape and
+  live-hash derivation, opt-in name, unregistered refusal,
+  90-day cap, sign-to-verify round trip through the real core
+  with a fake reader, the sign refusals, and an output-hygiene
+  scan asserting no raw humanId and no key material in any
+  produced file or output.
+
 ## 2026-10-26: first build — verify core stub, verifier bot, link preview
 
 - packages/verify-ts: the verify core at the W0 spec's interface
