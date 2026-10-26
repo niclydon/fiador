@@ -37,7 +37,7 @@ import { RoleSyncEngine, warnLegacyRoleAudit } from './roles.js';
 import { SqliteStore, type Store } from './store.js';
 import { VerifyService, type VerifierLike } from './verifyService.js';
 
-class DiscordJsAdapter implements DiscordAdapter {
+export class DiscordJsAdapter implements DiscordAdapter {
   constructor(
     private readonly client: Client,
     private readonly store: Store,
@@ -47,7 +47,7 @@ class DiscordJsAdapter implements DiscordAdapter {
     const logChannelId = this.store.getGuildConfig(guildId)?.logChannelId;
     if (!logChannelId) return;
     const channel = await this.client.channels.fetch(logChannelId).catch(() => null);
-    if (channel && channel.isTextBased()) {
+    if (channel && 'guildId' in channel && channel.guildId === guildId && channel.isTextBased()) {
       await (channel as TextChannel).send(line).catch(() => undefined);
     }
   }
