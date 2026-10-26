@@ -74,10 +74,13 @@ AgentBook registration the same evening (live check: `registered:
 true`, superseding `registered: false` at Oct 24 23:45 ET), and the
 playground acceptance pass ran (granted on the free-trial calls,
 denied 402 once the trial exhausted, `agentkit_status` and
-`agentkit_self_test` passing). Public-facing copies of any of this
-use truncated identifiers only, per the portfolio boundary in §10.
-The full wallet address and humanId stay in the private estate
-record, never in this design's public-repo descendants.
+`agentkit_self_test` passing). Public narrative copies describe
+these checks by wallet role and dated status, without address or
+human-hash fragments (§10).
+The raw humanId stays in the private estate record. The signed
+public attestation necessarily contains the dedicated program
+wallet's full address; public narrative evidence uses a label
+instead of repeating its address or hash fragments.
 
 ## 1. What this proves, and what it does not
 
@@ -323,7 +326,7 @@ the attestation to say so. Semantics:
   presents it as optional in those words.
 - Nic's own fleet opts in: his bots already operate publicly
   as his, so Nova's attestation (§9 step 1) carries
-  `operator_display_name: "Nic Lydon"`. That is one operator's
+  `payload.operatorDisplayName: "Nic Lydon"`. That is one operator's
   election under this rule, recorded so the test fixtures and
   the demo read consistently — it sets no expectation for any
   other operator, and the demo copy says so.
@@ -485,7 +488,7 @@ of this section is the checklist's map.
   | Bot log channel | Check or audit lines quoting private identifiers | Lines carry status and only identifiers needed for the admin audit; no raw humanId or full wallet (§5.3) |
   | Badge + verify page | Identifier in a URL, query, or rendered field | Routes key on application ID only (§6.3); page inputs are wallet / app / URL; results render `humanHash` truncated; the value is never a URL component anywhere |
   | Screenshots | Evidence shots of a surface showing the value | Public surfaces have no full value to show by construction; §9/§10 screenshots are of those surfaces |
-  | Verification evidence | `docs/verification.md` quoting a live lookup | Entries record status, wallet truncated, and hash truncated — the doc's entry format is specified that way (§9) |
+  | Verification evidence | `docs/verification.md` quoting a live lookup | Public narrative entries use a non-identifying label and dated status, without wallet or human-hash fragments for the dedicated program wallet. The signed attestation still carries the wallet address required by the protocol (§9). |
   | CI output | A failing test printing a live result | Package results contain no raw value to print (default mode, §4.3); live-chain tests run behind a flag with the same outputs |
   | Git history | A value committed early, deleted later | §10's scan runs over full history, and its humanId pattern check is part of that pass, not only the tree |
   | Outward messages | A post or showcase quoting a check | §10's outward-post gate (Nic approves exact text) plus the rule itself, which binds messages as much as files |
@@ -807,7 +810,7 @@ never conflated with core codes of similar name.
   fixtures, keys published in the fixture README precisely because
   they control nothing and hold nothing) or, where a real
   registration is unavoidable, the dedicated demo wallet with
-  truncated identifiers in every human-readable file. Under the
+  a role label in public narrative files. Under the
   hash-only settlement (§3.3): attestation fixtures carry the
   hash only, and no real person's full humanId appears in any
   fixture — the humanId-shaped values a fake reader returns are
@@ -1025,10 +1028,10 @@ nothing in this section should be read as one:
   `binding` rows from earlier builds are legacy operator claims,
   not application-control records. `check_log` is append-only
   so a self-hoster can answer "when was this claim last checked?"
-  The current store has a `pruneCheckLog` operation, but nothing
-  calls it: 90-day retention is a target, not current behavior.
-  Startup and recurring pruning need implementation and a test
-  before the retention claim can ship (§10).
+  Current `main` prunes checks older than 90 days at process
+  startup and daily while running. The SQLite and in-memory
+  stores, startup call, and recurring timer have tests; this is
+  code evidence, not a live Discord test (§10).
 - Configuration is environment + a per-guild `/fiador
   setup` admin flow: bot token (env only, never in the DB),
   default registry URL, default RPC URL, sync interval default.
@@ -1104,14 +1107,14 @@ tested, not a command available from `main`.
   vetted — operators host the attestation at its final URL);
   5 s timeout; 64 KiB body cap; JSON content type required; no
   credentials in URL.
-- `/attest` rate limit: 5 attempts / user / guild / 10 min,
-  in-memory on current `main`. `/verify-agent` currently has no
-  per-user limit. Neither the registry fetch nor the World Chain
-  RPC lookup is cached at the bot boundary, so repeated checks
-  can multiply upstream requests. Before broad use, add and test
-  a shared user/guild limit for both commands and bounded remote
-  lookup load (caching or an equivalent control); this is an
-  open performance gate (§10), not a property of current code.
+- `/attest` and `/verify-agent` share an in-memory limit of five
+  attempts per user per guild per ten minutes on current `main`;
+  the shared budget and reset are covered by local tests.
+  Neither the registry fetch nor the World Chain RPC lookup is
+  cached at the bot boundary, so repeated checks can still
+  multiply upstream requests. Bounded remote lookup load
+  (caching or an equivalent control) and live Discord smoke
+  remain open before broad guild use (§10).
 - Token hygiene: token from env, never logged, startup log prints
   the bot's own user ID and guild count only. Intents requested:
   Guilds + GuildMembers, with no Message Content intent. Current
@@ -1130,11 +1133,11 @@ tested, not a command available from `main`.
 ### 5.5 Sync loop semantics
 
 - The current loop rechecks stored legacy bindings at startup and
-  on a timer. On current `main`, the timer takes the shortest
-  configured guild interval and rechecks every guild on that
-  global cadence; individual guild intervals are not honored.
-  Independent per-guild scheduling must be implemented and tested
-  before an interval override is described as effective (§10).
+  on each guild's own configured interval, with ±10% jitter after
+  the first check. It discovers new guilds and setup changes and
+  caps concurrent guild checks at four. Local tests cover separate
+  intervals, configuration changes, and a slow guild not delaying
+  another; live Discord timing remains to be checked (§10).
   The loop logs the package status. Every status, including
   `verified`, `invalid`, `expired`, and `unregistered`, preserves the existing
   Discord role state. These rows lack trusted app-control proof,
@@ -1620,7 +1623,7 @@ Steps:
 1. Publish Nova's attestation — COMPLETE, Oct 26, 2026.
    - The founding payload was signed with the dedicated program
      wallet, published at a public HTTPS URL, and indexed in the
-     registry. It carries `operator_display_name: "Nic Lydon"`
+     registry. It carries `payload.operatorDisplayName: "Nic Lydon"`
      under Nic's opt-in in §3.1.1. The signing, publication, and
      live fetch-back are recorded in `docs/verification.md`;
      this completion does not close the remaining steps below.
@@ -1638,7 +1641,8 @@ Steps:
      confirm the core returns `verified` while the page renders
      `Claim unconfirmed` with neutral artwork, then screenshot it
      for `docs/verification.md`
-     (identifiers truncated in the screenshot per §10), in both
+     (crop or obscure dedicated program wallet and human-hash
+     fragments in any public screenshot per §10), in both
      light and dark mode (§6.0): system-preference default, the
      toggle, and persistence each exercised once.
 3. Failure cases, package + page (each must produce the named
@@ -1745,7 +1749,7 @@ checked, and re-apply to any future repo in the program:
       a World mark or implies endorsement (portfolio trademark
       rule). The creation-day availability checks were run from
       both seats, as recorded in §11's resolved list.
-- [ ] Creation go itself: the name and licence decisions were
+- [x] Creation go itself: the name and licence decisions were
       NOT the go. Creation happened only on Nic's explicit go
       through the coordinator, after the remaining §11 decisions
       land. Nothing in this design, and no earlier decision,
@@ -1809,10 +1813,10 @@ repo's `docs/narrative/` launch entry:
       and screenshots — and, in the secret-scan pass above,
       across full git history — where every hit must be a hash,
       a content hash, or a labelled synthetic sentinel, per the
-      leak-path audit in §3.3); wallet addresses
-      truncated in prose and screenshots (full addresses appear
-      only inside machine fixtures where the protocol requires
-      them, and only for synthetic or dedicated demo wallets);
+      leak-path audit in §3.3); public prose and screenshots use
+      labels rather than wallet or human-hash fragments for the
+      dedicated program wallet (the signed attestation retains
+      its protocol-required full wallet address);
       no Nexus data, no
       calendar / comms / health content; no homelab hostnames,
       IPs, or tailnet details; no Discord tokens or guild
@@ -1869,18 +1873,20 @@ repo's `docs/narrative/` launch entry:
 - [ ] Bot load gate (§5.4): `/attest` and `/verify-agent` share a
       tested per-user, per-guild limit, and registry/RPC lookup
       load has a measured bound (cache or equivalent) before
-      broad guild use. Current `main` meets neither full condition.
-- [ ] Bot scheduling and retention gate (§§5.1, 5.5): tests prove
+      broad guild use. The shared limit is implemented and locally
+      tested; the remote-load bound and live smoke remain open.
+- [x] Bot scheduling and retention code gate (§§5.1, 5.5): tests prove
       independent per-guild intervals and startup plus recurring
-      90-day `check_log` pruning. The current code has a global
-      shortest-interval timer and an unused pruning method.
+      90-day `check_log` pruning. This is merged code and local
+      test evidence; §9's live guild run remains open.
 
 Before any outward post (dev.to, Discord showcase, social):
 
 - [ ] Nic approves the exact text (portfolio gate; no standing
       rule replaces this yet).
-- [ ] Post links the repo, shows truncated identifiers only, and
-      makes no claim beyond §1.
+- [ ] Post links the repo, uses labels only for the dedicated
+      program wallet with no address or human-hash fragments,
+      and makes no claim beyond §1.
 - [ ] Descriptor rule (§7): the post's first use of Fiador
       carries "human-backed attestation for Discord bots"; the
       name never appears naked in any launch surface's first
@@ -1966,7 +1972,7 @@ not rows above because the table is only for what is still open:
   themselves; the name is self-asserted under the operator's
   signature and verifiers display it only when present.
   Specified in §3.1.1. Nic's own fleet opts in — Nova's
-  attestation carries `operator_display_name: "Nic Lydon"` —
+  attestation carries `payload.operatorDisplayName: "Nic Lydon"` —
   because his bots already operate publicly as his.
 - Deployment model. Self-host only for v1, plus the static
   verify page (Nic, Oct 25, 2026, via the coordinator). No

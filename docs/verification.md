@@ -1,10 +1,12 @@
 # Verification log
 
-Live-run evidence, recorded with dates and dependency versions. A
+Live-run evidence is recorded with dates and dependency versions. A
 live pass is a fact about a day and a dependency version, not a
 permanent label; retest on change re-runs the full set (unit,
-fixture, service, then live). Entries record status and the
-canonical hash at most — never a full human identifier.
+fixture, service, then live). Public narrative entries identify the
+dedicated program wallet by role and record methods and status without
+wallet or human-hash fragments. The signed public attestation retains
+the wallet address required by the protocol.
 
 ## 2026-10-26 — verify core 0.1.0 and verify MCP 0.1.0
 
@@ -23,38 +25,38 @@ decision: @worldcoin/agentkit-core 0.2.1.
   directly with viem (same contract, same ABI), preserving the
   `unregistered` vs `unknown` distinction.
 - Live, against the real AgentBook contract on World Chain:
-  - The program's dedicated wallet (truncated `0x21BD…A14Bc`,
-    registered 2026-10-26) → `verified`, canonical hash
-    `7bf4573c68a6…` (prefix recorded; full hash is a public-shape
-    value by design but is not republished here).
-  - A known-unregistered address → `unregistered` +
+  - The dedicated program wallet (registered 2026-10-26) returned
+    `verified`.
+  - A known-unregistered address returned `unregistered` +
     `not_registered`.
-  - A dead RPC endpoint → `unknown` + `lookup_failed`, never
+  - A dead RPC endpoint returned `unknown` + `lookup_failed`, never
     `unregistered`.
 - Live, through the MCP server (both transports): `verify_address`
-  for the same wallet → `verified` with the same hash over stdio
-  and over streamable HTTP; tool outputs scanned — no raw humanId,
-  no `humanId` key, no full address.
+  for the dedicated program wallet returned `verified` over stdio
+  and streamable HTTP. Tool outputs were scanned: no raw humanId,
+  no `humanId` key, and no full address.
 
 ## 2026-10-26 — founding attestation published (DESIGN §9 step 1)
 
-- Signer CLI (@fiador/signer, PR #4, merge 63fee3b) signed the
-  founding attestation for the Nova Discord application
-  (1561422752521396254) with the program wallet (truncated
-  0x21BD…A14Bc). Payload hash
-  8bfeb9f9182de3ce63cdf42bdff941277250d96089982c65f0f97761f195a031;
-  issued 2026-10-26, expires 2027-01-24.
-- Published (PR #6, merge 6a11c07): registry/registry.json carries
-  the founding entry; verify-page/ hosts the attestation.
-- Hosting: Vercel project fiador (production deployment
-  dpl_5egAYCPqBo93qMPdmDTb1uxKox72); fiador.org and
-  www.fiador.org (308 to apex) attached; Cloudflare DNS A @
-  76.76.21.21 and CNAME www cname.vercel-dns.com, both DNS-only.
-- Live evidence, fetched back from the public URLs:
-  https://fiador.org/attestations/nova.json returns 200,
-  byte-identical to the signed file (sha256 ad1c0e5e…), and the
-  signer verify command against the fetched copy returned
-  status verified, checkedAt 2026-10-26T10:41:40Z, humanHash
-  7bf4573c68a6… matching the registration record above.
-  https://fiador.org/registry.json is byte-identical to the
-  repo registry. §9 step 1 is complete; steps 2-5a remain.
+- Signer CLI (`@fiador/signer`, PR #4, merge 63fee3b) signed the
+  founding attestation for the Nova Discord application using the
+  dedicated program wallet. It was issued 2026-10-26 and expires
+  2027-01-24.
+- Published in PR #6 (merge 6a11c07): `registry/registry.json`
+  carries the founding entry; `verify-page/` hosts the attestation.
+- Hosting at publication: Vercel project `fiador`; `fiador.org` and
+  `www.fiador.org` (308 to apex) attached, with Cloudflare DNS.
+- Publication fetch-back: `https://fiador.org/attestations/nova.json`
+  returned 200 and matched the signed repository file byte for byte.
+  The signer verified the fetched copy with status `verified` at
+  2026-10-26T10:41:40Z. A read-only recheck on 2026-10-26 still found
+  the public attestation byte-identical to the repository copy.
+- The public `https://fiador.org/registry.json` returns 200 and lists
+  the founding entry. A 2026-10-26 read-only comparison found that
+  the live entry matches the repository entry on its present fields,
+  but omits the repository's `payload_hash` field. The live and repo
+  registries are therefore not byte-identical. Reconcile and recheck
+  this deployment drift with the next production web release.
+- On the same read-only check, the site root returned 200 while
+  `/verify/` and a test `/v/` URL returned 404. §9 step 1 publication
+  is complete; the page and preview live tests in steps 2–5a remain.
