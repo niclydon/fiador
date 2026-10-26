@@ -30,8 +30,8 @@ that overstates itself is worse than none.
    hash of the human identifier, never the identifier itself.
 2. The attestation is published at a URL and listed in a public
    registry mapping Discord application IDs to attestation URLs.
-3. The self-hosted verifier bot and static verify page check the
-   signature, expiry, and wallet registration. They display the
+3. The self-hosted verifier bot and the locally built static verify page
+   check the signature, expiry, and wallet registration. They display the
    operator claim with an application-control warning. The verifier
    bot does not grant or revoke the server's `Human-backed` role.
 
@@ -48,8 +48,8 @@ mark has to be able to say "no longer true."
   which is the one correlation the system intends to allow.
 - An optional operator display name exists for operators who want
   to be named. It is off by default and never required.
-- Nothing in this repo contains keys, tokens, or personal data.
-  Demo material uses synthetic identifiers only.
+- No live private keys, tokens, or personal data belong in this repo.
+  Test signing keys and identifiers are synthetic.
 
 ## Status
 
@@ -63,8 +63,10 @@ written ([docs/SPEC.md](docs/SPEC.md)). This repository contains:
   icon, light and dark) under [assets/](assets/), with a dynamic
   served-badge design so the mark can reflect a live check
 - The verify package, self-hosted Discord verifier bot, static verify
-  page, and registry source. The bot's role automation is disabled
-  pending trusted proof of Discord application control.
+  page (`/verify/` in PR #10), and registry source. The browser page
+  has local tests; deployed click-through and browser CORS/RPC behavior
+  remain to be checked. The bot's role automation is disabled pending
+  trusted proof of Discord application control.
 - A tested AgentKit free-trial integration in a private prototype,
   verified end to end against AgentBook with a real Orb-verified
   registration (October 25, 2026).

@@ -18,6 +18,7 @@
     "packages/*",
     "verifier-bot",
     "link-preview",
+    "verify-page",
     "tools/*"
   ]
 }

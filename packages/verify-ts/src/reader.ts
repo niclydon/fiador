@@ -38,6 +38,12 @@ export function createLiveReader(options?: {
   return {
     source: 'live',
     async lookupHuman(address: EvmAddress): Promise<string | null> {
+      // A configured chain only selects viem's transport metadata. The RPC
+      // endpoint itself can answer for any chain, so pin its live identity
+      // before trusting either a positive or zero AgentBook response.
+      if (await client.getChainId() !== worldchain.id) {
+        throw new Error('AgentBook RPC is not World Chain.');
+      }
       const value = await client.readContract({
         address: contract,
         abi: AGENTBOOK_ABI,

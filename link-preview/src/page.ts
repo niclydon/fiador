@@ -1,8 +1,8 @@
 // The crawler-facing page (DESIGN §6.4): Open Graph meta plus a small
 // human-readable body carrying the same verdict. The meta description
-// ships the snapshot caveat, not just this design doc: a preview is a
-// crawl-time snapshot, platform caches may never refresh it, and the
-// verification is the live click-through check on the canonical domain.
+// ships the snapshot caveat: platform caches may never refresh a
+// crawl-time result. A live canonical verification destination is still
+// required before this becomes a complete user flow.
 
 import { DESCRIPTOR, STATE_WORD, escapeXml } from './card.js';
 import type { CardState } from './card.js';
@@ -11,8 +11,7 @@ export const SNAPSHOT_CAVEAT =
   'This preview is a snapshot from crawl time, not the proof: platform ' +
   'preview caches mean a later expiry or revocation may not refresh a ' +
   'preview already posted, and a lookalike domain can imitate a card. ' +
-  'The verification is the click-through check on fiador.org, run live ' +
-  'at open time.';
+  'A current result requires a live verification page on fiador.org.';
 
 export interface OgPageOptions {
   state: CardState;
@@ -57,7 +56,7 @@ export function renderOgPage(opts: OgPageOptions): string {
 <p>${escapeXml(opts.applicationName)}</p>
 <p>${escapeXml(opts.verdict)}</p>
 <p>Checked ${escapeXml(opts.checkedAt)} (crawl time). ${escapeXml(SNAPSHOT_CAVEAT)}</p>
-<p><a href="${escapeXml(opts.verifyUrl)}">Verify this attestation live on fiador.org</a></p>
+<p><a href="${escapeXml(opts.verifyUrl)}">Open the verification destination on fiador.org</a></p>
 </main>
 </body>
 </html>`;

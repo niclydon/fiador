@@ -19,6 +19,10 @@ Discord application; verify it yourself.
   verify at merge time: a registry PR whose attestation does not
   verify does not merge. Expiry after merge is normal lifecycle,
   handled by verifier sync, not by registry edits.
+- Include `payload_hash`: the 64-character lowercase hex SHA-256 digest
+  of the UTF-8 `canonicalAttestationMessage(attestation.payload)` from
+  `@fiador/verify`. Compute it from the attestation served at
+  `attestation_url`, not from the raw JSON file or its signature.
 - Entries carry no human identifier in any form: no humanId, no
   hash of one. The registry points at attestations; it does not
   republish their contents.
@@ -30,7 +34,8 @@ Discord application; verify it yourself.
 - Removal is by PR from anyone. It merges on a failed verify plus
   a 7-day issue notice, or immediately on the operator's own PR.
 - The recommended removal path is a tombstone, not a deletion:
-  mark the entry `"status": "revoked"` and leave it in place.
+  mark the entry `"status": "revoked"` and leave it in place with its
+  original `payload_hash`. A tombstone without that hash is invalid.
   Old `/v/` links then keep rendering an honest revoked card
   instead of a misleading not-found. Deletion remains possible
   where a tombstone is not appropriate.

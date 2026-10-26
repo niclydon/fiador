@@ -4,9 +4,8 @@
 //
 // Behaviour summary:
 // - Crawlers get the OG page (meta + the dynamic card as og:image);
-//   browsers get a 302 to the verify page, prefilled when an
-//   attestation is known. Same verdict, two readers — never cloaking,
-//   because both renderings come from the one crawl-time check below.
+//   browsers get a 302 to the planned verify page, prefilled when an
+//   attestation is known. The full click-through page remains pending.
 // - Verification runs at crawl time through the verify core, and only
 //   the public projection (toPublicVerifyResult) is rendered from.
 // - Fail-closed: an unknown id is a neutral "attestation not found"
@@ -25,6 +24,12 @@ import type { Resolution } from './resolve.js';
 import { DEFAULT_VERDICT, renderCard } from './card.js';
 import type { CardState } from './card.js';
 import { renderOgPage } from './page.js';
+import {
+  discordProfileFailure,
+  discordProfileShapeFailure,
+  isDiscordSnowflake,
+} from './profile.js';
+import { withAbort } from './deadline.js';
 
 const CRAWLER_TOKENS = [
   'discordbot',
@@ -81,6 +86,7 @@ function parseRoute(pathname: string): Route | null {
 const CACHE_STATE = 'public, max-age=300, s-maxage=300';
 const CACHE_NOT_FOUND = 'public, max-age=60, s-maxage=60';
 const CACHE_FAILURE = 'no-store';
+const REQUEST_TIMEOUT_MS = 15_000;
 
 function svgResponse(svg: string, cacheControl: string): Response {
   return new Response(svg, {
@@ -145,6 +151,20 @@ function invalidVerdict(failures: FailureCode[]): string {
 export async function handleRequest(
   req: Request,
   deps: LinkPreviewDeps,
+): Promise<Response> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await handleRequestWithinDeadline(req, deps, abort.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function handleRequestWithinDeadline(
+  req: Request,
+  deps: LinkPreviewDeps,
+  deadline: AbortSignal,
 ): Promise<Response> {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     return new Response('method not allowed', {
@@ -219,7 +239,7 @@ export async function handleRequest(
 
   let entries: RegistryEntry[];
   try {
-    entries = normalizeEntries(await deps.registrySource());
+    entries = normalizeEntries(await withAbort(() => deps.registrySource(), deadline));
   } catch {
     if (route.card) return failureCard();
     if (!isCrawler) {
@@ -232,6 +252,7 @@ export async function handleRequest(
     entries,
     route.id,
     deps.attestationFetcher,
+    deadline,
   );
 
   switch (resolution.kind) {
@@ -275,7 +296,8 @@ export async function handleRequest(
       const verifyUrl = `${bareVerifyUrl}?attestation=${encodeURIComponent(
         entry.attestation_url,
       )}`;
-      // Browsers never wait on a check: the verify page re-runs it live.
+      // Browsers never wait on this crawl-time check. The destination
+      // must re-run it live once the verify page is built.
       if (!route.card && !isCrawler) {
         return new Response(null, {
           status: 302,
@@ -284,10 +306,16 @@ export async function handleRequest(
       }
       let pub: PublicVerifyResult;
       try {
-        const result = await deps.verifier.resolveStatus({
-          kind: 'attestation',
-          attestation,
-        });
+        const result = await withAbort(
+          () => deps.verifier.verifyAttestation(attestation, {
+            expectedSubject: {
+              type: 'discord_application',
+              id: entry.discord_application_id,
+            },
+            signal: deadline,
+          }),
+          deadline,
+        );
         pub = toPublicVerifyResult(result);
       } catch {
         return route.card ? failureCard() : failurePage();
@@ -299,13 +327,38 @@ export async function handleRequest(
       let verdict: string;
       switch (pub.status) {
         case 'verified':
-          state = 'verified';
-          verdict = DEFAULT_VERDICT.verified;
+        case 'expired': {
+          const profileFailure = pub.status === 'verified'
+            ? discordProfileFailure(attestation, entry, pub.humanHash)
+            : discordProfileShapeFailure(attestation, entry);
+          if (profileFailure) {
+            state = 'unverified';
+            verdict = profileFailure;
+            break;
+          }
+          if (deps.discordBotUserIdForApplication) {
+            let reportedBotId: string | null;
+            try {
+              reportedBotId = await withAbort(
+                () => deps.discordBotUserIdForApplication!(entry.discord_application_id, deadline),
+                deadline,
+              );
+            } catch {
+              return route.card ? failureCard() : failurePage();
+            }
+            if (reportedBotId !== null && !isDiscordSnowflake(reportedBotId)) {
+              return route.card ? failureCard() : failurePage();
+            }
+            if (reportedBotId !== null && reportedBotId !== attestation.payload.extra?.discord_bot_user_id) {
+              state = 'unverified';
+              verdict = 'Not verified: the signed bot user ID differs from Discord’s reported bot user ID.';
+              break;
+            }
+          }
+          state = pub.status === 'expired' ? 'expired' : 'claim_unconfirmed';
+          verdict = DEFAULT_VERDICT[state];
           break;
-        case 'expired':
-          state = 'expired';
-          verdict = DEFAULT_VERDICT.expired;
-          break;
+        }
         case 'unregistered':
           state = 'unverified';
           verdict =
@@ -325,7 +378,7 @@ export async function handleRequest(
         cardUrl,
         verifyUrl,
         operatorName:
-          typeof operator === 'string' && operator.length > 0
+          typeof operator === 'string' && operator.length > 0 && operator.length <= 64
             ? operator
             : undefined,
       };

@@ -1,11 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import {
   canonicalAttestationMessage,
   hashHumanId,
   truncateAddress,
 } from '@fiador/verify';
 import { attestationShortId } from '../src/shortId.js';
+import { resolveShortId } from '../src/resolve.js';
 
 const AGENTBOOK_CONTRACT = '0xA23aB2712eA7BBa896930544C7d6636a96b944dA' as const;
 import type {
@@ -15,7 +17,7 @@ import type {
 } from '@fiador/verify';
 import { handleRequest } from '../src/handler.js';
 import type { LinkPreviewDeps } from '../src/deps.js';
-import type { RegistryEntry } from '../src/registry.js';
+import { normalizeEntries, type RegistryEntry } from '../src/registry.js';
 
 // Fixture secrets/identifiers: synthetic only. The deep-scan tests assert
 // neither ever appears in any response body — the full humanId is internal
@@ -23,7 +25,9 @@ import type { RegistryEntry } from '../src/registry.js';
 // ever rendered truncated.
 const WALLET = ('0x' + 'cd'.repeat(20)) as `0x${string}`;
 const HUMAN_ID = '0x' + '11'.repeat(32);
+const HUMAN_HASH = hashHumanId(HUMAN_ID);
 const APP_ID = '123456789012345678';
+const BOT_ID = '999888777666555444';
 const ATT_URL = 'https://bots.example.com/attestation.json';
 const CHECKED_AT = '2026-10-26T04:00:00.000Z';
 const NOW_ISO = '2026-10-26T04:05:00.000Z';
@@ -49,7 +53,8 @@ function makeAttestation(
       nonce: 'fixture-nonce-1',
       extra: {
         discord_application_name: 'Nova Helper',
-        discord_bot_user_id: '999888777666555444',
+        discord_bot_user_id: BOT_ID,
+        human_id_hash: HUMAN_HASH,
       },
       ...overrides,
     },
@@ -63,7 +68,7 @@ function makeResult(overrides: Partial<VerifyResult> = {}): VerifyResult {
     status: 'verified',
     address: WALLET,
     addressTruncated: truncateAddress(WALLET),
-    humanHash: hashHumanId(HUMAN_ID),
+    humanHash: HUMAN_HASH,
     humanId: HUMAN_ID, // internal-only fixture: must never reach a body
     failures: [],
     evidence: {
@@ -122,7 +127,19 @@ function req(path: string, ua: string): Request {
 const attestation = makeAttestation();
 const liveId = attestationShortId(attestation);
 
-describe('verified flow', () => {
+describe('core-valid claim without application-control proof', () => {
+  it('asks the verify core to bind the attestation to its registry application', async () => {
+    const verifyAttestation = vi.fn(async () => makeResult());
+    const { deps } = makeHarness({
+      verifier: { ...fakeVerifier(makeResult()), verifyAttestation },
+    });
+    await handleRequest(req(`/v/${liveId}/card`, DISCORD_UA), deps);
+    expect(verifyAttestation).toHaveBeenCalledWith(attestation, {
+      expectedSubject: { type: 'discord_application', id: APP_ID },
+      signal: expect.any(AbortSignal),
+    });
+  });
+
   it('crawler gets the OG page with descriptor, state, and og:image', async () => {
     const { deps } = makeHarness();
     const res = await handleRequest(req(`/v/${liveId}`, DISCORD_UA), deps);
@@ -130,22 +147,27 @@ describe('verified flow', () => {
     expect(res.headers.get('content-type')).toContain('text/html');
     const body = await res.text();
     expect(body).toContain('human-backed attestation for Discord bots');
-    expect(body).toContain('Verified');
+    expect(body).toContain('Claim unconfirmed');
+    expect(body).not.toContain('Verified: a unique human backs');
     expect(body).toContain(
       `property="og:image" content="https://fiador.org/v/${liveId}/card.svg"`,
     );
     expect(body).toContain('name="twitter:card" content="summary_large_image"');
     expect(body).toContain('snapshot from crawl time');
+    expect(body).toContain('A current result requires a live verification page');
+    expect(body).not.toContain('run live at open time');
   });
 
-  it('card SVG carries the app name and the gold verified treatment', async () => {
+  it('card SVG carries the app name with a neutral, non-green treatment', async () => {
     const { deps } = makeHarness();
     const res = await handleRequest(req(`/v/${liveId}/card`, TWITTER_UA), deps);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('image/svg+xml');
     const body = await res.text();
     expect(body).toContain('Nova Helper');
-    expect(body).toContain('#D4A55D'); // eye gold — verified accent
+    expect(body).toContain('Claim unconfirmed');
+    expect(body).not.toContain('#D4A55D');
+    expect(body).toContain('Discord application control is not established');
     expect(body).toContain('Checked 2026-10-26 04:00:00 UTC');
   });
 
@@ -154,6 +176,60 @@ describe('verified flow', () => {
     const res = await handleRequest(req(`/v/${liveId}.svg`, DISCORD_UA), deps);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('image/svg+xml');
+  });
+});
+
+describe('Discord profile checks', () => {
+  it.each([
+    ['non-hash disclosure', { humanIdDisclosure: 'none' } as const, 'hash disclosure'],
+    ['missing human hash', { extra: { discord_bot_user_id: BOT_ID } }, 'human hash is missing or malformed'],
+    ['uppercase human hash', { extra: { discord_bot_user_id: BOT_ID, human_id_hash: HUMAN_HASH.toUpperCase() } }, 'human hash is missing or malformed'],
+    ['wrong live human hash', { extra: { discord_bot_user_id: BOT_ID, human_id_hash: '0'.repeat(64) } }, 'human hash does not match'],
+    ['different signed URL', { attestationUrl: 'https://bots.example.com/other.json' }, 'signed attestation URL does not match'],
+    ['missing bot user ID', { extra: { human_id_hash: HUMAN_HASH } }, 'bot user ID is missing or invalid'],
+    ['malformed bot user ID', { extra: { human_id_hash: HUMAN_HASH, discord_bot_user_id: 'abc' } }, 'bot user ID is missing or invalid'],
+    ['raw human ID field', { extra: { human_id_hash: HUMAN_HASH, discord_bot_user_id: BOT_ID, humanId: HUMAN_ID } }, 'raw human ID fields are not allowed'],
+    ['raw human ID alias', { extra: { human_id_hash: HUMAN_HASH, discord_bot_user_id: BOT_ID, human_id_raw: HUMAN_ID } }, 'raw human ID fields are not allowed'],
+    ['unsupported signed field', { extra: { human_id_hash: HUMAN_HASH, discord_bot_user_id: BOT_ID, other_claim: 'value' } }, 'unsupported signed fields'],
+    ['malformed application name', { extra: { human_id_hash: HUMAN_HASH, discord_bot_user_id: BOT_ID, discord_application_name: 42 as never } }, 'Discord application name is malformed'],
+    ['different Discord application', { subject: { type: 'discord_application', id: '111222333444555666' } }, 'Discord application ID is missing or invalid'],
+  ])('rejects %s', async (_name, override, reason) => {
+    const candidate = makeAttestation(override);
+    const id = attestationShortId(candidate);
+    const { deps } = makeHarness({ attestationFetcher: async () => candidate });
+    const res = await handleRequest(req(`/v/${id}`, DISCORD_UA), deps);
+    const body = await res.text();
+    expect(body).toContain('Not verified');
+    expect(body).toContain(reason);
+    const card = await handleRequest(req(`/v/${id}/card`, DISCORD_UA), deps);
+    expect(await card.text()).not.toContain('#D4A55D');
+  });
+
+  it('rejects a Discord-reported bot user ID mismatch', async () => {
+    const reportedBotUserId = vi.fn(async () => '111222333444555666');
+    const { deps } = makeHarness({ discordBotUserIdForApplication: reportedBotUserId });
+    const res = await handleRequest(req(`/v/${liveId}`, DISCORD_UA), deps);
+    expect(await res.text()).toContain('bot user ID differs from Discord');
+    expect(reportedBotUserId).toHaveBeenCalledWith(APP_ID, expect.any(AbortSignal));
+  });
+
+  it('a matching Discord-reported bot user ID still does not prove application control', async () => {
+    const { deps } = makeHarness({
+      discordBotUserIdForApplication: async () => BOT_ID,
+    });
+    const res = await handleRequest(req(`/v/${liveId}/card`, DISCORD_UA), deps);
+    const body = await res.text();
+    expect(body).toContain('Claim unconfirmed');
+    expect(body).not.toContain('#D4A55D');
+  });
+
+  it('a Discord lookup failure is a no-store could-not-check state', async () => {
+    const { deps } = makeHarness({
+      discordBotUserIdForApplication: async () => { throw new Error('Discord unavailable'); },
+    });
+    const res = await handleRequest(req(`/v/${liveId}/card`, DISCORD_UA), deps);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.text()).toContain('Could not check');
   });
 });
 
@@ -189,6 +265,134 @@ describe('browser click-through', () => {
 });
 
 describe('failure states fail closed', () => {
+  it('returns no-store could-not-check when the core verifier stalls', async () => {
+    vi.useFakeTimers();
+    try {
+      let started!: () => void;
+      const verifierStarted = new Promise<void>((resolve) => { started = resolve; });
+      const { deps } = makeHarness({
+        verifier: {
+          ...fakeVerifier(makeResult()),
+          verifyAttestation: async () => {
+            started();
+            return new Promise(() => {});
+          },
+        },
+      });
+      const pending = handleRequest(req(`/v/${liveId}/card`, DISCORD_UA), deps);
+      await verifierStarted;
+      await vi.advanceTimersByTimeAsync(15_000);
+      const response = await pending;
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.text()).toContain('Could not check');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shares one deadline across a slow registry load and a stalled verifier', async () => {
+    vi.useFakeTimers();
+    try {
+      let started!: () => void;
+      const verifierStarted = new Promise<void>((resolve) => { started = resolve; });
+      const { deps } = makeHarness({
+        registrySource: async () => new Promise((resolve) => {
+          setTimeout(() => resolve({ version: 1, entries: [liveEntry] }), 14_000);
+        }),
+        verifier: {
+          ...fakeVerifier(makeResult()),
+          verifyAttestation: async () => {
+            started();
+            return new Promise(() => {});
+          },
+        },
+      });
+      const pending = handleRequest(req(`/v/${liveId}/card`, DISCORD_UA), deps);
+      await vi.advanceTimersByTimeAsync(14_000);
+      await verifierStarted;
+      await vi.advanceTimersByTimeAsync(1_000);
+      const response = await pending;
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.text()).toContain('Could not check');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns no-store could-not-check when the optional Discord lookup stalls', async () => {
+    vi.useFakeTimers();
+    try {
+      let started!: () => void;
+      const lookupStarted = new Promise<void>((resolve) => { started = resolve; });
+      const { deps } = makeHarness({
+        discordBotUserIdForApplication: async () => {
+          started();
+          return new Promise(() => {});
+        },
+      });
+      const pending = handleRequest(req(`/v/${liveId}/card`, DISCORD_UA), deps);
+      await lookupStarted;
+      await vi.advanceTimersByTimeAsync(15_000);
+      const response = await pending;
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.text()).toContain('Could not check');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not resolve a short prefix below the documented ten-character minimum', async () => {
+    const { deps, fetchCalls } = makeHarness();
+    const res = await handleRequest(req(`/v/${liveId.slice(0, 1)}`, DISCORD_UA), deps);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('Attestation not found');
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it('malformed registry data is a lookup failure, not a missing attestation', async () => {
+    const { deps } = makeHarness({
+      registrySource: async () => ({ version: 1, entries: null }) as never,
+    });
+    const res = await handleRequest(req(`/v/${liveId}`, DISCORD_UA), deps);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.text()).toContain('Could not check');
+  });
+
+  it('malformed registry entries fail closed instead of crashing the handler', async () => {
+    const { deps } = makeHarness({
+      registrySource: async () => ({ version: 1, entries: [null] }) as never,
+    });
+    const res = await handleRequest(req(`/v/${liveId}`, DISCORD_UA), deps);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.text()).toContain('Could not check');
+  });
+
+  it('malformed attestation data is a lookup failure, not a server error', async () => {
+    const { deps } = makeHarness({
+      attestationFetcher: async () => ({
+        payload: { subject: { type: 'discord_application', id: APP_ID } },
+        signature: '0x00',
+      }),
+    });
+    const res = await handleRequest(req(`/v/${liveId}`, DISCORD_UA), deps);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.text()).toContain('Could not check');
+  });
+
+  it('invalid signed display fields cannot crash an unverified card', async () => {
+    const malformed = makeAttestation({
+      extra: { discord_application_name: 42 as never },
+    });
+    const malformedId = attestationShortId(malformed);
+    const { deps } = makeHarness({
+      attestationFetcher: async () => malformed,
+      verifier: fakeVerifier(makeResult({ status: 'invalid', failures: ['malformed_attestation'] })),
+    });
+    const res = await handleRequest(req(`/v/${malformedId}/card`, DISCORD_UA), deps);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('Not verified');
+  });
+
   it('unknown id renders a neutral not-found card with full meta, HTTP 200', async () => {
     const { deps } = makeHarness();
     const res = await handleRequest(req('/v/zzzzzzzzzz', DISCORD_UA), deps);
@@ -239,6 +443,22 @@ describe('failure states fail closed', () => {
     expect(body).toContain('#C9933A'); // amber
   });
 
+  it('rejects malformed Discord profile fields before showing Expired', async () => {
+    const malformed = makeAttestation({
+      extra: { human_id_hash: HUMAN_HASH, discord_bot_user_id: BOT_ID, human_id_raw: HUMAN_ID },
+    });
+    const id = attestationShortId(malformed);
+    const { deps } = makeHarness({
+      attestationFetcher: async () => malformed,
+      verifier: fakeVerifier(makeResult({ status: 'expired', humanHash: null, failures: ['expired'] })),
+    });
+    const res = await handleRequest(req(`/v/${id}/card`, DISCORD_UA), deps);
+    const body = await res.text();
+    expect(body).toContain('Not verified');
+    expect(body).toContain('raw human ID fields are not allowed');
+    expect(body).not.toContain('#C9933A');
+  });
+
   it('unregistered renders unverified with the not-registered wording', async () => {
     const { deps } = makeHarness({
       verifier: fakeVerifier(
@@ -257,6 +477,51 @@ describe('failure states fail closed', () => {
 });
 
 describe('revoked tombstone', () => {
+  it('keeps the current published short link resolvable after revocation', async () => {
+    const registry = JSON.parse(readFileSync(new URL('../../registry/registry.json', import.meta.url), 'utf8'));
+    const mirror = JSON.parse(readFileSync(new URL('../../verify-page/registry.json', import.meta.url), 'utf8'));
+    const publishedAttestation = JSON.parse(readFileSync(new URL('../../verify-page/attestations/nova.json', import.meta.url), 'utf8')) as SignedAttestation;
+    const entries = normalizeEntries(registry);
+    const payloadHash = createHash('sha256')
+      .update(canonicalAttestationMessage(publishedAttestation.payload), 'utf8')
+      .digest('hex');
+    expect(entries).toHaveLength(1);
+    expect(entries[0].payload_hash).toBe(payloadHash);
+    expect(normalizeEntries(mirror)[0].payload_hash).toBe(payloadHash);
+
+    const oldId = attestationShortId(publishedAttestation);
+    const before = await resolveShortId(entries, oldId, async () => publishedAttestation);
+    expect(before.kind).toBe('live');
+
+    const tombstone: RegistryEntry = { ...entries[0], status: 'revoked' };
+    const fetcher = vi.fn(async () => { throw new Error('Revoked attestation must not be fetched'); });
+    const { deps } = makeHarness({
+      registrySource: async () => ({ version: 1, entries: [tombstone] }),
+      attestationFetcher: fetcher,
+    });
+    const res = await handleRequest(req(`/v/${oldId}/card`, DISCORD_UA), deps);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('Revoked');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['prefixed', `0x${'a'.repeat(64)}`],
+    ['uppercase', 'A'.repeat(64)],
+    ['short', 'a'.repeat(63)],
+    ['nonhex', 'g'.repeat(64)],
+  ])('rejects a %s payload hash', (_label, payloadHash) => {
+    expect(() => normalizeEntries({ version: 1, entries: [{ ...liveEntry, payload_hash: payloadHash }] }))
+      .toThrow('Malformed registry entry.');
+  });
+
+  it('rejects a tombstone without a payload hash even if it has a short id', () => {
+    expect(() => normalizeEntries({
+      version: 1,
+      entries: [{ ...liveEntry, status: 'revoked', short_id: 'a'.repeat(10) }],
+    })).toThrow('Malformed registry entry.');
+  });
+
   it('renders the revoked card without ever fetching the attestation', async () => {
     const revokedAttestation = makeAttestation({
       subject: { type: 'discord_application', id: '555000111222333444' },

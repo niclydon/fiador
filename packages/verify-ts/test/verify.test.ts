@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
@@ -49,6 +50,15 @@ describe('fixture vectors', () => {
   it('committed vectors match a fresh deterministic generation', async () => {
     const fresh = await buildVectors();
     expect(fresh).toEqual(vectors);
+  });
+});
+
+describe('browser-safe human hashing', () => {
+  it('matches the original Node SHA-256 implementation byte-for-byte', () => {
+    for (const value of ['', '0x1234', 'human-one', '世界 🌍']) {
+      const expected = createHash('sha256').update(`w0-human-v1:${value}`, 'utf8').digest('hex');
+      expect(hashHumanId(value)).toBe(expected);
+    }
   });
 });
 
@@ -359,6 +369,75 @@ describe('ERC-1271 smart-wallet attestation', () => {
     } finally {
       server.close();
     }
+  });
+});
+
+describe('World Chain RPC identity', () => {
+  async function withRpc(chainId: string, check: (url: string, calls: () => number) => Promise<void>) {
+    let ethCalls = 0;
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const parsed = JSON.parse(body) as { method: string; id: number };
+        if (parsed.method === 'eth_call') ethCalls += 1;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          id: parsed.id,
+          result: parsed.method === 'eth_chainId'
+            ? chainId
+            : `0x${'0'.repeat(63)}1`, // a positive AgentBook lookup
+        }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no port');
+    try {
+      await check(`http://127.0.0.1:${address.port}`, () => ethCalls);
+    } finally {
+      server.close();
+    }
+  }
+
+  it('accepts a positive AgentBook lookup only after eth_chainId confirms 480', async () => {
+    await withRpc('0x1e0', async (rpcUrl, calls) => {
+      const result = await createVerifier({ rpcUrl }).verifyAddress(A);
+      expect(result.status).toBe('verified');
+      expect(result.humanHash).toBe(hashHumanId('0x1'));
+      expect(calls()).toBe(1);
+    });
+  });
+
+  it('treats a positive lookup offered by chain 1 as unknown, before eth_call', async () => {
+    await withRpc('0x1', async (rpcUrl, calls) => {
+      const result = await createVerifier({ rpcUrl }).verifyAddress(A);
+      expect(result.status).toBe('unknown');
+      expect(result.failures).toEqual(['lookup_failed']);
+      expect(result.humanHash).toBeNull();
+      expect(calls()).toBe(0);
+    });
+  });
+
+  it('treats an ERC-1271 signature on chain 1 as unknown, before eth_call', async () => {
+    await withRpc('0x1', async (rpcUrl, calls) => {
+      const contractWallet = '0x00000000000000000000000000000000C0FFEE01' as EvmAddress;
+      const att = clone(vectors.attestations.valid) as SignedAttestation;
+      att.payload.agentWalletAddress = contractWallet;
+      att.signatureType = 'eip1271';
+      att.signature = `0x${'11'.repeat(65)}`;
+      const v = createVerifier({
+        reader: createStaticReader({ [contractWallet]: HUMAN_1 }, 'live'),
+        rpcUrl,
+        now: () => NOW,
+      });
+      const result = await v.verifyAttestation(att);
+      expect(result.status).toBe('unknown');
+      expect(result.failures).toEqual(['lookup_failed']);
+      expect(result.humanHash).toBeNull();
+      expect(calls()).toBe(0);
+    });
   });
 });
 

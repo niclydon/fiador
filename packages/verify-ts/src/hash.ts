@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { sha256, toBytes } from 'viem';
 import type { EvmAddress } from './types.js';
 
 // The canonical human hash (SPEC 3.5): sha256 of the domain-separated
@@ -7,7 +7,7 @@ import type { EvmAddress } from './types.js';
 // human. Changing the prefix, algorithm, input form, or encoding is a
 // breaking program-level change.
 export function hashHumanId(humanId: string): string {
-  return createHash('sha256').update(`w0-human-v1:${humanId}`, 'utf8').digest('hex');
+  return sha256(toBytes(`w0-human-v1:${humanId}`)).slice(2);
 }
 
 // '0x7d7D…6097f' form: first 6 characters, ellipsis, last 5.

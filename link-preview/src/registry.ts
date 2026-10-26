@@ -28,13 +28,44 @@ export interface RegistryDocument {
   entries: RegistryEntry[];
 }
 
+const CANONICAL_PAYLOAD_HASH = /^[0-9a-f]{64}$/;
+
 /** registrySource may hand back the full document or a bare entry list. */
 export function normalizeEntries(
   doc: RegistryDocument | RegistryEntry[],
 ): RegistryEntry[] {
-  if (Array.isArray(doc)) return doc;
-  if (doc && Array.isArray(doc.entries)) return doc.entries;
-  return [];
+  const entries = Array.isArray(doc) ? doc : doc?.entries;
+  if (
+    !Array.isArray(entries) ||
+    (!Array.isArray(doc) && doc.version !== undefined && doc.version !== 1)
+  ) {
+    throw new Error('Malformed registry document.');
+  }
+  for (const entry of entries) {
+    if (
+      !entry || typeof entry !== 'object' ||
+      typeof entry.discord_application_id !== 'string' ||
+      typeof entry.attestation_url !== 'string' ||
+      (entry.status !== undefined && entry.status !== 'revoked') ||
+      (entry.name !== undefined && typeof entry.name !== 'string') ||
+      (entry.payload_hash !== undefined &&
+        (typeof entry.payload_hash !== 'string' || !CANONICAL_PAYLOAD_HASH.test(entry.payload_hash))) ||
+      (entry.status === 'revoked' && entry.payload_hash === undefined) ||
+      (entry.short_id !== undefined && typeof entry.short_id !== 'string')
+    ) {
+      throw new Error('Malformed registry entry.');
+    }
+    let url: URL;
+    try {
+      url = new URL(entry.attestation_url);
+    } catch {
+      throw new Error('Malformed registry attestation URL.');
+    }
+    if (url.protocol !== 'https:' || url.username || url.password) {
+      throw new Error('Malformed registry attestation URL.');
+    }
+  }
+  return entries;
 }
 
 export function isTombstone(entry: RegistryEntry): boolean {
