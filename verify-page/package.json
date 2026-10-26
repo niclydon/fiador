@@ -16,7 +16,9 @@
     "viem": "^2.38.0"
   },
   "devDependencies": {
+    "@types/jsdom": "^21.1.7",
     "esbuild": "0.28.2",
+    "jsdom": "^26.1.0",
     "typescript": "5.9.3",
     "vitest": "3.2.7"
   }

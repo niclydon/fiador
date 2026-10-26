@@ -2,6 +2,7 @@ import { createVerifier } from '@fiador/verify';
 import { worldchain } from 'viem/chains';
 import { normalizeEntries, type RegistryEntry } from '../../link-preview/src/registry.js';
 import { checkAttestation, stateResult, type PageResult, type ResultState } from './check.js';
+import { selectedMode, showMode } from './modes.js';
 
 const MAX_JSON_BYTES = 64 * 1024;
 const THEME_KEY = 'fiador-theme';
@@ -136,17 +137,6 @@ function updateTheme(theme: 'light' | 'dark', persist: boolean): void {
   }
 }
 
-function selectedMode(): 'application' | 'url' | 'paste' {
-  return (document.querySelector<HTMLInputElement>('input[name="mode"]:checked')?.value ?? 'application') as 'application' | 'url' | 'paste';
-}
-
-function showMode(): void {
-  const mode = selectedMode();
-  for (const name of ['application', 'url', 'paste'] as const) {
-    element<HTMLElement>(`mode-${name}`).hidden = name !== mode;
-  }
-}
-
 async function runCheck(): Promise<void> {
   const run = ++currentRun;
   currentController?.abort();
@@ -159,7 +149,7 @@ async function runCheck(): Promise<void> {
   element<HTMLElement>('result').hidden = true;
   try {
     const rpcUrl = publicUrl(element<HTMLInputElement>('rpc-url').value.trim());
-    const mode = selectedMode();
+    const mode = selectedMode(document);
     let attestation: unknown;
     let entry: RegistryEntry | null = null;
     let fetchedUrl: string | undefined;
@@ -225,8 +215,8 @@ try {
 element<HTMLButtonElement>('theme-toggle').addEventListener('click', () => {
   updateTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
 });
-document.querySelectorAll<HTMLInputElement>('input[name="mode"]').forEach((radio) => radio.addEventListener('change', showMode));
-showMode();
+document.querySelectorAll<HTMLInputElement>('input[name="mode"]').forEach((radio) => radio.addEventListener('change', () => showMode(document)));
+showMode(document);
 element<HTMLFormElement>('check-form').addEventListener('submit', (event) => {
   event.preventDefault();
   void runCheck();
@@ -262,6 +252,6 @@ const prefilled = new URL(location.href).searchParams.get('attestation');
 if (prefilled !== null) {
   element<HTMLInputElement>('mode-url-choice').checked = true;
   element<HTMLInputElement>('attestation-url').value = prefilled;
-  showMode();
+  showMode(document);
   void runCheck();
 }

@@ -87,6 +87,12 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     message: string,
     signature: string,
   ): Promise<boolean> {
+    // An ERC-1271 magic value on another chain is not a signature on
+    // World Chain. Let chain identity failures reach verifyAttestation as
+    // an unknown check, not a false signature verdict.
+    if (await publicClient.getChainId() !== worldchain.id) {
+      throw new Error('ERC-1271 RPC is not World Chain.');
+    }
     try {
       const result = await publicClient.readContract({
         address: wallet,
@@ -274,7 +280,18 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
 
     // Step 3, signature over the canonical form.
     const message = canonicalAttestationMessage(payload);
-    if (!(await signatureValid(envelope.attestation, message))) {
+    let signatureMatches: boolean;
+    try {
+      signatureMatches = await signatureValid(envelope.attestation, message);
+    } catch {
+      return buildResult({
+        status: 'unknown',
+        address: wallet,
+        failures: ['lookup_failed'],
+        ...(disclosure !== undefined ? { disclosure } : {}),
+      });
+    }
+    if (!signatureMatches) {
       failures.push('signature_mismatch');
     }
 
