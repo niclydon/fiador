@@ -1453,7 +1453,7 @@ fiador/                              # repo niclydon/fiador (created as human-ba
   badge-service/                     # §6.3 small service (W0 deliverable 2; a package consumer)
   link-preview/                      # §6.4 /v/ endpoint: OG meta + dynamic card (edge-deployable)
   tools/
-    sign-attestation/                # §3.2 reference signer CLI
+    signer/                          # §3.2 reference signer CLI (built as tools/signer, @fiador/signer)
   examples/
     discord-js-bot/  discord-py-bot/  publish-your-attestation/
     muse-discord-adapter/README.md   # v2 stub only
