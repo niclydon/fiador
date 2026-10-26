@@ -1,0 +1,29 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "npm run build:web",
+  "outputDirectory": "public",
+  "functions": {
+    "api/preview.ts": { "maxDuration": 20 }
+  },
+  "headers": [
+    {
+      "source": "/registry.json",
+      "headers": [{ "key": "Access-Control-Allow-Origin", "value": "*" }]
+    },
+    {
+      "source": "/attestations/:path*",
+      "headers": [{ "key": "Access-Control-Allow-Origin", "value": "*" }]
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/v/:id/card.svg",
+      "destination": "/api/preview?fiador_id=:id&fiador_card=1"
+    },
+    {
+      "source": "/v/:id",
+      "destination": "/api/preview?fiador_id=:id"
+    }
+  ]
+}

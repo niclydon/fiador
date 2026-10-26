@@ -4,8 +4,8 @@
 //
 // Behaviour summary:
 // - Crawlers get the OG page (meta + the dynamic card as og:image);
-//   browsers get a 302 to the planned verify page, prefilled when an
-//   attestation is known. The full click-through page remains pending.
+//   browsers get a 302 to the verify page, prefilled when an
+//   attestation is known.
 // - Verification runs at crawl time through the verify core, and only
 //   the public projection (toPublicVerifyResult) is rendered from.
 // - Fail-closed: an unknown id is a neutral "attestation not found"
@@ -297,7 +297,7 @@ async function handleRequestWithinDeadline(
         entry.attestation_url,
       )}`;
       // Browsers never wait on this crawl-time check. The destination
-      // must re-run it live once the verify page is built.
+      // re-runs it live when the page opens.
       if (!route.card && !isCrawler) {
         return new Response(null, {
           status: 302,
