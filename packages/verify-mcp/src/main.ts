@@ -11,8 +11,10 @@ import { createVerifyMcpServer } from './server.js';
 // (the tools are read-only and hold no per-client state). The server
 // ships no authentication of its own; deployments that want access
 // control put it at their gateway.
-// SPEC 11.9 M1 (undecided): no project-run public HTTP instance in
-// v1 — this transport exists for self-hosters, behind configuration.
+// SPEC 11.9 M1 (DECIDED, Nic, Oct 26, 2026): no project-run public
+// HTTP instance in v1. This transport exists for self-hosters;
+// discovery is via the MCP registry listings, and the program
+// operates no public endpoint for this server.
 const deps = depsFromEnv();
 
 if (process.argv.includes('--http')) {

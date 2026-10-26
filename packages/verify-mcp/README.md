@@ -47,6 +47,11 @@ npx @fiador/verify-mcp
 VERIFY_MCP_PORT=8787 npx @fiador/verify-mcp --http
 ```
 
+Discovery is via the MCP registry listings. There is no
+project-run public instance of this server in v1: you run it
+yourself, over stdio or your own HTTP deployment (decided
+Oct 26, 2026).
+
 Configuration is environment only: `VERIFY_RPC_URL`,
 `VERIFY_CONTRACT_ADDRESS`, `VERIFY_TIMEOUT_MS`,
 `VERIFY_BADGE_BASE_URL`, and `VERIFY_REGISTRY_FILE` (a JSON document

@@ -2,6 +2,11 @@
 
 ## 2026-10-26: verify core and verify MCP implemented (W0)
 
+- Decision (Oct 26, 2026): no project-run public HTTP instance
+  of the verify MCP in v1 (W0 spec 11.9 M1, decided by Nic).
+  Discovery is via the MCP registry listings; the HTTP transport
+  ships for self-hosters only.
+
 - `packages/verify-ts` (`@fiador/verify` 0.1.0): the verify core
   per the W0 spec — `verifyAddress`, `verifyAttestation`,
   `resolveStatus`, the internal/public result split with
