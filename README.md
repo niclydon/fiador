@@ -1,13 +1,13 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/human-backed-banner.webp">
-  <source media="(prefers-color-scheme: light)" srcset="assets/human-backed-banner.webp">
-  <img alt="human-backed" src="assets/human-backed-banner.webp" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/fiador-banner.webp">
+  <source media="(prefers-color-scheme: light)" srcset="assets/fiador-banner.webp">
+  <img alt="Fiador" src="assets/fiador-banner.webp" width="100%">
 </picture>
 
-# human-backed
+# Fiador
 
 A Discord bot's profile tells you a name, an avatar, and nothing
-about whether anyone real stands behind it. human-backed is an open
+about whether anyone real stands behind it. Fiador is an open
 protocol and verifier that lets a bot operator prove, in a way any
 server admin can check, that their bot is backed by one unique,
 verified human, using [World ID](https://world.org) and AgentBook
@@ -83,7 +83,7 @@ and the registry. The build order is in the spec.
 
 ## The wider program
 
-human-backed is the first public project in a small program
+Fiador is the first public project in a small program
 exploring what becomes possible when agents can prove a unique
 human stands behind them: presence-approved actions for personal
 agent fleets, provenance seals for agent-written content, and

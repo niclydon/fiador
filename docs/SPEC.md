@@ -1,4 +1,4 @@
-# Human-backed Discord bots: public repo spec
+# Fiador (human-backed Discord bots): public repo spec
 
 Status: DESIGN, Oct 25, 2026. Nic's framing: a public repo so anyone
 using World and Discord can attest that their bot or app is backed by a
@@ -89,7 +89,7 @@ custom URL. Two mechanisms, both in scope:
   against recorded fixtures plus a live-chain test flag
 - verifier-bot/: a reference Discord bot any guild can self-host (or
   a hosted instance can be offered later). Slash commands:
-  /human-backed (status of this server's bots), /verify-agent
+  /fiador (status of this server's bots), /verify-agent
   (@bot or application ID), /attest (install-time claim). A role sync
   loop re-checks registrations on an interval and removes the role
   when a check fails or an attestation expires
@@ -130,7 +130,7 @@ Consequences for this project:
   own human verification (for example on the verify page next to the
   operator), used unmodified per the guidelines.
 - The agent mark must be this project's own badge, not World's:
-  label "human-backed", its own symbol, shipped as SVG/PNG assets in
+  label "fiador", its own symbol, shipped as SVG/PNG assets in
   the repo. Do not put the World logo inside it without World's
   permission; a derivative of their badge would breach the very
   brand rules that make badges trustworthy.
@@ -183,7 +183,7 @@ community seat trial:
 ## Decisions for Nic
 
 - Repo name and license, at creation time (SETTLED Oct 25, 2026:
-  human-backed, Apache-2.0, via the World Program coordinator)
+  Fiador (renamed from human-backed the same day), Apache-2.0, via the World Program coordinator)
 - Hosted verifier instance later, or self-host only for v1
   (SETTLED Oct 25, 2026: self-host only for v1, plus the static
   verify page)
