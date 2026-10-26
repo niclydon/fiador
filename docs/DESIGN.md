@@ -1036,8 +1036,9 @@ summaries an admin explicitly asks to post.
 - `/fiador setup` (Manage Guild) — record the existing
   "Human-backed" role ID, registry URL, sync interval, and log
   channel. This configuration does not create or manage roles.
-- `/verify-agent <application-id>` — one-off claim check with no
-  state change. Its embed (§5.3) describes the operator claim.
+- `/verify-agent <application-id>` — one-off claim check that
+  appends a `check_log` row; it creates no binding or role change.
+  Its embed (§5.3) describes the operator claim.
 - `/attest <url | paste>` — checks a presented operator claim
   and logs the result; it creates no binding or role decision,
   even when the claim verifies. Anyone may run it; it is rate
