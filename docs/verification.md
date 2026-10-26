@@ -35,3 +35,26 @@ decision: @worldcoin/agentkit-core 0.2.1.
   for the same wallet → `verified` with the same hash over stdio
   and over streamable HTTP; tool outputs scanned — no raw humanId,
   no `humanId` key, no full address.
+
+## 2026-10-26 — founding attestation published (DESIGN §9 step 1)
+
+- Signer CLI (@fiador/signer, PR #4, merge 63fee3b) signed the
+  founding attestation for the Nova Discord application
+  (1561422752521396254) with the program wallet (truncated
+  0x21BD…A14Bc). Payload hash
+  8bfeb9f9182de3ce63cdf42bdff941277250d96089982c65f0f97761f195a031;
+  issued 2026-10-26, expires 2027-01-24.
+- Published (PR #6, merge 6a11c07): registry/registry.json carries
+  the founding entry; verify-page/ hosts the attestation.
+- Hosting: Vercel project fiador (production deployment
+  dpl_5egAYCPqBo93qMPdmDTb1uxKox72); fiador.org and
+  www.fiador.org (308 to apex) attached; Cloudflare DNS A @
+  76.76.21.21 and CNAME www cname.vercel-dns.com, both DNS-only.
+- Live evidence, fetched back from the public URLs:
+  https://fiador.org/attestations/nova.json returns 200,
+  byte-identical to the signed file (sha256 ad1c0e5e…), and the
+  signer verify command against the fetched copy returned
+  status verified, checkedAt 2026-10-26T10:41:40Z, humanHash
+  7bf4573c68a6… matching the registration record above.
+  https://fiador.org/registry.json is byte-identical to the
+  repo registry. §9 step 1 is complete; steps 2-5a remain.
