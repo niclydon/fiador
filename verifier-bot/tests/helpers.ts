@@ -10,16 +10,9 @@ export class FakeDiscordAdapter implements DiscordAdapter {
   readonly grants: { guildId: string; userId: string; roleId: string; reason: string }[] = [];
   readonly revokes: { guildId: string; userId: string; roleId: string; reason: string }[] = [];
   readonly logLines: { guildId: string; line: string }[] = [];
-  /** applicationId -> bot user ID, for resolveBotUserId. */
-  readonly botUsers = new Map<string, string>();
-  roleMemberCount = 0;
 
   private static key(guildId: string, userId: string): string {
     return `${guildId}:${userId}`;
-  }
-
-  async getRoleMemberCount(): Promise<number> {
-    return this.roleMemberCount;
   }
 
   async memberHasRole(guildId: string, userId: string): Promise<boolean> {
@@ -34,10 +27,6 @@ export class FakeDiscordAdapter implements DiscordAdapter {
   async revokeRole(guildId: string, userId: string, roleId: string, reason: string): Promise<void> {
     this.revokes.push({ guildId, userId, roleId, reason });
     this.roleHolders.delete(FakeDiscordAdapter.key(guildId, userId));
-  }
-
-  async resolveBotUserId(_guildId: string, applicationId: string): Promise<string | null> {
-    return this.botUsers.get(applicationId) ?? null;
   }
 
   async sendLogLine(guildId: string, line: string): Promise<void> {

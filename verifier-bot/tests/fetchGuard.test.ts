@@ -1,4 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { request } from 'node:https';
+import type { ClientRequest, IncomingMessage } from 'node:http';
+import type { RequestOptions } from 'node:https';
+import { Readable } from 'node:stream';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   FetchGuardError,
   guardedFetchJson,
@@ -7,128 +12,150 @@ import {
 } from '../src/fetchGuard.js';
 
 const publicLookup: DnsLookup = async () => ['93.184.216.34'];
-const jsonResponse = (body: unknown) =>
-  new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { 'content-type': 'application/json' },
-  });
+
+function fakeRequest(status: number, body: string | Buffer, headers: Record<string, string> = {}) {
+  let called = 0;
+  let destroyed = 0;
+  let options: RequestOptions | undefined;
+  let response: IncomingMessage | undefined;
+  const requestImpl = ((_url: URL, requestOptions: RequestOptions, onResponse: (value: IncomingMessage) => void) => {
+    called++;
+    options = requestOptions;
+    const req = Object.assign(new EventEmitter(), {
+      end() {
+        queueMicrotask(() => {
+          response = Readable.from([body]) as IncomingMessage;
+          response.statusCode = status;
+          response.headers = { 'content-type': 'application/json', ...headers };
+          onResponse(response);
+        });
+        return req;
+      },
+      destroy() {
+        destroyed++;
+        return req;
+      },
+    }) as unknown as ClientRequest;
+    return req;
+  }) as typeof request;
+  return {
+    requestImpl,
+    get called() { return called; },
+    get destroyed() { return destroyed; },
+    get options() { return options; },
+    get response() { return response; },
+  };
+}
 
 async function expectGuardCode(promise: Promise<unknown>, code: FetchGuardError['code']) {
-  await expect(promise).rejects.toBeInstanceOf(FetchGuardError);
   await expect(promise).rejects.toMatchObject({ code });
 }
 
+type LookupReply = (
+  error: Error | null,
+  address: string | Array<{ address: string; family: number }>,
+  family?: number,
+) => void;
+
+afterEach(() => vi.useRealTimers());
+
 describe('guardedFetchJson — SSRF guard (DESIGN §5.4)', () => {
-  it('rejects plain http URLs before any fetch', async () => {
-    let fetched = false;
-    await expectGuardCode(
-      guardedFetchJson('http://example.com/attestation.json', {
-        lookupImpl: publicLookup,
-        fetchImpl: async () => {
-          fetched = true;
-          return jsonResponse({});
-        },
-      }),
-      'not_https',
-    );
-    expect(fetched).toBe(false);
+  it('rejects non-HTTPS and private literal hosts before connecting', async () => {
+    const transport = fakeRequest(200, '{}');
+    await expectGuardCode(guardedFetchJson('http://example.com/attestation.json', {
+      lookupImpl: publicLookup, requestImpl: transport.requestImpl,
+    }), 'not_https');
+    for (const url of [
+      'https://127.0.0.1/attestation.json',
+      'https://169.254.169.254/latest/meta-data',
+      'https://[::1]/attestation.json',
+      'https://[::ffff:7f00:1]/attestation.json',
+    ]) {
+      await expectGuardCode(guardedFetchJson(url, {
+        lookupImpl: publicLookup, requestImpl: transport.requestImpl,
+      }), 'private_address');
+    }
+    expect(transport.called).toBe(0);
   });
 
-  it('rejects a private/loopback IP literal host', async () => {
-    await expectGuardCode(
-      guardedFetchJson('https://127.0.0.1/attestation.json', {
-        lookupImpl: publicLookup,
-        fetchImpl: async () => jsonResponse({}),
-      }),
-      'private_address',
-    );
-    await expectGuardCode(
-      guardedFetchJson('https://169.254.169.254/latest/meta-data', {
-        lookupImpl: publicLookup,
-        fetchImpl: async () => jsonResponse({}),
-      }),
-      'private_address',
-    );
+  it('rejects any private DNS answer, including mixed public/private answers', async () => {
+    const transport = fakeRequest(200, '{}');
+    await expectGuardCode(guardedFetchJson('https://sneaky.example.com/file.json', {
+      lookupImpl: async () => ['93.184.216.34', '10.0.0.5'],
+      requestImpl: transport.requestImpl,
+    }), 'private_address');
+    expect(transport.called).toBe(0);
   });
 
-  it('rejects a public hostname that resolves to a private address', async () => {
-    await expectGuardCode(
-      guardedFetchJson('https://sneaky.example.com/attestation.json', {
-        lookupImpl: async () => ['10.0.0.5'],
-        fetchImpl: async () => jsonResponse({}),
-      }),
-      'private_address',
-    );
-  });
-
-  it('rejects an oversize body', async () => {
-    await expectGuardCode(
-      guardedFetchJson('https://example.com/big.json', {
-        lookupImpl: publicLookup,
-        fetchImpl: async () =>
-          new Response('x'.repeat(300 * 1024), {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          }),
-      }),
-      'body_too_large',
-    );
-  });
-
-  it('refuses any redirect: a 3xx is a failed fetch (DESIGN §5.4)', async () => {
-    let calls = 0;
-    await expectGuardCode(
-      guardedFetchJson('https://example.com/loop.json', {
-        lookupImpl: publicLookup,
-        fetchImpl: async () => {
-          calls++;
-          return new Response(null, {
-            status: 302,
-            headers: { location: 'https://example.com/loop.json' },
-          });
-        },
-      }),
-      'redirect_refused',
-    );
-    expect(calls).toBe(1); // never followed, not even once
-  });
-
-  it('refuses a redirect even to a vetted-looking target', async () => {
-    await expectGuardCode(
-      guardedFetchJson('https://example.com/start.json', {
-        lookupImpl: publicLookup,
-        fetchImpl: async () =>
-          new Response(null, {
-            status: 301,
-            headers: { location: 'https://example.com/final.json' },
-          }),
-      }),
-      'redirect_refused',
-    );
-  });
-
-  it('fetches and parses JSON from a vetted public URL', async () => {
-    const doc = await guardedFetchJson('https://example.com/attestation.json', {
-      lookupImpl: publicLookup,
-      fetchImpl: async () => jsonResponse({ payload: { version: 1 }, signature: '0xabc' }),
+  it('pins the vetted address for the HTTPS socket even if DNS then flips private', async () => {
+    const transport = fakeRequest(200, '{"ok":true}');
+    let dnsCalls = 0;
+    const result = await guardedFetchJson('https://attest.example/file.json', {
+      lookupImpl: async () => (++dnsCalls === 1 ? ['93.184.216.34'] : ['127.0.0.1']),
+      requestImpl: transport.requestImpl,
     });
-    expect(doc).toEqual({ payload: { version: 1 }, signature: '0xabc' });
+    expect(result).toEqual({ ok: true });
+    expect(dnsCalls).toBe(1);
+    expect(transport.called).toBe(1);
+    expect(transport.options).toMatchObject({ agent: false, servername: 'attest.example' });
+    const pinnedLookup = transport.options?.lookup as (
+      host: string,
+      options: { all?: boolean },
+      callback: LookupReply,
+    ) => void;
+    pinnedLookup('attest.example', { all: true }, (error, addresses) => {
+      expect(error).toBeNull();
+      expect(addresses).toEqual([{ address: '93.184.216.34', family: 4 }]);
+    });
+    pinnedLookup('attest.example', {}, (error, address, family) => {
+      expect(error).toBeNull();
+      expect(address).toBe('93.184.216.34');
+      expect(family).toBe(4);
+    });
+    expect(dnsCalls).toBe(1);
+  });
+
+  it('refuses redirects without issuing another request', async () => {
+    const transport = fakeRequest(302, '', { location: 'https://example.com/final.json' });
+    await expectGuardCode(guardedFetchJson('https://example.com/start.json', {
+      lookupImpl: publicLookup, requestImpl: transport.requestImpl,
+    }), 'redirect_refused');
+    expect(transport.called).toBe(1);
+    expect(transport.destroyed).toBe(1);
+    expect(transport.response?.destroyed).toBe(true);
+  });
+
+  it('closes an oversized response, including an oversized declared length', async () => {
+    for (const transport of [
+      fakeRequest(200, Buffer.alloc(64 * 1024 + 1)),
+      fakeRequest(200, '', { 'content-length': String(64 * 1024 + 1) }),
+    ]) {
+      await expectGuardCode(guardedFetchJson('https://example.com/big.json', {
+        lookupImpl: publicLookup, requestImpl: transport.requestImpl,
+      }), 'body_too_large');
+      expect(transport.destroyed).toBe(1);
+      expect(transport.response?.destroyed).toBe(true);
+    }
+  });
+
+  it('bounds DNS resolution by the request deadline', async () => {
+    vi.useFakeTimers();
+    const pending = guardedFetchJson('https://example.com/file.json', {
+      lookupImpl: async () => new Promise(() => undefined),
+      requestImpl: fakeRequest(200, '{}').requestImpl,
+    });
+    const rejection = expectGuardCode(pending, 'timeout');
+    await vi.advanceTimersByTimeAsync(5000);
+    await rejection;
   });
 });
 
 describe('isNonPublicAddress', () => {
-  it('classifies the ranges the guard must refuse', () => {
+  it('rejects private, mapped-private, and IPv6 transition destinations', () => {
     for (const ip of [
-      '127.0.0.1',
-      '10.1.2.3',
-      '172.16.0.9',
-      '192.168.1.1',
-      '169.254.169.254',
-      '0.0.0.0',
-      '::1',
-      'fe80::1',
-      'fd00::1',
-      '::ffff:127.0.0.1',
+      '127.0.0.1', '10.1.2.3', '172.16.0.9', '192.168.1.1',
+      '169.254.169.254', '0.0.0.0', '::1', 'fe80::1', 'fd00::1',
+      '::ffff:127.0.0.1', '::ffff:7f00:1', '2002::1', '2001:db8::1',
     ]) {
       expect(isNonPublicAddress(ip), ip).toBe(true);
     }
