@@ -46,9 +46,10 @@ mark has to be able to say "no longer true."
   Fiador verifiers read the on-chain value for a check. Their default
   public results omit it; trusted local callers can explicitly request
   a raw internal result, which must never be published. AgentBook
-  lookup and registration events are public: disclosing a registered
-  wallet can reveal its pseudonymous human identifier and other
-  wallets registered to that identifier.
+  lookup and registration events are public. A disclosed registered
+  wallet or this published hash can be matched against that finite
+  public data to reveal the pseudonymous identifier and other wallets
+  registered to it.
   Two bots backed by the same human also publish the same hash.
 - An optional operator display name exists for operators who want
   to be named. It is off by default and never required.

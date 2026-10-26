@@ -97,8 +97,9 @@ spec's honest-limits section; the design adds no stronger claim.
   or bot; or who the human is. World ID is anonymous by design:
   the proof says "a unique human", never who.
 - AgentBook registrations are public on World Chain. A disclosed
-  wallet can reveal its pseudonymous human identifier and other
-  wallets registered to the same identifier. Fiador's public results
+  wallet or Fiador's published human hash can be matched to the
+  pseudonymous identifier and other wallets registered to it.
+  Fiador's public results
   omit the raw identifier, but an explicit private internal-result
   option exists (§4). Neither can make the chain data private.
 - Freshness: registration is checked live at verification time,
@@ -407,8 +408,8 @@ program's binding rule for its own artifacts: never copy the full
 humanId into a repo, post, page, fixture, screenshot, log, or
 outward message; publish only its hash in Fiador public outputs.
 AgentBook itself stores the pseudonymous identifier on a public
-chain, so this rule cannot make a disclosed wallet or its linked
-registrations private. It is written into the portfolio
+chain, so this rule cannot make a disclosed wallet, published hash,
+or linked registrations private. It is written into the portfolio
 (boundary section, as THE HUMANID RULE), into
 `~/AGENTS.md` as a standing convention binding every agent,
 and into the W1 spec (verification step and decisions section:

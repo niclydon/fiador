@@ -69,8 +69,9 @@ Verification, in order:
    RULE (Nic-direct Oct 25, 2026): Fiador never copies the full
    humanId into its payload, repo, or public outputs. Hash only, no
    operator override in v1. AgentBook itself is public on World
-   Chain: a disclosed registered wallet can expose that identifier
-   and link other wallets registered to it. Any agent working from
+   Chain: a disclosed registered wallet or this published hash can
+   be matched to public registration data and link other wallets
+   registered to that identifier. Any agent working from
    this spec: do not place the raw humanId in code fixtures, docs,
    screenshots, logs, or messages outside the estate.
 
@@ -174,9 +175,10 @@ Consequences for this project:
   An operator publicly claiming "this human is me" is a separate
   signed statement from an identity people already know
 - AgentBook registrations are public on World Chain. A disclosed
-  wallet can reveal its pseudonymous human identifier and other
-  wallets registered to the same identifier; anonymity does not
-  make those registrations unlinkable.
+  wallet or the published human hash can be matched to its
+  pseudonymous human identifier and other wallets registered to
+  that identifier; anonymity does not make those registrations
+  unlinkable.
 - Registration is checked live and the verify page shows the
   check time. The current verifier does not certify or update a
   guild role. Admins must review existing role holders manually.
