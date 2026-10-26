@@ -125,6 +125,6 @@ export async function checkAttestation(input: CheckInput): Promise<PageResult> {
     state: 'claim_unconfirmed',
     heading: 'Claim unconfirmed',
     verdict: 'Wallet signature, signed Discord profile, and live AgentBook registration passed. Control of the named Discord application is not established.',
-    ...(!input.registryChecked ? { note: 'Registry status was not checked. This result cannot rule out revocation or an unlisted claim.' } : {}),
+    ...(!input.registryChecked ? { note: 'No registry entry was confirmed. This result cannot rule out revocation or an unlisted claim.' } : {}),
   };
 }

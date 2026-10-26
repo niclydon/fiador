@@ -33,8 +33,10 @@ that overstates itself is worse than none.
 2. The attestation is published at a URL and listed in a public
    registry mapping Discord application IDs to attestation URLs.
 3. A self-hosted verifier checks the signature, checks the expiry,
-   and resolves the wallet live in AgentBook. A full no-install
-   verify page and a trusted application-control check are planned.
+   and resolves the wallet live in AgentBook. The no-install browser
+   verification page is implemented in PR #10 and locally tested;
+   deployed click-through, browser CORS/RPC behavior, and trusted
+   application-control evidence remain to be verified.
 
 Verification is a live check at verification time, not a permanent
 stamp: the badge assets in this repo render verified, expired, and
@@ -73,11 +75,12 @@ Founding build, October 2026:
 - The `/v/<short-id>` preview handler and cards are implemented and
   locally tested. Core-valid claims render **Claim unconfirmed**;
   malformed Discord profile claims render **Not verified**. The
-  current `verify-page/` is a static front door
-  serving the attestation and registry. The full interactive verify
-  page, served badge, and a live preview click-through remain to be
-  built and verified. The SVG Open Graph image also needs a raster
-  fallback for platforms that do not display SVG previews.
+  interactive `/verify/` page is implemented in PR #10 and locally
+  tested, with three input modes and a fresh browser check for `/v/`
+  redirects. Deployed click-through, CORS/RPC behavior, and application
+  control are still pending. The served badge remains to be built, and
+  the SVG Open Graph image needs a raster fallback for platforms that
+  do not display SVG previews.
 
 ## Design decisions already settled
 

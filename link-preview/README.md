@@ -45,9 +45,11 @@ card without depending on dead hosting.
   profile-valid claim renders a neutral **Claim unconfirmed** card,
   never the gold **Verified** treatment.
 - **Browsers** get a 302 to the verify page with the attestation
-  prefilled (`{baseUrl}/verify/?attestation=<url>`). The full page is
-  pending; it must re-run all checks at open time before these links
-  form a complete verification flow.
+  prefilled (`{baseUrl}/verify/?attestation=<url>`). The static page
+  is implemented in PR #10 and locally tested; it starts a fresh
+  browser check at open time. Deployed click-through and browser
+  CORS/RPC behavior remain to be verified before these links form
+  a complete verification flow.
 - **The card** is one designed SVG artifact in the Nova Glass language
   (badge states and colours matching §6.2): state artwork and word,
   the application name (signed into the attestation, else the
@@ -122,11 +124,12 @@ absorbed silently.
   wiring has no independent Discord bot-ID lookup or trusted
   application-control assertion. Those require Discord integration
   before a public claim can be called verified.
-- **Click-through destination is pending.** The static
-  `verify-page/` hosting root serves the founding attestation and
-  registry; it does not yet contain the full interactive `/verify/`
-  page that a browser redirect requires. Do not publish `/v/` links
-  as a finished verification flow until that page is built and tested.
+- **Click-through destination is locally implemented.** The static
+  `verify-page/` hosting root contains `/verify/`, the founding
+  attestation, and the registry. Its browser check is locally tested,
+  but deployed click-through, CORS/RPC behavior, and trusted Discord
+  application control remain open. Do not publish `/v/` links as a
+  finished verification flow until those gates pass.
 - **Canonical domain only.** The surface ships only on fiador.org;
   a preview card served from anywhere else is not this surface
   (DESIGN §6.4). DNS/hosting for the domain follow the deploy
