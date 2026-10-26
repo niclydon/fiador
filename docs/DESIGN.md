@@ -44,6 +44,18 @@ program default; the credit model is a name stamp plus the
 house visual style (§8.1). Repo creation is executed fact, not
 a pending gate; commit plus push still needs Nic's go each time.
 
+Program direction (Nic, Oct 25, 2026, "make it so throughout the
+program"; full text in the portfolio): Fiador is the program's
+first public project and its demo, and two of its directions
+shape this design's framing — ship order (a demo-able Fiador
+and a real presence in the official AgentBook registry outrank
+polish, §12) and the no-token position (stated on purpose in
+the project's public positioning, §7). A third direction, an
+internal design constraint on API shape and evidentiary
+outputs, is applied at §6.3 in the neutral terms the repo's
+public-copy rules require. No protocol element changes for
+any of the three.
+
 Prerequisite status, checked 2026-10-25 evening: the wall the spec
 called out in its test plan is cleared. Nic completed Orb
 verification in New York on Oct 25, the playground wallet completed
@@ -1186,6 +1198,30 @@ Source of truth until repo creation:
   it next to their own verifier or link the static page
   instead. A hosted badge endpoint follows the same possible-
   v2 path as a hosted verifier, under the same future decision.
+- Documented check API; evidentiary outputs (design
+  constraints, held since the first revision and restated here
+  so the badge service is built to them). (a) The badge
+  service's JSON status route (§4 / W0 spec §4: typed
+  `/badge/:subjectType/:subjectId` routes plus the JSON status
+  route) is a published API contract from v1, not the badge's
+  private plumbing: its response is the package's full
+  public-safe `VerifyResult` (status, failure codes, wallet
+  truncated, humanHash, expiry, `checkedAt`), it is versioned
+  with the package, and the package README documents it as an
+  API other verifiers can rely on. A verification result that
+  third parties act on should have one stable, documented
+  shape; every consumer inventing its own is how incompatible
+  "verified" claims happen. (b) A check result is an
+  audit-shaped record, not a boolean: the bot's `check_log`
+  (§5.1), the page's `checkedAt` display, and
+  `docs/verification.md` entries all carry who/what/when/
+  status/failures, so any later reader — a guild admin
+  disputing a revocation, an operator debugging a lapse — can
+  reconstruct what was observed and when, from records the
+  system already produces. (c) Every consumer of verification
+  (bot, page, badge, third-party tools) reads through the same
+  stateless package and the same result shape; no consumer
+  gets a private variant of the truth.
 
 ## 7. Examples and docs
 
@@ -1210,6 +1246,14 @@ Source of truth until repo creation:
   resolved), and the plain statement that this is independent
   open source built on World's public surfaces, with no implied
   endorsement and no World marks in the project name or badge.
+  The README also carries the program's no-token position,
+  stated on purpose (program direction, Oct 25, 2026): Fiador
+  has no token, will not issue one, launches nothing, and
+  verification is never something to buy or speculate on; any
+  token claiming the Fiador name is unaffiliated. The statement
+  sits in the positioning section (not buried in an FAQ),
+  because in this ecosystem the absence of a token is a trust
+  claim the enterprise-adjacent reader is checking for.
 
 ## 8. Repo layout (public repo, when Nic gives the go)
 
@@ -1333,9 +1377,15 @@ Preconditions (state at design time, re-check at test time):
       a date, not an assumption.
 - [ ] A dedicated demo wallet for the public artefacts (portfolio
       rule: demos run on throwaway or dedicated wallets; the
-      fleet's operational keys are never demo keys). If the Nova
-      attestation uses the playground wallet, that election is
-      recorded here explicitly by the coordinator before the test.
+      fleet's operational keys are never demo keys). Election
+      recorded Oct 25, 2026: the dedicated World Program wallet
+      (created Oct 25, held separately from the playground /
+      fleet wallet) is the signing wallet for all public demos,
+      the founding attestation, and registry listings. Its
+      AgentBook registration is prepared; the one remaining
+      step is Nic's World App approval tap, after which the
+      registration state gets the same dated `agentkit_status`
+      record as the item above before §9 step 1 signs anything.
 
 Steps:
 
@@ -1660,6 +1710,26 @@ not rows above because the table is only for what is still open:
 Follows the spec's build order, refined against §§3–6. Each step
 ends with its tests green and, where it touches live state, a
 dated entry in `docs/verification.md`.
+
+Sequencing under the program direction (portfolio, Oct 25,
+2026): ship order outranks polish order. The steps below are a
+dependency order, but the milestones they serve are, in order:
+(1) DEMO — a demo-able Fiador: the package path exercised end
+to end in Nic's guild (§9 steps 1–5), the static page checking a
+real attestation, the badge rendering real states. Work that
+does not unblock the demo waits, however elegant. (2) REGISTRY
+PRESENCE — a real listing in World's official AgentBook
+registry for the Fiador attestation/verification surface, with
+listing copy and demo links prepared as build artifacts of this
+workstream (the listing mechanics are verified against World's
+current process when the milestone opens; nothing here assumes
+them). (3) POLISH — everything else: visual iteration beyond
+the approved asset round, docs depth, extra examples. Within
+the program's sequencing, Fiador's job is to be the working
+public demonstration; this workstream's effort is weighted
+accordingly, and a polish
+item never displaces a demo or registry item in a build order
+dispute.
 
 1. The verify package, core first (§4): re-verify the chain
    facts (network, contract, `lookupHuman` signature) against
