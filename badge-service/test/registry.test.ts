@@ -124,6 +124,69 @@ describe('canonical registry source', () => {
     });
     await expect(resolveUnsafe({ type: 'discord_application', id: APPLICATION_ID })).rejects.toThrow();
   });
+
+  it('honours a configured source window instead of the 300-second default', async () => {
+    let nowMs = 0;
+    const fetchJson = vi.fn(async (url: string) =>
+      url === REGISTRY_URL ? document([entry]) : ATTESTATION);
+    const resolve = createRegistryResolver({ url: REGISTRY_URL, fetchJson, now: () => nowMs, refreshMs: 1_000 });
+    const subject = { type: 'discord_application', id: APPLICATION_ID };
+    expect(await resolve(subject)).toBe(ATTESTATION);
+    expect(fetchJson).toHaveBeenCalledTimes(2);
+    nowMs = 999;
+    expect(await resolve(subject)).toBe(ATTESTATION);
+    expect(fetchJson).toHaveBeenCalledTimes(2); // inside the configured window
+    nowMs = 1_000;
+    expect(await resolve(subject)).toBe(ATTESTATION);
+    // Both sources reload at the configured 1 s window, not at 300 s.
+    expect(fetchJson.mock.calls.map(([url]) => url)).toEqual([
+      REGISTRY_URL, ATTESTATION_URL, REGISTRY_URL, ATTESTATION_URL,
+    ]);
+  });
+
+  it('rejects an oversized registry file at load and when it grows past the bound on reload', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fiador-badge-registry-'));
+    dirs.push(dir);
+    const file = join(dir, 'registry.json');
+    const fetchJson = vi.fn(async () => ATTESTATION);
+    const subject = { type: 'discord_application', id: APPLICATION_ID };
+    await writeFile(file, JSON.stringify(document([entry])));
+
+    // Too small for the document in hand: the first load refuses it.
+    const strict = createRegistryResolver({ file, fetchJson, now: () => 0, maxBytes: 64 });
+    await expect(strict(subject)).rejects.toThrow('Registry file exceeds the size limit.');
+
+    // Sized for the document: it loads, then the file grows past the
+    // bound mid-run and the reload refuses it with the same fixed,
+    // content-free error instead of parsing unbounded.
+    let nowMs = 0;
+    const resolve = createRegistryResolver({ file, fetchJson, now: () => nowMs, refreshMs: 1_000, maxBytes: 256 });
+    expect(await resolve(subject)).toBe(ATTESTATION);
+    const grown = (JSON.stringify(document([entry]))).padEnd(512, ' ');
+    await writeFile(file, grown);
+    nowMs = 1_000;
+    await expect(resolve(subject)).rejects.toThrow('Registry file exceeds the size limit.');
+  });
+
+  it('keys legacy inline documents by the composite pair encoding, never a colon join', async () => {
+    const attA = { ...ATTESTATION, signature: '0x0a' };
+    const attB = { ...ATTESTATION, signature: '0x0b' };
+    const attC = { ...ATTESTATION, signature: '0x0c' };
+    // ("discord_application", "x:y") and ("discord_application:x", "y")
+    // are distinct subjects whose colon joins are the same string;
+    // inline documents carry the JSON pair encoding as the key.
+    const legacy = {
+      [JSON.stringify(['discord_application', 'x:y'])]: attA,
+      [JSON.stringify(['discord_application:x', 'y'])]: attB,
+      // A colon-joined key from the old shape denotes nothing now.
+      'discord_application:legacy': attC,
+    };
+    const fetchJson = vi.fn(async () => legacy);
+    const resolve = createRegistryResolver({ url: REGISTRY_URL, fetchJson, now: () => 0 });
+    expect(await resolve({ type: 'discord_application', id: 'x:y' })).toBe(attA);
+    expect(await resolve({ type: 'discord_application', id: 'legacy' })).toBeNull();
+    expect(await resolve({ type: 'discord_application', id: 'y' })).toBeNull();
+  });
 });
 
 describe('outbound fetch guard', () => {

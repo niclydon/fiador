@@ -671,6 +671,16 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       headers['content-type'] = args.format === 'png' ? 'image/png' : 'image/svg+xml';
       if (args.format === 'png') headers['x-badge-theme'] = last.resolvedTheme ?? 'dark';
       if (args.format === 'png' && args.theme === 'auto') headers.vary = 'Sec-CH-Prefers-Color-Scheme';
+      if (args.format === 'svg') {
+        // The reused render keeps its ETag identity, so a
+        // conditional limited request is a 304, not a re-serve.
+        headers.etag = last.etag;
+        if (ifNoneMatchHits(req, last.etag)) {
+          res.writeHead(304, headers);
+          res.end();
+          return;
+        }
+      }
       res.writeHead(200, headers);
       res.end(head ? undefined : last.body);
       return;
@@ -692,7 +702,30 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
         }), 'utf8');
         busySvg.set(fallbackKey, svg);
       }
-      res.writeHead(200, { 'content-type': 'image/svg+xml', ...headers });
+      // This fallback IS the unchecked badge for the subject (the
+      // body sendBadge's unchecked path serves), so it carries the
+      // ETag identity that render would get: a conditional limited
+      // request is answered 304 before the body, exactly like the
+      // normal path. The parts mirror sendBadge's unchecked call
+      // (status 'invalid', no check time, no label override).
+      const etag = etagFor([
+        args.subjectKeyValue,
+        'invalid',
+        null,
+        args.variant,
+        'svg',
+        themeKey,
+        effectiveBase(),
+        '',
+        null,
+      ]);
+      const svgHeaders = { 'content-type': 'image/svg+xml', etag, ...headers };
+      if (ifNoneMatchHits(req, etag)) {
+        res.writeHead(304, svgHeaders);
+        res.end();
+        return;
+      }
+      res.writeHead(200, svgHeaders);
       res.end(head ? undefined : svg);
       return;
     }

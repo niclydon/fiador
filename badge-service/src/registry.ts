@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import type { SignedAttestation } from '@fiador/verify';
 import { guardedFetchJson } from './guardedFetch.js';
 
@@ -13,6 +13,14 @@ export interface RegistrySource {
   url?: string;
   fetchJson?: FetchJson;
   now?: () => number;
+  /** Source window for registry and attestation snapshots
+   * (REGISTRY_REFRESH_MS via depsFromEnv). Default 300 s. */
+  refreshMs?: number;
+  /** Size bound for FILE registry reads, initial load and every
+   * reload (REGISTRY_MAX_BYTES via depsFromEnv). URL responses are
+   * bounded by the fetch guard instead. Default 1 MiB, the file
+   * registry's bound. */
+  maxBytes?: number;
 }
 
 interface RegistryEntry {
@@ -53,14 +61,18 @@ export function validateCanonicalRegistry(value: unknown): void {
 }
 
 const SOURCE_TTL_MS = 300_000;
+const MAX_FILE_BYTES = 1_048_576;
 
-/** Registry and attestation data share one bounded 300-second source
- * window. Single flights prevent a burst of badge requests from
+/** Registry and attestation data share one bounded source window
+ * (300 seconds unless the source configures REGISTRY_REFRESH_MS).
+ * Single flights prevent a burst of badge requests from
  * multiplying registry and attestation fetches. */
 export function createRegistryResolver(source: RegistrySource): VersionedRegistryResolver {
   if (source.file && source.url) throw new Error('Choose either REGISTRY_FILE or REGISTRY_URL.');
   const fetchJson = source.fetchJson ?? guardedFetchJson;
   const now = source.now ?? Date.now;
+  const ttlMs = source.refreshMs ?? SOURCE_TTL_MS;
+  const maxFileBytes = source.maxBytes ?? MAX_FILE_BYTES;
   type RegistrySnapshot = { document: Record<string, unknown>; entries: RegistryEntry[] | null };
   let registryCache: { value: RegistrySnapshot; loadedAtMs: number } | undefined;
   let registryFlight: Promise<RegistrySnapshot> | undefined;
@@ -81,26 +93,40 @@ export function createRegistryResolver(source: RegistrySource): VersionedRegistr
     // caches used by new requests.
     registryFlight = undefined;
     attestationFlights.clear();
-    if (registryCache && registryCache.loadedAtMs + SOURCE_TTL_MS > nowMs) {
-      nextExpiryAtMs = registryCache.loadedAtMs + SOURCE_TTL_MS;
+    if (registryCache && registryCache.loadedAtMs + ttlMs > nowMs) {
+      nextExpiryAtMs = registryCache.loadedAtMs + ttlMs;
     }
     for (const cached of attestationCache.values()) {
-      if (cached.loadedAtMs + SOURCE_TTL_MS > nowMs) {
-        nextExpiryAtMs = Math.min(nextExpiryAtMs, cached.loadedAtMs + SOURCE_TTL_MS);
+      if (cached.loadedAtMs + ttlMs > nowMs) {
+        nextExpiryAtMs = Math.min(nextExpiryAtMs, cached.loadedAtMs + ttlMs);
       }
     }
     return generation;
   }
 
+  /** File registries load and reload through the configured size
+   * bound: a file that grows past it mid-run is rejected, never
+   * parsed unbounded. The error message is a fixed string carrying
+   * nothing of the file. */
+  async function readRegistryFile(file: string): Promise<unknown> {
+    const { size } = await stat(file);
+    if (size > maxFileBytes) throw new Error('Registry file exceeds the size limit.');
+    const raw = await readFile(file, 'utf8');
+    if (Buffer.byteLength(raw, 'utf8') > maxFileBytes) {
+      throw new Error('Registry file exceeds the size limit.');
+    }
+    return JSON.parse(raw) as unknown;
+  }
+
   async function loadRegistry(): Promise<RegistrySnapshot> {
     const nowMs = now();
     currentVersion(nowMs);
-    if (registryCache && nowMs - registryCache.loadedAtMs < SOURCE_TTL_MS) return registryCache.value;
+    if (registryCache && nowMs - registryCache.loadedAtMs < ttlMs) return registryCache.value;
     if (registryFlight) return registryFlight;
     const flightGeneration = generation;
     const flight = (async () => {
       const document = source.file
-        ? JSON.parse(await readFile(source.file, 'utf8')) as unknown
+        ? await readRegistryFile(source.file)
         : await fetchJson(source.url!);
       const entries = canonicalEntries(document);
       if (!record(document)) throw new Error('Invalid registry document.');
@@ -108,9 +134,9 @@ export function createRegistryResolver(source: RegistrySource): VersionedRegistr
       if (currentVersion() === flightGeneration) {
         const loadedAtMs = now();
         registryCache = { value: snapshot, loadedAtMs };
-        nextExpiryAtMs = Math.min(nextExpiryAtMs, loadedAtMs + SOURCE_TTL_MS);
+        nextExpiryAtMs = Math.min(nextExpiryAtMs, loadedAtMs + ttlMs);
         for (const [url, cached] of attestationCache) {
-          if (now() - cached.loadedAtMs >= SOURCE_TTL_MS) attestationCache.delete(url);
+          if (now() - cached.loadedAtMs >= ttlMs) attestationCache.delete(url);
         }
       }
       return snapshot;
@@ -127,7 +153,7 @@ export function createRegistryResolver(source: RegistrySource): VersionedRegistr
     const nowMs = now();
     currentVersion(nowMs);
     const cached = attestationCache.get(url);
-    if (cached && nowMs - cached.loadedAtMs < SOURCE_TTL_MS) return cached.value;
+    if (cached && nowMs - cached.loadedAtMs < ttlMs) return cached.value;
     const pending = attestationFlights.get(url);
     if (pending) return pending;
     const flightGeneration = generation;
@@ -136,7 +162,7 @@ export function createRegistryResolver(source: RegistrySource): VersionedRegistr
       if (currentVersion() === flightGeneration) {
         const loadedAtMs = now();
         attestationCache.set(url, { value, loadedAtMs });
-        nextExpiryAtMs = Math.min(nextExpiryAtMs, loadedAtMs + SOURCE_TTL_MS);
+        nextExpiryAtMs = Math.min(nextExpiryAtMs, loadedAtMs + ttlMs);
       }
       return value;
     })();
@@ -158,7 +184,11 @@ export function createRegistryResolver(source: RegistrySource): VersionedRegistr
     }
     // Compatibility with self-hosted inline maps used by the first
     // badge-service draft. The canonical public registry uses entries[].
-    return (registry[`${subject.type}:${subject.id}`] ?? null) as SignedAttestation | null;
+    // Inline documents key subjects by the same composite encoding
+    // as every other structure in the service (config.ts subjectKey).
+    // A `${type}:${id}` concatenation is not a key: ("a", "x:y") and
+    // ("a:x", "y") collide under it and are distinct subjects.
+    return (registry[JSON.stringify([subject.type, subject.id])] ?? null) as SignedAttestation | null;
   };
   return Object.assign(resolve, { currentVersion });
 }

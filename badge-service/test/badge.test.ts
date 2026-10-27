@@ -1078,6 +1078,62 @@ describe('fix pass: registry refresh and validation (SPEC 4.6)', () => {
     }
   });
 
+  it('bumps the registry version only when the content changes, not on a byte-identical reload', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'badge-reg-'));
+    const file = join(dir, 'registry.json');
+    writeFileSync(file, JSON.stringify(attestationDoc('one')));
+    let clockMs = T0.getTime();
+    const source = new FileRegistry(file, 'VERIFY_REGISTRY_FILE', {
+      now: () => clockMs,
+      refreshMs: 300_000,
+      log: () => {},
+    });
+    const subject = { type: 'discord_application', id: 'app1' };
+    try {
+      source.loadInitial();
+      expect(source.version).toBe(0);
+      expect(await source.resolve(subject)).not.toBeNull();
+
+      // Byte-identical reload on the cadence: freshness renews,
+      // the version does not move.
+      clockMs += 300_000;
+      source.refreshIfDue(clockMs);
+      expect(source.version).toBe(0);
+
+      // Same content with the file's key order shuffled: still the
+      // same registry, still no new generation.
+      writeFileSync(file, '{"discord_application":{"app1":{"signatureType":"eip191","signature":"0x00","payload":{"note":"one"}}}}');
+      clockMs += 300_000;
+      source.refreshIfDue(clockMs);
+      expect(source.version).toBe(0);
+      expect(await source.resolve(subject)).not.toBeNull();
+
+      // A removal is a content change: the version moves and the
+      // revocation takes effect, exactly as before.
+      writeFileSync(file, JSON.stringify({ discord_application: {} }));
+      clockMs += 300_000;
+      source.refreshIfDue(clockMs);
+      expect(source.version).toBe(1);
+      expect(await source.resolve(subject)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('depsFromEnv wires REGISTRY_REFRESH_MS into the canonical resolver window', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'badge-reg-'));
+    const file = join(dir, 'registry.json');
+    writeFileSync(file, JSON.stringify({ version: 1, entries: [] }));
+    const deps = depsFromEnv({ VERIFY_REGISTRY_FILE: file, REGISTRY_REFRESH_MS: '40' });
+    expect(await deps.resolveAttestation?.({ type: 'discord_application', id: '123456789012345678' })).toBeNull();
+    expect(deps.sourceVersion?.()).toBe(0);
+    await new Promise((r) => setTimeout(r, 60));
+    // At the hardcoded 300 s window this would still be generation 0;
+    // the configured 40 ms window has expired and advanced it.
+    expect(deps.sourceVersion?.()).toBe(1);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('accepts and validates the canonical entries[] file at startup', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'badge-reg-'));
     const file = join(dir, 'registry.json');
@@ -1462,6 +1518,64 @@ describe('registry refresh races', () => {
     }
   });
 
+  it('an unchanged registry reload mid-flight flushes nothing: the lookup completes and caches', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'badge-reg-race-'));
+    const file = join(dir, 'registry.json');
+    writeFileSync(file, JSON.stringify({ discord_application: { race: ATTESTATION } }));
+    const source = new FileRegistry(file, 'VERIFY_REGISTRY_FILE', {
+      now: () => nowRef.current.getTime(),
+      refreshMs: 300_000,
+      log: () => {},
+    });
+    source.loadInitial();
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let raceCalls = 0;
+    const verifier: Verifier = {
+      verifyAddress: fake.verifyAddress.bind(fake),
+      verifyAttestation: fake.verifyAttestation.bind(fake),
+      async resolveStatus(subject) {
+        if (subject.kind !== 'attested_subject' || subject.subject.id !== 'race') {
+          return fake.resolveStatus(subject);
+        }
+        raceCalls++;
+        const attestation = await subject.resolveAttestation(subject.subject);
+        if (raceCalls === 1) {
+          entered();
+          await gate;
+        }
+        return attestation ? resultFor('verified') : { ...resultFor('unknown'), failures: ['attestation_not_found'] };
+      },
+    };
+    try {
+      const base = await start({ verifier, registrySource: source });
+      const first = fetch(`${base}/v1/status/discord_application/race`);
+      await started;
+      // The refresh cadence passes with the file untouched. A
+      // byte-identical reload is not a new registry generation: it
+      // must not flush the caches or discard the in-flight lookup
+      // (which under the old bump-on-every-reload behaviour turned
+      // this into a 503 and a second core call).
+      nowRef.current = new Date(T0.getTime() + 300_001);
+      const secondPromise = get(base, '/v1/status/discord_application/race');
+      await new Promise((r) => setTimeout(r, 50)); // let it join the flight
+      release();
+      const second = await secondPromise;
+      expect((JSON.parse(second.text) as { status: string }).status).toBe('verified');
+      const firstResponse = await first;
+      expect(firstResponse.status).toBe(200);
+      await firstResponse.text();
+      expect(source.version).toBe(0);
+      expect(raceCalls).toBe(1);
+      expect(servers.at(-1)!.badgeInternals.resultCacheSize()).toBe(1);
+    } finally {
+      release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('starts a new source lookup after a version change instead of joining the old flight', async () => {
     let entered!: () => void;
     let release!: () => void;
@@ -1806,5 +1920,47 @@ describe('limited renders and lookup failures', () => {
     const json = await fetch(`${base}/v1/status/discord_application/app1`);
     expect(json.status).toBe(500);
     expect(await json.text()).toBe('{"error":"internal error"}');
+  });
+
+  it('limited SVG responses carry an ETag and honour If-None-Match with 304', async () => {
+    let renders = 0;
+    const base = await start({ rateLimitMax: 0, onRender: () => renders++ });
+    const first = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    const etag = first.res.headers.get('etag');
+    expect(etag).not.toBeNull();
+    expect(renders).toBe(1);
+    const conditional = await get(base, '/badge/discord_application/app1.svg?theme=dark', { 'if-none-match': etag! });
+    expect(conditional.res.status).toBe(304);
+    expect(conditional.text).toBe('');
+    expect(conditional.res.headers.get('etag')).toBe(etag);
+    expect(renders).toBe(1);
+  });
+
+  it('the limited SVG ETag is the same identity the unchecked render carries on the normal path', async () => {
+    const exploding: Verifier = {
+      verifyAddress: fake.verifyAddress.bind(fake),
+      verifyAttestation: fake.verifyAttestation.bind(fake),
+      async resolveStatus() { throw new Error('boom'); },
+    };
+    const normalBase = await start({ verifier: exploding });
+    const normal = await get(normalBase, '/badge/discord_application/app1.svg?theme=dark');
+    const limitedBase = await start({ rateLimitMax: 0 });
+    const limited = await get(limitedBase, '/badge/discord_application/app1.svg?theme=dark');
+    expect(normal.res.headers.get('etag')).not.toBeNull();
+    expect(limited.res.headers.get('etag')).toBe(normal.res.headers.get('etag'));
+    expect(limited.text).toBe(normal.text);
+  });
+
+  it('a limited request reusing the last render keeps its ETag and answers 304', async () => {
+    const base = await start({ rateLimitMax: 1 });
+    const path = '/badge/discord_application/app1.svg?theme=dark';
+    const first = await get(base, path);
+    const etag = first.res.headers.get('etag');
+    expect(etag).not.toBeNull();
+    const conditional = await get(base, path, { 'if-none-match': etag! });
+    expect(conditional.res.status).toBe(304);
+    expect(conditional.text).toBe('');
+    expect(conditional.res.headers.get('etag')).toBe(etag);
+    expect(conditional.res.headers.get('cache-control')).toBe('no-store');
   });
 });
