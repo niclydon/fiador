@@ -158,6 +158,41 @@ def test_reader_throw_is_unknown_never_unregistered(vectors, fixed_now):
     assert result.failures == ["lookup_failed"]
 
 
+@pytest.mark.parametrize("value", [
+    "0x1", "0x" + "a" * 63, "0x" + "a" * 65,
+    "0x" + "a" * 64 + "\n", "garbage", 7, True, 1.5,
+    {"human": 1}, b"\x11" * 32, object(),
+])
+def test_noncanonical_reader_value_fails_closed(vectors, fixed_now, value):
+    reader = StaticReader({A: value}, source="fixture")
+    verifier = make_verifier(vectors, fixed_now, reader=reader)
+    address = verifier.verify_address(A)
+    attestation = verifier.verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"])
+    )
+    for result in (address, attestation):
+        assert result.status == "unknown"
+        assert result.failures == ["lookup_failed"]
+        assert result.human_hash is None
+
+
+def test_human_id_case_variants_share_one_hash(vectors, fixed_now):
+    upper = HUMAN_1.upper().replace("0X", "0x")
+    lower_result = make_verifier(vectors, fixed_now).verify_address(A)
+    upper_result = make_verifier(
+        vectors, fixed_now,
+        reader=StaticReader({A: upper}), include_raw_human_id=True,
+    ).verify_address(A)
+    assert upper_result.status == "verified"
+    assert upper_result.human_hash == lower_result.human_hash
+    assert upper_result.human_id == HUMAN_1.lower()
+
+
+def test_live_reader_pads_small_uint256_to_canonical_human_id(vectors):
+    with StubRpc(eth_call_result="0x1") as rpc:
+        assert LiveReader(rpc_url=rpc.url).lookup_human(A) == "0x" + "0" * 63 + "1"
+
+
 def test_hanging_reader_times_out(vectors, fixed_now):
     release = threading.Event()
 
@@ -398,6 +433,15 @@ def test_extra_with_non_string_key_is_malformed_not_an_exception(vectors, fixed_
     assert result.failures == ["malformed_attestation"]
 
 
+@pytest.mark.parametrize("key", ["\ud800", "\udc00"])
+def test_extra_key_with_lone_surrogate_is_malformed(vectors, fixed_now, key):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["extra"][key] = "value"
+    result = make_verifier(vectors, fixed_now).verify_attestation(att)
+    assert result.status == "invalid"
+    assert result.failures == ["malformed_attestation"]
+
+
 def test_attestation_racing_expiry_is_expired(vectors, fixed_now):
     later = parse_z(vectors["attestations"]["valid"]["payload"]["expiresAt"]) + timedelta(
         seconds=1
@@ -541,6 +585,53 @@ def test_erc1271_http_503_preserves_expiry_precedence(vectors, fixed_now):
         result = make_verifier(vectors, fixed_now, rpc_url=rpc.url).verify_attestation(att)
     assert result.status == "expired"
     assert result.failures == ["expired", "lookup_failed"]
+
+
+def test_signature_unknown_still_checks_claimed_nonce(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["expired"])
+    att["payload"]["agentWalletAddress"] = CONTRACT_WALLET
+    att["signatureType"] = "eip1271"
+    att["signature"] = "0x" + "11" * 32
+
+    class ClaimedStore:
+        reads = 0
+
+        def has(self, nonce, wallet):
+            self.reads += 1
+            return True
+
+        def claim(self, nonce, wallet, expires_at):
+            raise AssertionError("expired document must not be claimed")
+
+    store = ClaimedStore()
+    with StubRpc(chain_id="0x1") as rpc:
+        result = make_verifier(vectors, fixed_now, rpc_url=rpc.url).verify_attestation(
+            att, nonce_store=store
+        )
+    assert result.status == "invalid"
+    assert result.failures == ["expired", "lookup_failed", "replay_detected"]
+    assert store.reads == 1
+
+
+def test_signature_unknown_replay_retains_lookup_failure(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["agentWalletAddress"] = CONTRACT_WALLET
+    att["signatureType"] = "eip1271"
+    att["signature"] = "0x" + "11" * 32
+
+    class ClaimedStore:
+        def has(self, nonce, wallet):
+            return True
+
+        def claim(self, nonce, wallet, expires_at):
+            raise AssertionError("replay must not claim")
+
+    with StubRpc(chain_id="0x1") as rpc:
+        result = make_verifier(vectors, fixed_now, rpc_url=rpc.url).verify_attestation(
+            att, nonce_store=ClaimedStore()
+        )
+    assert result.status == "invalid"
+    assert result.failures == ["lookup_failed", "replay_detected"]
 
 
 # -- raw humanId discipline (security property) ------------------------------
@@ -823,6 +914,21 @@ def test_erc1271_signature_need_not_be_65_bytes(vectors, fixed_now):
     assert result.status == "verified"
 
 
+def test_erc1271_signature_cap_accepts_8192_bytes_and_rejects_more(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["agentWalletAddress"] = CONTRACT_WALLET
+    att["signatureType"] = "eip1271"
+    reader = StaticReader({CONTRACT_WALLET: HUMAN_1}, source="live")
+    with StubRpc(eth_call_result=MAGIC_RESULT) as rpc:
+        verifier = make_verifier(vectors, fixed_now, reader=reader, rpc_url=rpc.url)
+        att["signature"] = "0x" + "11" * 8192
+        assert verifier.verify_attestation(att).status == "verified"
+        att["signature"] += "11"
+        result = verifier.verify_attestation(att)
+    assert result.status == "invalid"
+    assert result.failures == ["malformed_attestation"]
+
+
 def test_hanging_erc1271_eth_call_obeys_timeout(vectors, fixed_now):
     att = copy.deepcopy(vectors["attestations"]["valid"])
     att["payload"]["agentWalletAddress"] = CONTRACT_WALLET
@@ -1024,6 +1130,54 @@ def test_failing_replay_read_never_claims(vectors, fixed_now):
     assert result.status == "unknown"
     assert result.failures == ["lookup_failed"]
     assert store.claims == 0
+
+
+@pytest.mark.parametrize("operation", ["has", "claim"])
+def test_hanging_nonce_store_obeys_deadline(vectors, fixed_now, operation):
+    release = threading.Event()
+
+    class Store:
+        def has(self, nonce, wallet):
+            if operation == "has":
+                release.wait(0.2)
+            return False
+
+        def claim(self, nonce, wallet, expires_at):
+            if operation == "claim":
+                release.wait(0.2)
+            return "claimed"
+
+    try:
+        result = make_verifier(vectors, fixed_now, timeout_ms=40).verify_attestation(
+            attestation_from_dict(vectors["attestations"]["valid"]),
+            nonce_store=Store(),
+        )
+    finally:
+        release.set()
+    assert result.status == "unknown"
+    assert result.failures == ["lookup_failed"]
+
+
+def test_non_boolean_replay_read_fails_closed(vectors, fixed_now):
+    class Store:
+        def has(self, nonce, wallet):
+            return "yes"
+
+        def claim(self, nonce, wallet, expires_at):
+            raise AssertionError("invalid replay read must not claim")
+
+    result = make_verifier(vectors, fixed_now).verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"]), nonce_store=Store()
+    )
+    assert result.status == "unknown"
+    assert result.failures == ["lookup_failed"]
+
+
+@pytest.mark.parametrize("bad_now", [lambda: None, lambda: (_ for _ in ()).throw(RuntimeError())])
+def test_bad_injected_clock_falls_back_without_throwing(vectors, fixed_now, bad_now):
+    result = make_verifier(vectors, fixed_now, now=bad_now).verify_address(A)
+    assert result.status == "verified"
+    assert result.evidence.checked_at.endswith("Z")
 
 
 def test_nonce_not_claimed_for_expired_unregistered_or_unknown(vectors, fixed_now):

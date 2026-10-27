@@ -80,11 +80,24 @@ consistent `has(nonce, wallet) -> bool` read and an atomic
 The store checks its own clock at the write point and never records a
 nonce after `expires_at`. Replay is checked before expiry; a fresh
 nonce is claimed only after registration succeeds, or when the caller
-explicitly disables that check. Store failures return `unknown` +
-`lookup_failed`. The configured RPC is the trust oracle for
+explicitly disables that check. `InMemoryNonceStore` is a thread-safe,
+single-process reference implementation. The verifier claims only
+after every uncertain, expired, or unregistered outcome has returned;
+there is no release operation. Production replay protection needs a
+durable shared store with the same atomic claim behavior. Store errors
+and deadlines fail closed as `lookup_failed`; a timed-out claim may still finish in the backend,
+so an unknown result is not permission to retry automatically.
+
+The configured RPC is the trust oracle for
 registration answers: non-https RPC URLs are rejected at
 construction, except loopback endpoints (`localhost`, `127.0.0.1`,
 `::1`) where plaintext never leaves the machine.
+
+Reader values must be `None` or a full `0x`-prefixed 32-byte human ID;
+other values are `unknown` + `lookup_failed`. The accepted ID is
+lowercased before hashing, so letter-case variants of one uint256
+yield one hash. ERC-1271 signatures are
+limited to 8 KB, and `extra` keys with lone surrogates are malformed.
 
 The synchronous Python verifier bounds in-flight deadline workers to
 eight per process. A timed-out collaborator keeps its slot until it
@@ -95,10 +108,11 @@ custom readers and resolvers.
 Two deliberate Python adaptations, neither of which changes any
 verdict:
 
-- The API is synchronous. Lookups, ERC-1271 checks, and
+- The API is synchronous. Lookups, ERC-1271 checks, nonce-store calls, and
   `resolve_status` resolvers run under the deadline on a daemon
-  thread, so a hung collaborator yields `unknown` +
-  `lookup_timeout` exactly as the TS core's promise race does.
+  thread. A hung reader, contract check, or resolver yields `unknown` +
+  `lookup_timeout`; a hung nonce store yields `unknown` +
+  `lookup_failed`, matching the TS core.
 - Where the TS core takes an `AbortSignal`, Python takes a
   `threading.Event` (`signal=`); setting it aborts a pending
   operation, reported as `unknown` + `lookup_failed`, as in TS.

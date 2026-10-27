@@ -161,16 +161,44 @@ export function createVerifyMcpServer(deps: VerifyMcpDeps): McpServer {
           } catch {
             input = attestation; // the core returns invalid + malformed_attestation
           }
+        } else {
+          // Object form round-trip (7.5 re-review M10/NF-1): the
+          // received object is re-serialised and put through the
+          // same strict parser as the string form, and the core
+          // receives the strict-parsed value — so every spelling
+          // the strict parser refuses (duplicate keys cannot exist
+          // in a parsed object, but `__proto__` keys at any depth
+          // below the envelope can and do survive the SDK's schema
+          // validation) produces exactly the string form's verdict:
+          // on rejection the core gets the raw string and returns
+          // malformed_attestation with proper evidence. One
+          // sub-case is beyond the handler's reach, stated plainly:
+          // a `__proto__` key on the ENVELOPE itself is dropped by
+          // the schema library's record rebuild before this handler
+          // runs (probed against the pinned SDK/zod versions), so
+          // that one spelling is caught only in string form.
+          try {
+            input = parseJsonStrict(serialised);
+          } catch {
+            input = serialised; // the core returns invalid + malformed_attestation
+          }
         }
         const result = await deps.verifier.verifyAttestation(input, {
           ...(subject ? { expectedSubject: subject } : {}),
           ...(wallet ? { expectedWallet: wallet as EvmAddress } : {}),
         });
         const pub = toPublicVerifyResult(result);
-        const checks = computeChecks(pub, {
-          subject: subject !== undefined,
-          wallet: wallet !== undefined,
-        });
+        // The checks projection takes the registration stage's
+        // fate from the core's internal record (fix pass 3, D6),
+        // never from inference over the public shape.
+        const checks = computeChecks(
+          pub,
+          {
+            subject: subject !== undefined,
+            wallet: wallet !== undefined,
+          },
+          result.registration,
+        );
         return toolResult({ result: pub, checks });
       }),
   );

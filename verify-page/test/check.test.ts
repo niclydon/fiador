@@ -34,7 +34,11 @@ function verifier(status: VerifyResult['status'], failures: VerifyResult['failur
 describe('browser result boundary', () => {
   it('uses the real shared core for a signed Discord profile and a live-style reader', async () => {
     const account = privateKeyToAccount(`0x${'12'.repeat(32)}`);
-    const humanId = 'synthetic-human-for-local-test';
+    // A humanId in the canonical shape (0x-prefixed 32-byte hex):
+    // the core fails closed on any other reader value (verify
+    // fix pass 2, N1), so a "live-style" reader must answer in
+    // the shape the live reader reads from AgentBook.
+    const humanId = `0x${'42'.repeat(32)}`;
     const url = 'https://example.org/attestation.json';
     const applicationId = '123456789012345678';
     const payload: SignedAttestation['payload'] = {

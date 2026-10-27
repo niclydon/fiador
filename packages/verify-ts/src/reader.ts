@@ -17,12 +17,18 @@ export const AGENTBOOK_ABI = [
   },
 ] as const;
 
-// RPC endpoint policy (7.5 review M17): the configured RPC is the
-// trust oracle for registration answers — whatever it returns IS the
-// lookup result — so a plaintext endpoint is an integrity hole, not a
-// preference. Non-https URLs are rejected at construction, with one
-// exception: loopback endpoints (localhost, 127.0.0.0/8, ::1), where
-// plaintext never leaves the machine (local dev nodes, test stubs).
+// RPC endpoint policy (7.5 review M17; the host list below was
+// corrected in fix pass 3 to match the code exactly): the
+// configured RPC is the trust oracle — whatever it returns IS
+// the lookup result — so a plaintext endpoint is an integrity
+// hole, not a preference. Non-https URLs are rejected at
+// construction, with one exception: the exact loopback hosts
+// 'localhost', '127.0.0.1', '::1', and '[::1]' (the LOOPBACK_HOSTS
+// set below) — deliberately NOT the whole 127.0.0.0/8 and not
+// shorthand spellings like '127.1', where plaintext never leaves
+// the machine (local dev nodes, test stubs). Fail-closed: an
+// operator who wants another loopback spelling uses https or one
+// of these four.
 // The error messages never interpolate the URL: RPC URLs routinely
 // carry API keys in their path.
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
@@ -78,7 +84,11 @@ export function createLiveReader(options?: {
         args: [address],
       });
       if (value === 0n) return null;
-      return toHex(value);
+      // The canonical humanId shape is a full 32-byte hex string
+      // (7.5 re-review N1): rendering the uint256 unpadded would
+      // produce '0x1' for a small value, which the core now —
+      // correctly — refuses to treat as a humanId at all.
+      return toHex(value, { size: 32 });
     },
   };
 }

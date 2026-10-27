@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ConfigError, depsFromEnv } from './config.js';
-import { createVerifyHttpServer, parseHttpOptions } from './http.js';
+import { createVerifyHttpServer, isLoopbackHost, parseHttpOptions } from './http.js';
 import { createVerifyMcpServer } from './server.js';
 
 // One tool implementation, two transports (SPEC 11.4). stdio is the
@@ -40,7 +40,7 @@ if (process.argv.includes('--http')) {
     console.error(
       `[verify-mcp] streamable HTTP on ${options.host}:${options.port} (POST /mcp)`,
     );
-    if (options.host !== '127.0.0.1' && options.host !== 'localhost' && options.host !== '::1') {
+    if (!isLoopbackHost(options.host)) {
       console.error(
         '[verify-mcp] WARNING: bound to a non-loopback address with no built-in authentication; ' +
           'anyone who can reach this port can call the tools. Put access control at a gateway.',

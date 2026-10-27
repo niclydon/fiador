@@ -47,7 +47,70 @@ returns a fresh object with the truncated address and `humanHash` —
 which lets two subjects be recognised as sharing one human without
 revealing who it is. An attestation can narrow this further with
 `humanIdDisclosure: 'none'`. There is no setting that publishes the
-raw value.
+raw value. The verifier renders the 32-byte on-chain human ID as
+lowercase hex before hashing, so equivalent uppercase and lowercase
+reader answers yield one hash.
+
+## Nonce stores (replay protection)
+
+`verifyAttestation` accepts a `nonceStore` to enforce one-time
+presentation of an attestation. The contract is a read-only
+`has(nonce, wallet)` replay check plus an atomic
+`claim(nonce, wallet, expiresAt)` taken only after registration
+succeeds. The claim must be ATOMIC — exactly one of any number of
+concurrent claims for a key may observe `'claimed'`. In a real
+backend that means a single conditional write (an
+`INSERT ... ON CONFLICT DO NOTHING`, a `SET NX`, a conditional
+update whose affected-row count is the answer); a check-then-set
+across two round-trips is a race, not a claim. The package ships
+`InMemoryNonceStore`, whose claim is atomic by construction (its
+check-and-set runs in one synchronous pass), and the test suite
+exercises it — alongside an async store double modelling a
+conforming backend — under concurrent double-presentation. Treat
+that conformance test as the executable definition of the
+contract when writing a production store.
+
+Because the claim is taken only at the terminal step, earlier
+lookup failures, unregistered wallets, and expired documents never
+burn a nonce. Once a claim starts, an unknown result may mean its
+answer was lost after the store recorded it. Do not release that
+claim or automatically retry it. Entries lapse at the attestation's
+own `expiresAt`, and the store checks its own clock at the write
+point, returning `'expired'` rather than recording a stale claim.
+Store read and claim errors, including deadlines, return `unknown` +
+`lookup_failed` unless an established invalid or expired result takes
+precedence.
+
+## Nonce stores (replay protection)
+
+`verifyAttestation` accepts a `nonceStore` to enforce one-time
+presentation of an attestation. The contract is a read-only
+`has(nonce, wallet)` replay check plus an atomic
+`claim(nonce, wallet, expiresAt)` taken only after registration
+succeeds. The claim must be ATOMIC — exactly one of any number of
+concurrent claims for a key may observe `'claimed'`. In a real
+backend that means a single conditional write (an
+`INSERT ... ON CONFLICT DO NOTHING`, a `SET NX`, a conditional
+update whose affected-row count is the answer); a check-then-set
+across two round-trips is a race, not a claim. The package ships
+`InMemoryNonceStore`, whose claim is atomic by construction (its
+check-and-set runs in one synchronous pass), and the test suite
+exercises it — alongside an async store double modelling a
+conforming backend — under concurrent double-presentation. Treat
+that conformance test as the executable definition of the
+contract when writing a production store.
+
+Because the claim is taken only at the terminal step, outcomes
+resolved before the final claim (a lookup failure, an
+unregistered wallet, an expired document) never burn a nonce:
+the presentation can simply be retried. The one exception is
+the claim itself: a lost or timed-out claim response is
+`unknown` + `lookup_failed` with the nonce possibly consumed
+(SPEC 3.3) — the write may have committed, and the contract is
+exactly `{ has, claim }`, with no `release()` and no automatic
+retry. Entries lapse at the attestation's own `expiresAt`, and
+the store checks its own clock at the write point, returning
+`'expired'` rather than recording a stale claim.
 
 ## Design notes
 
@@ -76,5 +139,9 @@ raw value.
   that.
 - Clocks are injectable (`now`, `clockSkewMs`), so expiry behaviour
   is deterministically testable.
+- One-use flows can pass the optional Node-only
+  `@fiador/verify-nonce-sqlite` store as `nonceStore`. Published
+  attestations and the bot's periodic checks are repeatable and do
+  not use it.
 
 Apache-2.0. Created by Nic Lydon.

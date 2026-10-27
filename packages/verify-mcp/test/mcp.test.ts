@@ -1,23 +1,32 @@
 import { request as httpRequest } from 'node:http';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
+import { connect as netConnect, createServer as createNetServer } from 'node:net';
+import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import {
   createVerifier,
   type AgentBookReader,
   type EvmAddress,
   type FailureCode,
+  type PublicVerifyResult,
   type SignedAttestation,
   type Verifier,
 } from '@fiador/verify';
 import { computeChecks } from '../src/checks.js';
-import { ConfigError, depsFromEnv } from '../src/config.js';
-import { createVerifyHttpServer, parseHttpOptions } from '../src/http.js';
+import { ConfigError, depsFromEnv, parseBadgeBaseUrl } from '../src/config.js';
+import {
+  createVerifyHttpServer,
+  isLoopbackHost,
+  normalizeHost,
+  parseHttpOptions,
+} from '../src/http.js';
 import { createVerifyMcpServer, type VerifyMcpDeps } from '../src/server.js';
 
 const vectors = JSON.parse(
@@ -329,7 +338,10 @@ describe('7.5 regressions: HTTP wiring (B4/m7/M15)', () => {
       expect(health.status).toBe(200);
       expect(await health.json()).toEqual({ ok: true });
       const healthPost = await fetch(`${base}/health`, { method: 'POST', body: '{}' });
-      expect(healthPost.status).toBe(404);
+      // Fix pass 2 (m7): a wrong method on a known route is a 405
+      // in the SDK's JSON-RPC error shape, not a 404.
+      expect(healthPost.status).toBe(405);
+      expect(healthPost.headers.get('allow')).toBe('GET');
       const nope = await fetch(`${base}/nope`);
       expect(nope.status).toBe(404);
     } finally {
@@ -356,7 +368,7 @@ describe('7.5 regressions: HTTP wiring (B4/m7/M15)', () => {
     }
   });
 
-  it('a declared body over the cap is refused 413 before being read', async () => {
+  it('a declared body over the cap is refused 413 in the SDK error shape (B4)', async () => {
     const { server, base } = await startHttp(makeDeps());
     try {
       const res = await fetch(`${base}/mcp`, {
@@ -368,6 +380,15 @@ describe('7.5 regressions: HTTP wiring (B4/m7/M15)', () => {
         body: JSON.stringify({ pad: 'x'.repeat(1024 * 1024) }),
       });
       expect(res.status).toBe(413);
+      // The rejection comes from the transport's own cap (fix pass
+      // 2, B4): the SDK's JSON-RPC shape, not a hand-rolled body.
+      const body = (await res.json()) as {
+        jsonrpc?: string;
+        error?: { code?: number; message?: string };
+      };
+      expect(body.jsonrpc).toBe('2.0');
+      expect(body.error?.code).toBe(-32000);
+      expect(body.error?.message).toContain('Payload Too Large');
     } finally {
       server.close();
     }
@@ -485,7 +506,7 @@ describe('7.5 regressions: verify_attestation inputs (M10/M11/M5/M6)', () => {
     });
   });
 
-  it('on an unknown result, checks do not fabricate stage outcomes (M5)', async () => {
+  it('on an unknown result, checks report the stages that actually ran (M5)', async () => {
     const throwing: AgentBookReader = {
       source: 'live',
       async lookupHuman() {
@@ -511,9 +532,15 @@ describe('7.5 regressions: verify_attestation inputs (M10/M11/M5/M6)', () => {
       };
     };
     expect(body.result.status).toBe('unknown');
-    expect(body.checks.signature).toBe('not_checked');
-    expect(body.checks.expiry).toBe('not_checked');
-    expect(body.checks.registration).toBe('not_checked');
+    // Fix pass 2 (re-review M5, restoring SPEC 11.2 exactly): the
+    // registration lookup RAN and failed — the local eip191
+    // signature was evaluated and passed before it, and the dates
+    // were evaluated too. Since fix pass 3 (D6) the stage is
+    // proven by the core's recorded registration fact, not by
+    // inference from the result's rpcLatencyMs.
+    expect(body.checks.signature).toBe('pass');
+    expect(body.checks.expiry).toBe('valid');
+    expect(body.checks.registration).toBe('unknown');
     // Binding DID run and pass before the network stage; it may say so.
     expect(body.checks.binding.subject).toBe('pass');
   });
@@ -667,4 +694,725 @@ describe('7.5 regressions: configuration (M14/M16/m5/m6)', () => {
     });
     expect(deps.badgeBaseUrl).toBe('https://badges.example/root');
   });
+});
+
+// ---------------------------------------------------------------------------
+// 7.5 re-review regressions (fix pass 2): B4 (transport body cap +
+// total arrival deadline), M15 (host normalisation), M16 (port
+// spelling + factory validation), m7 (method gating + the real
+// main() entry path), M10 (object-form round-trip), M5 (checks
+// probes), m5/m6 (registry shape, badge URL credentials).
+// ---------------------------------------------------------------------------
+
+function rawHttp(
+  base: string,
+  options: { method: string; path: string; host?: string; chunks?: string[] },
+): Promise<{ status: number; body: string }> {
+  const url = new URL(base);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: options.path,
+        method: options.method,
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          ...(options.host ? { host: options.host } : {}),
+        },
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      },
+    );
+    req.on('error', reject);
+    for (const chunk of options.chunks ?? []) req.write(chunk);
+    req.end();
+  });
+}
+
+describe('fix pass 2: body cap and arrival deadline (B4)', () => {
+  it('a chunked body over the cap is refused 413 in the SDK shape', async () => {
+    const { server, base } = await startHttp(makeDeps());
+    try {
+      // No Content-Length: node sends Transfer-Encoding: chunked.
+      // The transport counts bytes as it reads them, so the cap
+      // applies exactly as it does to a declared body.
+      const res = await rawHttp(base, {
+        method: 'POST',
+        path: '/mcp',
+        chunks: ['{"pad":"', 'x'.repeat(700 * 1024), 'y'.repeat(700 * 1024), '"}'],
+      });
+      expect(res.status).toBe(413);
+      const body = JSON.parse(res.body) as {
+        jsonrpc?: string;
+        error?: { code?: number; message?: string };
+      };
+      expect(body.jsonrpc).toBe('2.0');
+      expect(body.error?.code).toBe(-32000);
+      expect(body.error?.message).toContain('Payload Too Large');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a slow-drip body is terminated at the total request deadline, not per-gap', async () => {
+    const server = createVerifyHttpServer(makeDeps(), {
+      host: '127.0.0.1',
+      port: 0,
+      headersTimeoutMs: 300,
+      requestTimeoutMs: 900,
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no port');
+    try {
+      const elapsed = await new Promise<number>((resolve, reject) => {
+        const started = Date.now();
+        const socket = netConnect(address.port, '127.0.0.1', () => {
+          socket.write(
+            'POST /mcp HTTP/1.1\r\n' +
+              `host: 127.0.0.1:${address.port}\r\n` +
+              'content-type: application/json\r\n' +
+              'accept: application/json, text/event-stream\r\n' +
+              'content-length: 100\r\n\r\n',
+          );
+        });
+        const drip = setInterval(() => socket.write('x'), 250);
+        const done = () => {
+          clearInterval(drip);
+          resolve(Date.now() - started);
+        };
+        socket.on('close', done);
+        socket.on('error', done);
+        setTimeout(() => {
+          clearInterval(drip);
+          socket.destroy();
+          reject(new Error('server never terminated the drip'));
+        }, 5000);
+      });
+      // requestTimeout (900ms) is the TOTAL arrival deadline: with
+      // a 250ms drip the per-gap timer would never fire at all.
+      expect(elapsed).toBeGreaterThanOrEqual(700);
+      expect(elapsed).toBeLessThan(2500);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  it('a header drip is terminated at the headers deadline', async () => {
+    const server = createVerifyHttpServer(makeDeps(), {
+      host: '127.0.0.1',
+      port: 0,
+      headersTimeoutMs: 300,
+      requestTimeoutMs: 5000,
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no port');
+    try {
+      const elapsed = await new Promise<number>((resolve, reject) => {
+        const started = Date.now();
+        const socket = netConnect(address.port, '127.0.0.1', () => {
+          socket.write('POST /mcp HTTP/1.1\r\n');
+        });
+        const drip = setInterval(() => socket.write('x-probe: 1\r\n'), 100);
+        const done = () => {
+          clearInterval(drip);
+          resolve(Date.now() - started);
+        };
+        socket.on('close', done);
+        socket.on('error', done);
+        setTimeout(() => {
+          clearInterval(drip);
+          socket.destroy();
+          reject(new Error('server never terminated the header drip'));
+        }, 4000);
+      });
+      expect(elapsed).toBeGreaterThanOrEqual(250);
+      expect(elapsed).toBeLessThan(2000);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  }, 10000);
+
+  it('a header drip on a REUSED connection is terminated at the headers deadline (NEW-1)', async () => {
+    // Regression for re-review 2's NEW-1: the pass-2 timers armed
+    // the headers deadline once per connection and cleared it at
+    // the first request event, so a second request's header phase
+    // on a keep-alive connection was bounded by nothing (this
+    // probe ran unbounded before the fix). The deadlines are now
+    // per request: the headers timer re-arms when the socket goes
+    // idle after each response.
+    const server = createVerifyHttpServer(makeDeps(), {
+      host: '127.0.0.1',
+      port: 0,
+      headersTimeoutMs: 300,
+      requestTimeoutMs: 5000,
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no port');
+    try {
+      const elapsed = await new Promise<number>((resolve, reject) => {
+        const socket = netConnect(address.port, '127.0.0.1');
+        let phase: 'first' | 'drip' = 'first';
+        let dripStartedAt = 0;
+        let drip: NodeJS.Timeout | undefined;
+        const fail = setTimeout(() => {
+          if (drip) clearInterval(drip);
+          socket.destroy();
+          reject(new Error('server never terminated the second-request header drip'));
+        }, 6000);
+        socket.on('connect', () => {
+          socket.write(
+            'GET /health HTTP/1.1\r\n' +
+              `host: 127.0.0.1:${address.port}\r\n` +
+              'connection: keep-alive\r\n\r\n',
+          );
+        });
+        socket.on('data', (chunk) => {
+          if (phase === 'first' && chunk.toString('latin1').includes('200')) {
+            phase = 'drip';
+            dripStartedAt = Date.now();
+            socket.write('GET /health HTTP/1.1\r\n');
+            drip = setInterval(() => socket.write('x-probe: 1\r\n'), 100);
+          }
+        });
+        const done = () => {
+          if (phase !== 'drip') return;
+          clearTimeout(fail);
+          if (drip) clearInterval(drip);
+          resolve(Date.now() - dripStartedAt);
+        };
+        socket.on('close', done);
+        socket.on('error', done);
+      });
+      expect(elapsed).toBeGreaterThanOrEqual(250);
+      expect(elapsed).toBeLessThan(2000);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  }, 10000);
+
+  it('the total deadline on a REUSED connection is measured from the request start (NEW-1)', async () => {
+    // Second leg of NEW-1: on a reused connection the total
+    // deadline previously started only when the second request's
+    // headers had fully arrived (the elapsed clock was reset), so
+    // a slow header phase consumed none of the total budget. Now
+    // the header phase counts against the same total.
+    const server = createVerifyHttpServer(makeDeps(), {
+      host: '127.0.0.1',
+      port: 0,
+      headersTimeoutMs: 800,
+      requestTimeoutMs: 1200,
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no port');
+    try {
+      const elapsed = await new Promise<number>((resolve, reject) => {
+        const socket = netConnect(address.port, '127.0.0.1');
+        let phase: 'first' | 'second' = 'first';
+        let secondStartedAt = 0;
+        let drip: NodeJS.Timeout | undefined;
+        const fail = setTimeout(() => {
+          if (drip) clearInterval(drip);
+          socket.destroy();
+          reject(new Error('server never terminated the reused-connection drip'));
+        }, 6000);
+        socket.on('connect', () => {
+          socket.write(
+            'GET /health HTTP/1.1\r\n' +
+              `host: 127.0.0.1:${address.port}\r\n` +
+              'connection: keep-alive\r\n\r\n',
+          );
+        });
+        socket.on('data', (chunk) => {
+          if (phase === 'first' && chunk.toString('latin1').includes('200')) {
+            phase = 'second';
+            secondStartedAt = Date.now();
+            // Drip headers for ~500 ms (inside the 800 ms headers
+            // deadline), complete them, then drip the body: the
+            // total deadline (1200 ms from the request's first
+            // byte) must end the socket at ~1200 ms overall, not
+            // 1200 ms after the headers completed.
+            socket.write('POST /mcp HTTP/1.1\r\n');
+            let sent = 0;
+            drip = setInterval(() => {
+              sent += 1;
+              if (sent <= 5) {
+                socket.write('x-probe: 1\r\n');
+              } else if (sent === 6) {
+                socket.write(
+                  `host: 127.0.0.1:${address.port}\r\n` +
+                    'content-type: application/json\r\n' +
+                    'accept: application/json, text/event-stream\r\n' +
+                    'content-length: 100\r\n\r\n',
+                );
+              } else {
+                socket.write('x');
+              }
+            }, 100);
+          }
+        });
+        const done = () => {
+          if (phase !== 'second') return;
+          clearTimeout(fail);
+          if (drip) clearInterval(drip);
+          resolve(Date.now() - secondStartedAt);
+        };
+        socket.on('close', done);
+        socket.on('error', done);
+      });
+      expect(elapsed).toBeGreaterThanOrEqual(1000);
+      expect(elapsed).toBeLessThan(1600);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  }, 10000);
+});
+
+describe('fix pass 2: host normalisation (M15)', () => {
+  it('isLoopbackHost recognises the spellings operators actually type', () => {
+    for (const host of [
+      '127.0.0.1',
+      '127.1',
+      '127.0.1',
+      '127.255.0.9',
+      '2130706433',
+      '0x7f.1',
+      'localhost',
+      'LOCALHOST',
+      'localhost.',
+      '::1',
+      '[::1]',
+      '0:0:0:0:0:0:0:1',
+      '::ffff:127.0.0.1',
+    ]) {
+      expect(isLoopbackHost(host), host).toBe(true);
+    }
+    for (const host of [
+      '128.0.0.1',
+      '126.255.255.255',
+      '0.0.0.0',
+      '::',
+      '::ffff:8.8.8.8',
+      'example.com',
+      'localhost.example.com',
+      '',
+    ]) {
+      expect(isLoopbackHost(host), host).toBe(false);
+    }
+    expect(normalizeHost('LOCALHOST')).toBe('localhost');
+    expect(normalizeHost('127.1')).toBe('127.0.0.1');
+    expect(normalizeHost('0:0:0:0:0:0:0:1')).toBe('0:0:0:0:0:0:0:1');
+    expect(normalizeHost('example.com')).toBeNull();
+  });
+
+  it('VERIFY_MCP_HOST=127.1 still gets DNS-rebinding protection (foreign Host -> 403)', async () => {
+    const server = createVerifyHttpServer(makeDeps(), { host: '127.1', port: 0 });
+    await new Promise<void>((resolve) => server.listen(0, '127.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no port');
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const foreign = await rawHttp(base, {
+        method: 'POST',
+        path: '/mcp',
+        host: 'evil.example',
+        chunks: [JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })],
+      });
+      expect(foreign.status).toBe(403);
+      const own = await rawHttp(base, {
+        method: 'POST',
+        path: '/mcp',
+        host: `127.1:${address.port}`,
+        chunks: [JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })],
+      });
+      expect(own.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('fix pass 2: methods, port spelling, factory validation (m7/M16)', () => {
+  it('wrong methods on /mcp and /health return 405 in the SDK shape; DELETE /mcp no longer 200s', async () => {
+    const { server, base } = await startHttp(makeDeps());
+    try {
+      for (const method of ['PUT', 'DELETE', 'GET']) {
+        const res = await fetch(`${base}/mcp`, { method });
+        expect(res.status, method).toBe(405);
+        expect(res.headers.get('allow')).toBe('POST');
+        const body = (await res.json()) as {
+          jsonrpc?: string;
+          error?: { code?: number; message?: string };
+          id?: unknown;
+        };
+        expect(body.jsonrpc).toBe('2.0');
+        expect(body.error?.code).toBe(-32000);
+        expect(body.error?.message).toBe('Method not allowed.');
+        expect(body.id).toBeNull();
+      }
+      const healthDelete = await fetch(`${base}/health`, { method: 'DELETE' });
+      expect(healthDelete.status).toBe(405);
+      expect(healthDelete.headers.get('allow')).toBe('GET');
+    } finally {
+      server.close();
+    }
+  });
+
+  it("'--port 9999' space form parses like the = form; a missing value errors (M16)", () => {
+    expect(parseHttpOptions({}, ['--port', '9999'])).toEqual({
+      host: '127.0.0.1',
+      port: 9999,
+    });
+    expect(parseHttpOptions({}, ['--port=9999'])).toEqual({
+      host: '127.0.0.1',
+      port: 9999,
+    });
+    expect(() => parseHttpOptions({}, ['--port'])).toThrow(/--port/);
+    expect(() => parseHttpOptions({}, ['--port', 'abc'])).toThrow(/--port/);
+  });
+
+  it('the HTTP factory validates its own options (M16)', () => {
+    expect(() => createVerifyHttpServer(makeDeps(), { host: '', port: 0 })).toThrow(
+      ConfigError,
+    );
+    expect(() => createVerifyHttpServer(makeDeps(), { host: '127.0.0.1', port: 70000 })).toThrow(
+      ConfigError,
+    );
+    expect(() =>
+      createVerifyHttpServer(makeDeps(), {
+        host: '127.0.0.1',
+        port: 0,
+        headersTimeoutMs: 5000,
+        requestTimeoutMs: 1000,
+      }),
+    ).toThrow(ConfigError);
+    // Port 0 is legitimate at the factory (ephemeral test binds);
+    // parseHttpOptions remains the deployment gate that rejects it.
+    expect(() =>
+      createVerifyHttpServer(makeDeps(), { host: '127.0.0.1', port: 0 }),
+    ).not.toThrow();
+  });
+});
+
+describe('fix pass 2: checks mapping probes (M5)', () => {
+  const pub = (partial: Partial<PublicVerifyResult>): PublicVerifyResult =>
+    ({
+      status: 'unknown',
+      address: A,
+      addressTruncated: '0x1234…5678',
+      humanHash: null,
+      failures: [],
+      evidence: {
+        checkedAt: '2026-01-15T12:00:00.000Z',
+        source: 'live',
+        agentBook: {
+          network: 'eip155:480',
+          contract: '0xA23aB2712eA7BBa896930544C7d6636a96b944dA',
+        },
+      },
+      ...partial,
+    }) as PublicVerifyResult;
+  const noAssert = { subject: false, wallet: false };
+
+  it('expired + [expired, lookup_failed] (eip1271, signature never ran): no fabricated pass', () => {
+    const checks = computeChecks(
+      pub({ status: 'expired', failures: ['expired', 'lookup_failed'] }),
+      noAssert,
+    );
+    expect(checks.signature).toBe('not_checked');
+    expect(checks.expiry).toBe('expired');
+    expect(checks.registration).toBe('not_checked');
+  });
+
+  it('invalid + [attestation_lifetime_invalid, lookup_failed]: signature not_checked', () => {
+    const checks = computeChecks(
+      pub({
+        status: 'invalid',
+        failures: ['attestation_lifetime_invalid', 'lookup_failed'],
+      }),
+      noAssert,
+    );
+    expect(checks.signature).toBe('not_checked');
+    expect(checks.expiry).toBe('lifetime_invalid');
+    expect(checks.registration).toBe('not_checked');
+  });
+
+  it('invalid + [not_yet_valid, lookup_timeout]: signature not_checked', () => {
+    const checks = computeChecks(
+      pub({ status: 'invalid', failures: ['not_yet_valid', 'lookup_timeout'] }),
+      noAssert,
+    );
+    expect(checks.signature).toBe('not_checked');
+    expect(checks.expiry).toBe('not_yet_valid');
+    expect(checks.registration).toBe('not_checked');
+  });
+
+  it('a replay does not prove an uncertain ERC-1271 signature passed', () => {
+    for (const lookupCode of ['lookup_failed', 'lookup_timeout'] as const) {
+      const checks = computeChecks(
+        pub({ status: 'invalid', failures: [lookupCode, 'replay_detected'] }),
+        { subject: true, wallet: false },
+      );
+      expect(checks.signature).toBe('not_checked');
+      expect(checks.binding.subject).toBe('pass');
+      expect(checks.registration).toBe('not_checked');
+    }
+    const knownGoodReplay = computeChecks(
+      pub({ status: 'invalid', failures: ['replay_detected'] }), noAssert,
+    );
+    expect(knownGoodReplay.signature).toBe('pass');
+  });
+
+  it('an eip191 attestation whose registration lookup failed: registration unknown, ran stages reported', () => {
+    const checks = computeChecks(
+      pub({
+        status: 'unknown',
+        failures: ['lookup_failed'],
+        evidence: {
+          checkedAt: '2026-01-15T12:00:00.000Z',
+          source: 'live',
+          agentBook: {
+            network: 'eip155:480',
+            contract: '0xA23aB2712eA7BBa896930544C7d6636a96b944dA',
+          },
+          rpcLatencyMs: 12,
+        },
+      }),
+      noAssert,
+      { ran: true, outcome: 'failed' },
+    );
+    expect(checks.registration).toBe('unknown');
+    expect(checks.signature).toBe('pass');
+    expect(checks.expiry).toBe('valid');
+  });
+
+  it('claim outcomes report the completed registration lookup truthfully (D6)', () => {
+    // A claim replay follows a registration lookup that resolved
+    // with an entry; the old status+latency inference reported
+    // not_checked because claim results carry no latency.
+    const replay = computeChecks(
+      pub({ status: 'invalid', failures: ['replay_detected'] }),
+      noAssert,
+      { ran: true, outcome: 'registered' },
+    );
+    expect(replay.registration).toBe('registered');
+    expect(replay.signature).toBe('pass');
+    // A claim failure: the lookup ran and resolved; the store
+    // failed afterwards. Registration is 'registered', and the
+    // lookup_failed code must not drag it to 'unknown'.
+    const claimFailed = computeChecks(
+      pub({ status: 'unknown', failures: ['lookup_failed'] }),
+      noAssert,
+      { ran: true, outcome: 'registered' },
+    );
+    expect(claimFailed.registration).toBe('registered');
+    expect(claimFailed.signature).toBe('pass');
+    // A skipped lookup (checkRegistration: false) is not_checked
+    // even on a verified result.
+    const skipped = computeChecks(
+      pub({ status: 'verified', failures: [] }),
+      noAssert,
+      { ran: false },
+    );
+    expect(skipped.registration).toBe('not_checked');
+  });
+
+  it('an expiry crossing with a failed lookup reports registration unknown (D5)', () => {
+    const checks = computeChecks(
+      pub({ status: 'expired', failures: ['expired', 'lookup_failed'] }),
+      noAssert,
+      { ran: true, outcome: 'failed' },
+    );
+    expect(checks.registration).toBe('unknown');
+    expect(checks.expiry).toBe('expired');
+    expect(checks.signature).toBe('pass');
+  });
+});
+
+describe('fix pass 2: object-form attestation round-trip (M10)', () => {
+  it('an object-form document with a payload-level __proto__ key is malformed, like the string form', async () => {
+    const client = await connectInMemory(makeDeps());
+    const payloadJson = JSON.stringify(vectors.attestations.valid.payload);
+    const doctoredPayload = JSON.parse(
+      `{"__proto__":{"polluted":true},${payloadJson.slice(1)}`,
+    ) as Record<string, unknown>;
+    const att = { ...vectors.attestations.valid, payload: doctoredPayload };
+    const res = await client.callTool({
+      name: 'verify_attestation',
+      arguments: { attestation: att },
+    });
+    expect(res.isError).toBeFalsy();
+    const body = res.structuredContent as {
+      result: { status: string; failures: string[] };
+    };
+    expect(body.result.status).toBe('invalid');
+    expect(body.result.failures).toContain('malformed_attestation');
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('a string-form document with a top-level __proto__ key is malformed', async () => {
+    const client = await connectInMemory(makeDeps());
+    const valid = JSON.stringify(vectors.attestations.valid);
+    const doctored = `{"__proto__":{"polluted":true},${valid.slice(1)}`;
+    const res = await client.callTool({
+      name: 'verify_attestation',
+      arguments: { attestation: doctored },
+    });
+    expect(res.isError).toBeFalsy();
+    const body = res.structuredContent as {
+      result: { status: string; failures: string[] };
+    };
+    expect(body.result.status).toBe('invalid');
+    expect(body.result.failures).toContain('malformed_attestation');
+  });
+
+  it('an ordinary object-form document still verifies through the round-trip', async () => {
+    const client = await connectInMemory(makeDeps());
+    const res = await client.callTool({
+      name: 'verify_attestation',
+      arguments: { attestation: vectors.attestations.valid },
+    });
+    const body = res.structuredContent as { result: { status: string } };
+    expect(body.result.status).toBe('verified');
+  });
+});
+
+describe('fix pass 2: registry shape and badge URL credentials (m5/m6)', () => {
+  it('registry legs with surrounding whitespace are rejected at startup (m5)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-mcp-config-'));
+    const subject = vectors.attestations.valid.payload.subject;
+    const paddedType = join(dir, 'padded-type.json');
+    writeFileSync(
+      paddedType,
+      JSON.stringify({ [` ${subject.type}:${subject.id}`]: vectors.attestations.valid }),
+    );
+    expect(() => depsFromEnv({ VERIFY_REGISTRY_FILE: paddedType })).toThrow(
+      /attestation objects/,
+    );
+    const paddedId = join(dir, 'padded-id.json');
+    writeFileSync(
+      paddedId,
+      JSON.stringify({ [`${subject.type}: ${subject.id}`]: vectors.attestations.valid }),
+    );
+    expect(() => depsFromEnv({ VERIFY_REGISTRY_FILE: paddedId })).toThrow(
+      /attestation objects/,
+    );
+  });
+
+  it('registry values are shape-validated at startup: payload/signature/signatureType (m5)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-mcp-config-'));
+    const noType = join(dir, 'notype.json');
+    writeFileSync(
+      noType,
+      JSON.stringify({
+        'discord_application:1': { payload: {}, signature: '0x12' },
+      }),
+    );
+    expect(() => depsFromEnv({ VERIFY_REGISTRY_FILE: noType })).toThrow(/attestation objects/);
+    const noPayload = join(dir, 'nopayload.json');
+    writeFileSync(
+      noPayload,
+      JSON.stringify({
+        'discord_application:1': { signature: '0x12', signatureType: 'eip191' },
+      }),
+    );
+    expect(() => depsFromEnv({ VERIFY_REGISTRY_FILE: noPayload })).toThrow(
+      /attestation objects/,
+    );
+  });
+
+  it('badge base URL userinfo is stripped, never republished (m6)', () => {
+    expect(parseBadgeBaseUrl('https://user:pass@badges.example/root')).toBe(
+      'https://badges.example/root',
+    );
+    expect(parseBadgeBaseUrl('https://user@badges.example')).toBe('https://badges.example');
+  });
+});
+
+describe('fix pass 2: the real main() entry path (m7)', () => {
+  const PKG_DIR = fileURLToPath(new URL('..', import.meta.url));
+
+  beforeAll(() => {
+    // The spawned entry point imports @fiador/verify's dist too.
+    execFileSync('npm', ['run', 'build', '--workspace', '@fiador/verify'], {
+      cwd: join(PKG_DIR, '..', '..'),
+      stdio: 'pipe',
+    });
+    execFileSync('npm', ['run', 'build'], { cwd: PKG_DIR, stdio: 'pipe' });
+  }, 120_000);
+
+  it('spawned main.js --http serves /health and tools/list on an ephemeral port', async () => {
+    const probe = createNetServer();
+    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+    const probeAddress = probe.address();
+    if (probeAddress === null || typeof probeAddress === 'string') {
+      throw new Error('no probe port');
+    }
+    const port = probeAddress.port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    delete env.VERIFY_REGISTRY_FILE;
+    delete env.VERIFY_BADGE_BASE_URL;
+    env.VERIFY_MCP_HOST = '127.0.0.1';
+    env.VERIFY_MCP_PORT = String(port);
+    const child = spawn(process.execPath, ['dist/main.js', '--http'], {
+      cwd: PKG_DIR,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      let healthy = false;
+      for (let i = 0; i < 50 && !healthy; i += 1) {
+        try {
+          const res = await fetch(`${base}/health`);
+          healthy = res.status === 200;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+      }
+      expect(healthy).toBe(true);
+      const res = await fetch(`${base}/mcp`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      const jsonText = text.startsWith('{')
+        ? text
+        : text
+            .split('\n')
+            .find((line) => line.startsWith('data:'))
+            ?.slice('data:'.length);
+      const parsed = JSON.parse(jsonText ?? '{}') as {
+        result?: { tools?: Array<{ name: string }> };
+      };
+      const names = (parsed.result?.tools ?? []).map((t) => t.name).sort();
+      // No registry env in the child: badge_status is not listed.
+      expect(names).toEqual(['verify_address', 'verify_attestation']);
+    } finally {
+      child.kill('SIGTERM');
+      await Promise.race([
+        new Promise((resolve) => child.once('exit', resolve)),
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]);
+    }
+  }, 30_000);
 });

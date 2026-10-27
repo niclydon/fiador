@@ -36,6 +36,19 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+// Attestation shape (7.5 re-review m5): a registry value promises a
+// signed attestation object — a payload object, a signature string,
+// and a declared signatureType in the protocol's set. Anything less
+// is rejected by loadRegistryFile at startup with the sanitised
+// error, instead of surfacing later as a verification anomaly.
+function isAttestationShape(value: Record<string, unknown>): boolean {
+  return (
+    isPlainObject(value.payload) &&
+    typeof value.signature === 'string' &&
+    (value.signatureType === 'eip191' || value.signatureType === 'eip1271')
+  );
+}
+
 export function parseTimeoutMs(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
   if (!/^\d+$/.test(raw)) {
@@ -62,6 +75,12 @@ export function parseBadgeBaseUrl(raw: string): string {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     fail('VERIFY_BADGE_BASE_URL must be a valid http(s) URL');
   }
+  // Credentials are never republished (7.5 re-review m6): a base
+  // URL carrying userinfo would embed those credentials in every
+  // badge URL the tool hands out. Strip them, like the query and
+  // fragment below.
+  url.username = '';
+  url.password = '';
   url.search = '';
   url.hash = '';
   return url.href.replace(/\/$/, '');
@@ -98,7 +117,21 @@ export function loadRegistryFile(
   const map = new Map<string, SignedAttestation>();
   for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
     const sep = key.indexOf(':');
-    if (sep <= 0 || sep === key.length - 1 || !isPlainObject(value)) {
+    const typeLeg = sep > 0 ? key.slice(0, sep) : '';
+    const idLeg = sep > 0 ? key.slice(sep + 1) : '';
+    // Both legs are validated at startup (7.5 re-review m5): a leg
+    // padded with whitespace can never match a resolver query —
+    // subjects are exact strings — so the entry would be silently
+    // unreachable, and a value that is not attestation-shaped is a
+    // configuration error here, not a resolve-time surprise.
+    if (
+      sep <= 0 ||
+      idLeg.length === 0 ||
+      typeLeg !== typeLeg.trim() ||
+      idLeg !== idLeg.trim() ||
+      !isPlainObject(value) ||
+      !isAttestationShape(value)
+    ) {
       fail('VERIFY_REGISTRY_FILE keys must have the form "type:id" and values must be attestation objects');
     }
     const composite = JSON.stringify([key.slice(0, sep), key.slice(sep + 1)]);

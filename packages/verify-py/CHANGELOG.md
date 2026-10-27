@@ -18,6 +18,26 @@ Fixes:
 
 ## 0.3.0 — 2026-10-26
 
+### Fix pass 2 parity — 2026-10-27
+
+- Reader answers fail closed unless they are `None` or a full 32-byte
+  hexadecimal human ID. The live reader pads small uint256 values to
+  that canonical shape and normalizes letter case before hashing.
+- A read-only replay check also runs after an uncertain ERC-1271
+  signature result. An established replay retains the signature's
+  lookup-failure code as well as `replay_detected`. Nonce-store reads and claims run under the verifier
+  deadline; deadline failures and bad return types report `lookup_failed`,
+  and a faulty injected clock
+  falls back to the system clock.
+- The package now ships a thread-safe, process-local
+  `InMemoryNonceStore` with atomic claims and expiry. The verifier
+  claims only at the terminal step, after uncertain, expired, and
+  unregistered outcomes return. A lost final claim response remains
+  possibly consumed. Durable multi-process storage remains a
+  separate production requirement.
+- ERC-1271 signatures are capped at 8 KB, and `extra` keys containing
+  lone Unicode surrogates are malformed.
+
 The §7.5 adversarial-review mirror pass: the Python counterpart of
 `@fiador/verify` 0.3.0 (PR #33), mirroring every core behavior change
 in that release so the two implementations stay verdict-identical

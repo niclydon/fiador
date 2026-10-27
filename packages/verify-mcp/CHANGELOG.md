@@ -5,6 +5,75 @@
 The §7.5 adversarial-review fix pass (companion to
 @fiador/verify 0.3.0; requires `^0.3.0`).
 
+### Fix pass 3 (re-review 2)
+
+- Arrival deadlines are per REQUEST, not per connection
+  (NEW-1): the pass-2 timers armed the headers deadline once
+  per connection and cleared it at the first request event, so
+  on a reused (keep-alive) connection a second request's
+  header phase was bounded by nothing, and its total deadline
+  started only once its headers had fully arrived. The factory
+  now re-arms the headers deadline whenever a socket goes idle
+  after a response, and measures the total deadline from when
+  each request began arriving. Regression probes pin both
+  legs: a header drip on a reused connection dies at the
+  headers deadline, and a slow header phase consumes the same
+  total budget as the body that follows it.
+- The `checks` projection takes the registration stage from
+  the core's recorded fact (D6, companion to @fiador/verify
+  fix pass 3): the core reports whether the step-6 lookup ran
+  and how it resolved, so claim-replay / claim-expired /
+  claim-failure results — which carry no lookup latency — are
+  no longer misreported as `not_checked`, and an expiry
+  crossing with a failed lookup reports registration
+  `unknown` (D5).
+
+### Fix pass 2 (re-review)
+
+- The body cap is now enforced by the transport alone (B4,
+  superseding the note below): the hand-rolled declared-length
+  pre-check is removed, so declared and chunked oversize bodies
+  alike are refused with the SDK's own 413 JSON-RPC shape.
+  Arrival time is bounded by the factory's own per-request
+  timers — a headers deadline (10 s) below a TOTAL request
+  deadline (30 s, measured from the connection or previous
+  response and never reset by arriving bytes). The header
+  deadline rearms for each request on a keep-alive connection.
+  Probing the pinned Node showed its
+  built-in headersTimeout/requestTimeout properties do not
+  terminate an idle connection or a drip in this build, so the
+  factory enforces both bounds itself (and also assigns the
+  built-ins, as defence in depth). Probes pin the behaviour:
+  2 MiB chunked → SDK-shaped 413; a 1-byte/250 ms body drip
+  terminated at the total deadline; first-request and second-request
+  header drips terminated at the headers deadline.
+- The `checks` projection restores SPEC 11.2's mapping exactly
+  (M5): registration is `unknown` when the lookup ran and failed
+  and `not_checked` only when the pipeline failed before it
+  (proven by the result's status and lookup latency); date
+  codes, a bare expired status, and a read-only replay never count
+  as signature evidence when a lookup-failure code is present.
+- Host handling is normalised (M15): `127.1`, `LOCALHOST`,
+  `0:0:0:0:0:0:0:1`, IPv4-mapped forms, and friends are
+  recognised as loopback for both the DNS-rebinding decision
+  and the non-loopback startup warning.
+- Wrong methods on `/mcp` and `/health` return 405 in the
+  SDK's JSON-RPC error shape (DELETE `/mcp` no longer 200s),
+  `--port N` parses like `--port=N`, and the HTTP factory
+  validates its own options (m7/M16). A test spawns the real
+  built `main.js` and exercises `/health` and `tools/list`.
+- `verify_attestation`'s object form is round-tripped through
+  the strict parser (M10): a document that is
+  `malformed_attestation` in string form is malformed in object
+  form for everything the handler can see. (A `__proto__` key
+  on the envelope itself is dropped by the schema library
+  before the handler runs — probed against the pinned
+  SDK/zod — and is caught only in string form.)
+- Registry values are shape-validated at startup (payload,
+  signature, signatureType) and whitespace-padded key legs are
+  rejected; badge base URL credentials are stripped along with
+  the query and fragment (m5/m6).
+
 - HTTP transport: the handler no longer pre-reads the request
   body. The raw request goes to the SDK transport; a declared
   Content-Length over 1 MB is refused with 413 before any byte is

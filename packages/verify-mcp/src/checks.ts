@@ -1,4 +1,4 @@
-import type { PublicVerifyResult } from '@fiador/verify';
+import type { PublicVerifyResult, RegistrationLookupFact } from '@fiador/verify';
 
 // The per-check breakdown for verify_attestation (SPEC 11.2): a
 // deterministic projection of the core's failure codes, fixed here so
@@ -7,14 +7,34 @@ import type { PublicVerifyResult } from '@fiador/verify';
 // core's fixed check order (shape, binding, signature, dates, replay,
 // registration).
 //
-// Honesty rule (7.5 review M5): a stage reports a substantive state
-// only when a present failure code — or the final status, which the
-// core's precedence rules make informative — PROVES that stage ran.
-// In particular, when the result is 'unknown', a lookup failure code
-// cannot by itself prove which network stage failed (the ERC-1271
-// signature check and the registration lookup both surface
-// lookup_failed / lookup_timeout), so stages the codes cannot vouch
-// for report 'not_checked' rather than a fabricated pass.
+// SPEC 11.2's mapping, restored exactly (7.5 re-review M5):
+// - signature: fail iff signature_mismatch; pass when the pipeline
+//   demonstrably cleared the signature step; not_checked when shape
+//   failed or a lookup failure makes signature success unproven.
+//   A read-only replay check after
+//   an uncertain ERC-1271 result proves replay, not signature success.
+// - expiry: expired/not_yet_valid/lifetime_invalid iff the matching
+//   code is present; valid whenever the shape step passed and no
+//   date code is present (the core evaluates dates on every
+//   post-shape path); not_checked only on shape failure.
+// - registration: registered when the lookup resolved with an
+//   entry; unregistered when it resolved null; UNKNOWN when the
+//   lookup ran and failed; not_checked only when the pipeline
+//   failed before the lookup step.
+//
+// Which stages ran is FACT, not inference (fix pass 3, D6): the
+// core records the step-6 lookup's fate on the internal result
+// (`registration`), and the server hands that fact to this
+// projection alongside the public result. An earlier version of
+// this projection inferred "the registration lookup ran" from
+// the pair (status 'unknown', evidence.rpcLatencyMs present);
+// that inference was wrong for every claim-store outcome — a
+// claim replay, a claim expiry, and a claim failure all follow a
+// completed registration lookup but carry no latency, so they
+// were misreported as not_checked. When the caller supplies no
+// fact (unit tests of this projection, older cores), only the
+// certainties remain: a verified result's lookup resolved with
+// an entry, an unregistered result's resolved null.
 export type CheckState = 'pass' | 'fail' | 'not_checked';
 
 export interface AttestationChecks {
@@ -27,38 +47,53 @@ export interface AttestationChecks {
 export function computeChecks(
   result: PublicVerifyResult,
   asserted: { subject: boolean; wallet: boolean },
+  registrationFact?: RegistrationLookupFact,
 ): AttestationChecks {
   const failures = new Set<string>(result.failures);
   const shapeFailed =
     failures.has('malformed_attestation') || failures.has('unsupported_version');
   const lookupFailed =
     failures.has('lookup_failed') || failures.has('lookup_timeout');
+  // The registration lookup ran (core-recorded fact, D6). Reaching
+  // registration at all also proves the signature stage cleared:
+  // the pipeline only gets there past it.
+  const registrationRan = registrationFact?.ran === true;
+  const notRegistered = failures.has('not_registered');
 
-  // Codes that can only be produced by stages AFTER the signature
-  // step, plus statuses whose precedence guarantees the signature was
-  // evaluated and passed (an invalid-signature document is 'invalid'
-  // with signature_mismatch, and outranks all of these).
+  // Codes that can only be produced at or after the dates step,
+  // plus statuses whose precedence guarantees the signature was
+  // evaluated and passed (an invalid-signature document is
+  // 'invalid' with signature_mismatch and outranks all of these).
+  // Under a lookup failure these are NOT evidence the signature ran
+  // (7.5 re-review M5): when the ERC-1271 check itself is what
+  // failed, the core preserves binding and date failures computed
+  // from the payload, so a date code — or a bare expired status —
+  // can accompany a signature that was never evaluated.
   const pastSignature =
     result.status === 'verified' ||
     result.status === 'unregistered' ||
-    (!lookupFailed && (
-      result.status === 'expired' ||
+    (failures.has('replay_detected') && !lookupFailed) ||
+    notRegistered;
+  const pastSignatureViaDates =
+    !lookupFailed &&
+    (result.status === 'expired' ||
       failures.has('not_yet_valid') ||
       failures.has('expired') ||
-      failures.has('attestation_lifetime_invalid')
-    )) ||
-    failures.has('replay_detected') ||
-    failures.has('not_registered');
+      failures.has('attestation_lifetime_invalid'));
   // An 'invalid' whose only failures are binding codes also proves
-  // the signature ran: the core collects binding first and continues,
-  // and had the signature failed or the network died, its code would
-  // be present too.
+  // the signature ran: the core collects binding first and
+  // continues, and had the signature failed or the network died,
+  // its code would be present too.
   const bindingOnlyInvalid =
-    result.status === 'invalid' && !shapeFailed && !lookupFailed && !pastSignature;
+    result.status === 'invalid' &&
+    !shapeFailed &&
+    !lookupFailed &&
+    !pastSignature &&
+    !pastSignatureViaDates;
 
   const signature: CheckState = failures.has('signature_mismatch')
     ? 'fail'
-    : pastSignature || bindingOnlyInvalid
+    : registrationRan || notRegistered || pastSignature || pastSignatureViaDates || bindingOnlyInvalid
       ? 'pass'
       : 'not_checked';
 
@@ -72,33 +107,33 @@ export function computeChecks(
     return 'pass';
   };
 
-  const pastDates =
-    pastSignature ||
-    failures.has('replay_detected') ||
-    failures.has('not_registered');
-  const expiry: AttestationChecks['expiry'] = failures.has('expired')
-    ? 'expired'
-    : failures.has('not_yet_valid')
-      ? 'not_yet_valid'
-      : failures.has('attestation_lifetime_invalid')
-        ? 'lifetime_invalid'
-        : shapeFailed
-          ? 'not_checked'
-          : pastDates || bindingOnlyInvalid || signature === 'pass'
-            ? 'valid'
-            : 'not_checked';
+  // Dates are evaluated on every post-shape path in the core, so
+  // expiry is a fact whenever the shape step passed: the matching
+  // code if present, 'valid' otherwise (SPEC 11.2, read literally).
+  const expiry: AttestationChecks['expiry'] = shapeFailed
+    ? 'not_checked'
+    : failures.has('expired')
+      ? 'expired'
+      : failures.has('not_yet_valid')
+        ? 'not_yet_valid'
+        : failures.has('attestation_lifetime_invalid')
+          ? 'lifetime_invalid'
+          : 'valid';
 
-  // Registration is the final stage; only a resolved lookup leaves
-  // evidence of itself in the result. An 'unknown' result cannot
-  // prove the lookup (rather than the signature check) is what
-  // failed, so it reports 'not_checked' here; the lookup failure
-  // itself is carried, precisely, in `failures`.
   const registration: AttestationChecks['registration'] =
-    result.status === 'verified'
-      ? 'registered'
-      : result.status === 'unregistered'
-        ? 'unregistered'
-        : 'not_checked';
+    registrationFact !== undefined
+      ? !registrationFact.ran
+        ? 'not_checked'
+        : registrationFact.outcome === 'registered'
+          ? 'registered'
+          : registrationFact.outcome === 'unregistered'
+            ? 'unregistered'
+            : 'unknown'
+      : result.status === 'verified'
+        ? 'registered'
+        : result.status === 'unregistered' || notRegistered
+          ? 'unregistered'
+          : 'not_checked';
 
   return {
     signature,
