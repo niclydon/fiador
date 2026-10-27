@@ -23,15 +23,15 @@ produced file or output carries a raw humanId or key material.
 
 The founding payload binds Discord application
 1561422752521396254 (Nova; the bot user ID is the same number)
-to the dedicated World Program wallet, carries the operator
-display name under the fleet's explicit opt-in, pins disclosure
+to the dedicated demo signing wallet, carries the operator
+display name under Nic's explicit opt-in, pins disclosure
 to `hash`, and runs the maximum 90-day term: issued
 2026-10-26, expiring 2027-01-24. Its canonical payload hash is
 8bfeb9f9182de3ce63cdf42bdff941277250d96089982c65f0f97761f195a031.
 
 ## Signing and verification evidence
 
-The attestation was signed with the program wallet on
+The attestation was signed with the demo signing wallet on
 2026-10-26 and verified live, through the signer's own verify
 command, against the real AgentBook contract on World Chain
 (eip155:480): status `verified` at 2026-10-26T10:10:50Z, with

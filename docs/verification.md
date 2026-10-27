@@ -4,8 +4,8 @@ Live-run evidence is recorded with dates and dependency versions. A
 live pass is a fact about a day and a dependency version, not a
 permanent label; retest on change re-runs the full set (unit,
 fixture, service, then live). Public narrative entries identify the
-dedicated program wallet by role and record methods and status without
-wallet or human-hash fragments. The signed public attestation retains
+dedicated demo signing wallet by role and record methods and status
+without wallet or human-hash fragments. The signed public attestation retains
 the wallet address required by the protocol.
 
 ## 2026-10-26 — verify core 0.1.0 and verify MCP 0.1.0
@@ -25,14 +25,14 @@ decision: @worldcoin/agentkit-core 0.2.1.
   directly with viem (same contract, same ABI), preserving the
   `unregistered` vs `unknown` distinction.
 - Live, against the real AgentBook contract on World Chain:
-  - The dedicated program wallet (registered 2026-10-26) returned
+  - The dedicated demo signing wallet (registered 2026-10-26) returned
     `verified`.
   - A known-unregistered address returned `unregistered` +
     `not_registered`.
   - A dead RPC endpoint returned `unknown` + `lookup_failed`, never
     `unregistered`.
 - Live, through the MCP server (both transports): `verify_address`
-  for the dedicated program wallet returned `verified` over stdio
+  for the dedicated demo signing wallet returned `verified` over stdio
   and streamable HTTP. Tool outputs were scanned: no raw humanId,
   no `humanId` key, and no full address.
 
@@ -40,7 +40,7 @@ decision: @worldcoin/agentkit-core 0.2.1.
 
 - Signer CLI (`@fiador/signer`, PR #4, merge 63fee3b) signed the
   founding attestation for the Nova Discord application using the
-  dedicated program wallet. It was issued 2026-10-26 and expires
+  dedicated demo signing wallet. It was issued 2026-10-26 and expires
   2027-01-24.
 - Published in PR #6 (merge 6a11c07): `registry/registry.json`
   carries the founding entry; `verify-page/` hosts the attestation.
