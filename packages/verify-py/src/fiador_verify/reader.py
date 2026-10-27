@@ -37,6 +37,14 @@ class RpcError(Exception):
     any exception) on failure; None is reserved for 'no entry'."""
 
 
+class RpcRevert(RpcError):
+    """The contract definitively rejected an eth_call."""
+
+
+class RpcTimeout(RpcError):
+    """The RPC transport reached its own deadline."""
+
+
 # RPC endpoint policy (7.5 review M17): the configured RPC is the
 # trust oracle for registration answers — whatever it returns IS the
 # lookup result — so a plaintext endpoint is an integrity hole, not a
@@ -98,10 +106,16 @@ class JsonRpcClient:
                 )
             response.raise_for_status()
             body = response.json()
+        except httpx.TimeoutException as exc:
+            raise RpcTimeout(f"JSON-RPC {method} timed out") from exc
         except Exception as exc:
-            raise RpcError(f"JSON-RPC {method} to {self.url} failed: {exc}") from exc
+            raise RpcError(f"JSON-RPC {method} failed") from exc
         if isinstance(body, dict) and body.get("error") is not None:
-            raise RpcError(f"JSON-RPC {method} returned an error: {body['error']}")
+            error = body["error"]
+            message = error.get("message", "") if isinstance(error, dict) else ""
+            if method == "eth_call" and isinstance(message, str) and message.lower().startswith("execution reverted"):
+                raise RpcRevert("JSON-RPC eth_call reverted")
+            raise RpcError(f"JSON-RPC {method} returned an error")
         if not isinstance(body, dict) or "result" not in body:
             raise RpcError(f"JSON-RPC {method} returned a malformed response")
         return body["result"]

@@ -102,11 +102,13 @@ class StubRpc:
         chain_id: str = "0x1e0",  # 480
         eth_call_result: str | None = None,
         eth_call_error: bool = False,
+        eth_call_status: int | None = None,
         hang_eth_call: bool = False,
     ):
         self.chain_id = chain_id
         self.eth_call_result = eth_call_result
         self.eth_call_error = eth_call_error
+        self.eth_call_status = eth_call_status
         self.hang_eth_call = hang_eth_call
         self.eth_calls = 0
         self.chain_id_calls = 0
@@ -121,6 +123,9 @@ class StubRpc:
                     outer.chain_id_calls += 1
                 if method == "eth_call":
                     outer.eth_calls += 1
+                    if outer.eth_call_status is not None:
+                        self.send_error(outer.eth_call_status)
+                        return
                     if outer.hang_eth_call:
                         # Never respond: the client must bound this
                         # with its own deadline, not ours.

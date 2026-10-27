@@ -201,13 +201,19 @@ class AgentBookReader(Protocol):
         ...
 
 
+NonceClaimResult = Literal["claimed", "replay", "expired"]
+
+
 class NonceStore(Protocol):
-    def claim(self, nonce: str, wallet: str, expires_at: str) -> bool:
-        """A single ATOMIC claim (7.5 review B2): returns True when this
-        call newly recorded the nonce for the wallet, False when the
-        nonce was already claimed (a replay). The previous has/add pair
-        had a check-then-set race between the two calls; there is no
-        safe way to compose them, so the contract is one operation."""
+    def has(self, nonce: str, wallet: str) -> bool:
+        """Strongly consistent read of active claims, including for an
+        expired attestation. A stale false can lose replay precedence."""
+        ...
+
+    def claim(self, nonce: str, wallet: str, expires_at: str) -> NonceClaimResult:
+        """Atomically check an active claim first, then the store's own
+        clock. Record only if the nonce is fresh and expires_at is
+        future. Exactly one concurrent caller may receive 'claimed'."""
         ...
 
 

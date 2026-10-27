@@ -48,7 +48,8 @@ print(public.status, public.human_hash)    # 'verified', '7bf457…'…
 
 `verify_attestation(attestation, ...)` checks a signed operator
 attestation in a fixed order (shape, subject/wallet binding,
-signature, dates, replay, registration) and returns the same
+signature, dates, read-only replay, registration, atomic nonce claim)
+and returns the same
 `VerifyResult`. `resolve_status(subject)` composes the two for
 address, attestation, and resolver-backed attested-subject inputs.
 `verify_signed_message(message, signature, signature_type,
@@ -70,11 +71,14 @@ transport failure), `rpc_url`, `contract_address`, `timeout_ms`
 `clock_skew_ms` (default 60_000; applies to `issuedAt` only, never
 to expiry), and `include_raw_human_id` (default False).
 
-A nonce store passed to `verify_attestation` implements a single
-atomic `claim(nonce, wallet, expires_at) -> bool` (True = newly
-claimed, False = replay). Replay is checked before the expired
-return, and a store whose `claim` raises fails closed as `unknown`
-+ `lookup_failed`. The configured RPC is the trust oracle for
+A nonce store passed to `verify_attestation` implements a strongly
+consistent `has(nonce, wallet) -> bool` read and an atomic
+`claim(nonce, wallet, expires_at) -> 'claimed' | 'replay' | 'expired'`.
+The store checks its own clock at the write point and never records a
+nonce after `expires_at`. Replay is checked before expiry; a fresh
+nonce is claimed only after registration succeeds, or when the caller
+explicitly disables that check. Store failures return `unknown` +
+`lookup_failed`. The configured RPC is the trust oracle for
 registration answers: non-https RPC URLs are rejected at
 construction, except loopback endpoints (`localhost`, `127.0.0.1`,
 `::1`) where plaintext never leaves the machine.

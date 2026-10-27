@@ -17,9 +17,8 @@ re-order integer-like keys numerically ("1","2","10" instead of
 "1","10","2"), and an ``extra`` key like ``__proto__`` must be bound
 by the signature as ordinary data — in Python it is, provided the
 entries are emitted explicitly in sorted order. Sorting is by the
-keys' UTF-8 encodings, which is Unicode code point order (Python's
-native ``str`` ordering is the same order; the explicit byte key
-pins the intent).
+keys' UTF-8 encodings; escaped lone UTF-16 surrogates use
+TextEncoder's replacement-character ordering.
 """
 
 from __future__ import annotations
@@ -129,8 +128,24 @@ def _is_parseable_iso_z(value: Any) -> bool:
 def _json_string(value: str) -> str:
     # Per-value serialisation only, where key order cannot arise.
     # ensure_ascii=False matches JSON.stringify: non-ASCII is emitted
-    # raw (UTF-8).
-    return json.dumps(value, ensure_ascii=False)
+    # raw (UTF-8). JavaScript strings are UTF-16: a valid surrogate
+    # pair becomes one scalar, while a lone surrogate is escaped by
+    # JSON.stringify rather than emitted as invalid UTF-8.
+    normalized = value.encode("utf-16", "surrogatepass").decode(
+        "utf-16", "surrogatepass"
+    )
+    encoded = json.dumps(normalized, ensure_ascii=False)
+    return re.sub(
+        r"[\ud800-\udfff]",
+        lambda m: f"\\u{ord(m.group()):04x}",
+        encoded,
+    )
+
+
+def _extra_sort_key(key: str) -> bytes:
+    # TextEncoder replaces lone UTF-16 surrogates with U+FFFD. Keep
+    # that ordering when an escaped surrogate appears in a JSON key.
+    return key.encode("utf-16", "surrogatepass").decode("utf-16", "replace").encode("utf-8")
 
 
 def canonical_attestation_message(payload: AttestationPayloadV1 | Mapping[str, Any]) -> str:
@@ -159,7 +174,7 @@ def canonical_attestation_message(payload: AttestationPayloadV1 | Mapping[str, A
     parts.append(f'"nonce":{_json_string(wire["nonce"])}')
     extra = wire.get("extra")
     if extra is not None:
-        entries = sorted(extra.items(), key=lambda kv: kv[0].encode("utf-8"))
+        entries = sorted(extra.items(), key=lambda kv: _extra_sort_key(kv[0]))
         inner = ",".join(f"{_json_string(k)}:{_json_string(v)}" for k, v in entries)
         parts.append(f'"extra":{{{inner}}}')
     return "{" + ",".join(parts) + "}"
@@ -215,11 +230,11 @@ def validate_payload(value: Any) -> tuple[Optional[AttestationPayloadV1], list[s
     except ValueError:
         return malformed
 
-    if value.get("attestationUrl") is not None and (
+    if "attestationUrl" in value and (
         not isinstance(value["attestationUrl"], str) or len(value["attestationUrl"]) > 2048
     ):
         return malformed
-    if value.get("operatorDisplayName") is not None and (
+    if "operatorDisplayName" in value and (
         not isinstance(value["operatorDisplayName"], str)
         or len(value["operatorDisplayName"]) > 128
     ):
@@ -239,12 +254,12 @@ def validate_payload(value: Any) -> tuple[Optional[AttestationPayloadV1], list[s
         return malformed
 
     extra: Optional[dict[str, str]] = None
-    if value.get("extra") is not None:
+    if "extra" in value:
         if not _is_plain_object(value["extra"]):
             return malformed
         extra = {}
         for k, v in value["extra"].items():
-            if not isinstance(v, str):
+            if not isinstance(k, str) or not isinstance(v, str):
                 return malformed
             extra[k] = v
 

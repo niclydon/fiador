@@ -34,6 +34,8 @@ from .reader import (
     DEFAULT_RPC_URL,
     JsonRpcClient,
     LiveReader,
+    RpcRevert,
+    RpcTimeout,
     assert_rpc_url_allowed,
 )
 from .types import (
@@ -221,7 +223,7 @@ class Verifier:
             if not worker.is_alive():
                 break
         if "error" in box:
-            return "failed", None
+            return "failed", box["error"]
         return "value", box.get("value")
 
     def _evidence(self, latency_ms: Optional[int] = None) -> CheckEvidence:
@@ -282,12 +284,7 @@ class Verifier:
         timeout_ms. Three outcomes, honestly distinguished: the
         contract answered (match/mismatch), the read itself reverted
         or returned a non-magic value (mismatch — fail closed on the
-        claim), or the network could not answer at all (unknown).
-
-        Adaptation: the chain-identity call and the eth_call share
-        one deadline budget here (the TS core races each separately,
-        so its worst case is two budgets); the outcomes and codes are
-        identical."""
+        claim), or the network could not answer at all (unknown)."""
 
         def attempt() -> tuple[str, Optional[bool]]:
             # The configured RPC is the trust oracle for this answer
@@ -303,16 +300,16 @@ class Verifier:
             calldata = _is_valid_signature_calldata(eip191_digest(message), sig_bytes)
             try:
                 result = self._rpc.eth_call(wallet, calldata)
-            except Exception:
-                # A wallet that is not a contract, or a reverting
-                # validator, is not a valid ERC-1271 signature. Fail
-                # closed on the claim (SPEC 3.0).
+            except RpcRevert:
+                # A definitive contract revert rejects this signature.
                 return "mismatch", None
             ok = isinstance(result, str) and result.lower()[:10] == ERC1271_MAGIC
             return "value", ok
 
         kind, value = self._deadline_call(attempt, signal)
         if kind == "timeout":
+            return "unknown", "lookup_timeout"
+        if kind == "failed" and isinstance(value, RpcTimeout):
             return "unknown", "lookup_timeout"
         if kind != "value":
             return "unknown", "lookup_failed"
@@ -430,7 +427,10 @@ class Verifier:
         # not pre-empt an expiry or discard a binding failure (7.5
         # review B1). The skew applies to issued_at only, never to
         # expiry (SPEC 3.3, as built in TS).
-        now_ms = int(_as_utc(self._now()).timestamp() * 1000)
+        def current_ms() -> int:
+            return int(_as_utc(self._now()).timestamp() * 1000)
+
+        now_ms = current_ms()
         issued_ms = parse_iso8601_z_ms(payload.issued_at)
         expires_ms = parse_iso8601_z_ms(payload.expires_at)
         lifetime_invalid = (
@@ -465,24 +465,17 @@ class Verifier:
         if invalid_failures:
             return finish("invalid")
 
-        # Step 5, replay (SPEC 3.3), evaluated BEFORE the expired
-        # return (7.5 review M1): 'invalid' outranks 'expired', so a
-        # nonce that was already claimed makes an otherwise-expired
-        # attestation invalid, not expired. The store contract is a
-        # single atomic claim (B2). A store that throws is caller
-        # infrastructure failing: fail closed as 'unknown' +
-        # lookup_failed (M2), except that an established expiry still
-        # outranks it.
+        # Step 5, read-only replay check before expiry. This keeps an
+        # existing claim's precedence without consuming a fresh nonce.
+        # The atomic claim after registration decides concurrent races.
         if opts.nonce_store is not None:
             try:
-                claimed = opts.nonce_store.claim(
-                    payload.nonce, wallet, payload.expires_at
-                )
+                replay = opts.nonce_store.has(payload.nonce, wallet)
             except Exception:
                 if expired:
                     return finish("expired", [*failures, "lookup_failed"])
                 return finish("unknown", ["lookup_failed"])
-            if not claimed:
+            if replay:
                 return finish("invalid", [*failures, "replay_detected"])
 
         if expired:
@@ -490,23 +483,40 @@ class Verifier:
             # precedence), so the network check is not run.
             return finish("expired")
 
-        # Step 6, registration.
-        if not opts.check_registration:
-            return finish("verified", [])
-        outcome = self._lookup(wallet, opts.signal)
-        if outcome.state == "unknown":
+        # Step 6, registration. Only a successful lookup (or an explicit
+        # check_registration=False) may consume the nonce. Recheck the
+        # verifier clock because the lookup can cross expires_at.
+        outcome = self._lookup(wallet, opts.signal) if opts.check_registration else None
+        if expires_ms <= current_ms():
+            return finish("expired", ["expired"])
+        if outcome is not None and outcome.state == "unknown":
             return finish(
                 "unknown",
                 [outcome.code or "lookup_failed"],
                 latency_ms=outcome.latency_ms,
             )
-        if outcome.state == "unregistered":
+        if outcome is not None and outcome.state == "unregistered":
             # A valid signature from an unregistered wallet attests nothing.
             return finish(
                 "unregistered", ["not_registered"], latency_ms=outcome.latency_ms
             )
+        if opts.nonce_store is not None:
+            try:
+                claim = opts.nonce_store.claim(payload.nonce, wallet, payload.expires_at)
+            except Exception:
+                return finish("unknown", ["lookup_failed"])
+            if claim == "replay":
+                return finish("invalid", ["replay_detected"])
+            if claim == "expired":
+                return finish("expired", ["expired"])
+            if claim != "claimed":
+                return finish("unknown", ["lookup_failed"])
+        if expires_ms <= current_ms():
+            return finish("expired", ["expired"])
         return finish(
-            "verified", [], human_id=outcome.human_id, latency_ms=outcome.latency_ms
+            "verified", [],
+            human_id=outcome.human_id if outcome is not None else None,
+            latency_ms=outcome.latency_ms if outcome is not None else None,
         )
 
     def resolve_status(self, subject: Any, signal: Any = None) -> VerifyResult:

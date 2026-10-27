@@ -12,6 +12,7 @@ import hashlib
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any
 
@@ -273,22 +274,30 @@ def test_wrong_expected_subject_and_wallet(vectors, fixed_now):
 
 
 class MemoryNonceStore:
-    """The atomic claim() contract (7.5 review B2): one operation,
-    True when this call newly recorded the (wallet, nonce) pair."""
+    """Strongly consistent active-claim read plus atomic final claim."""
 
     def __init__(self, now):
         self._records: dict[str, str] = {}
         self._now = now
+        self._lock = threading.Lock()
         self.claims = 0
 
+    def has(self, nonce, wallet):
+        with self._lock:
+            exp = self._records.get(f"{wallet}:{nonce}")
+            return exp is not None and parse_z(exp) > self._now
+
     def claim(self, nonce, wallet, expires_at):
-        self.claims += 1
-        key = f"{wallet}:{nonce}"
-        exp = self._records.get(key)
-        if exp is not None and parse_z(exp) > self._now:
-            return False
-        self._records[key] = expires_at
-        return True
+        with self._lock:
+            self.claims += 1
+            key = f"{wallet}:{nonce}"
+            exp = self._records.get(key)
+            if exp is not None and parse_z(exp) > self._now:
+                return "replay"
+            if parse_z(expires_at) <= self._now:
+                return "expired"
+            self._records[key] = expires_at
+            return "claimed"
 
 
 def test_replay_detected_second_presentation_only(vectors, fixed_now):
@@ -325,6 +334,24 @@ def test_malformed_attestations_return_results(vectors, fixed_now):
         result = verifier.verify_attestation(att_input)
         assert result.status == "invalid", (att_input, code)
         assert code in result.failures
+
+
+def test_present_null_optional_fields_are_malformed(vectors, fixed_now):
+    verifier = make_verifier(vectors, fixed_now)
+    for field in ("attestationUrl", "operatorDisplayName", "extra"):
+        att = copy.deepcopy(vectors["attestations"]["valid"])
+        att["payload"][field] = None
+        result = verifier.verify_attestation(att)
+        assert result.status == "invalid", field
+        assert result.failures == ["malformed_attestation"], field
+
+
+def test_extra_with_non_string_key_is_malformed_not_an_exception(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["extra"][1] = "one"
+    result = make_verifier(vectors, fixed_now).verify_attestation(att)
+    assert result.status == "invalid"
+    assert result.failures == ["malformed_attestation"]
 
 
 def test_attestation_racing_expiry_is_expired(vectors, fixed_now):
@@ -427,6 +454,47 @@ def test_erc1271_on_wrong_chain_is_unknown_before_any_call(vectors, fixed_now):
     assert result.status == "unknown"
     assert result.failures == ["lookup_failed"]
     assert rpc.eth_calls == 0
+
+
+def test_erc1271_http_503_is_unknown_not_bad_signature(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["agentWalletAddress"] = CONTRACT_WALLET
+    att["signatureType"] = "eip1271"
+    att["signature"] = "0x" + "11" * 32
+    reader = StaticReader({CONTRACT_WALLET: HUMAN_1}, source="live")
+    with StubRpc(eth_call_status=503) as rpc:
+        verifier = make_verifier(vectors, fixed_now, reader=reader, rpc_url=rpc.url)
+        result = verifier.verify_attestation(att)
+        signed = verifier.verify_signed_message(
+            "statement", att["signature"], "erc1271", expected_address=CONTRACT_WALLET
+        )
+    assert result.status == "unknown"
+    assert result.failures == ["lookup_failed"]
+    assert signed.verified is False
+    assert signed.failures == ["lookup_failed"]
+    assert rpc.eth_calls == 2
+
+
+def test_erc1271_contract_revert_and_nonmagic_are_mismatches(vectors, fixed_now):
+    for rpc_options in ({"eth_call_error": True}, {"eth_call_result": "0x" + "00" * 32}):
+        with StubRpc(**rpc_options) as rpc:
+            result = make_verifier(vectors, fixed_now, rpc_url=rpc.url).verify_signed_message(
+                "statement", "0x" + "11" * 32, "erc1271",
+                expected_address=CONTRACT_WALLET,
+            )
+        assert result.verified is False
+        assert result.failures == ["signature_mismatch"]
+
+
+def test_erc1271_http_503_preserves_expiry_precedence(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["expired"])
+    att["payload"]["agentWalletAddress"] = CONTRACT_WALLET
+    att["signatureType"] = "eip1271"
+    att["signature"] = "0x" + "11" * 32
+    with StubRpc(eth_call_status=503) as rpc:
+        result = make_verifier(vectors, fixed_now, rpc_url=rpc.url).verify_attestation(att)
+    assert result.status == "expired"
+    assert result.failures == ["expired", "lookup_failed"]
 
 
 # -- raw humanId discipline (security property) ------------------------------
@@ -759,10 +827,13 @@ def test_claim_is_called_exactly_once_on_the_success_path(vectors, fixed_now):
     assert store.claims == 1
 
 
-def test_store_claim_false_on_first_presentation_is_replay(vectors, fixed_now):
+def test_store_claim_replay_on_first_presentation_is_replay(vectors, fixed_now):
     class AlreadyClaimed:
-        def claim(self, nonce, wallet, expires_at):
+        def has(self, nonce, wallet):
             return False
+
+        def claim(self, nonce, wallet, expires_at):
+            return "replay"
 
     result = make_verifier(vectors, fixed_now).verify_attestation(
         attestation_from_dict(vectors["attestations"]["valid"]),
@@ -774,8 +845,11 @@ def test_store_claim_false_on_first_presentation_is_replay(vectors, fixed_now):
 
 def test_replay_outranks_expiry(vectors, fixed_now):
     class AlreadyClaimed:
+        def has(self, nonce, wallet):
+            return True
+
         def claim(self, nonce, wallet, expires_at):
-            return False
+            raise AssertionError("expired document must not be claimed")
 
     result = make_verifier(vectors, fixed_now).verify_attestation(
         attestation_from_dict(vectors["attestations"]["expired"]),
@@ -788,6 +862,9 @@ def test_replay_outranks_expiry(vectors, fixed_now):
 
 def test_throwing_claim_store_fails_closed(vectors, fixed_now):
     class ThrowingStore:
+        def has(self, nonce, wallet):
+            return False
+
         def claim(self, nonce, wallet, expires_at):
             raise RuntimeError("store unavailable")
 
@@ -800,10 +877,13 @@ def test_throwing_claim_store_fails_closed(vectors, fixed_now):
     assert result.failures == ["lookup_failed"]
 
 
-def test_throwing_claim_store_still_yields_to_established_expiry(vectors, fixed_now):
+def test_throwing_replay_read_still_yields_to_established_expiry(vectors, fixed_now):
     class ThrowingStore:
-        def claim(self, nonce, wallet, expires_at):
+        def has(self, nonce, wallet):
             raise RuntimeError("store unavailable")
+
+        def claim(self, nonce, wallet, expires_at):
+            raise AssertionError("expired document must not be claimed")
 
     result = make_verifier(vectors, fixed_now).verify_attestation(
         attestation_from_dict(vectors["attestations"]["expired"]),
@@ -811,6 +891,154 @@ def test_throwing_claim_store_still_yields_to_established_expiry(vectors, fixed_
     )
     assert result.status == "expired"
     assert "lookup_failed" in result.failures
+
+
+def test_failing_replay_read_never_claims(vectors, fixed_now):
+    class FailingReadStore:
+        claims = 0
+
+        def has(self, nonce, wallet):
+            raise RuntimeError("store unavailable")
+
+        def claim(self, nonce, wallet, expires_at):
+            self.claims += 1
+            return "claimed"
+
+    store = FailingReadStore()
+    result = make_verifier(vectors, fixed_now).verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"]), nonce_store=store
+    )
+    assert result.status == "unknown"
+    assert result.failures == ["lookup_failed"]
+    assert store.claims == 0
+
+
+def test_nonce_not_claimed_for_expired_unregistered_or_unknown(vectors, fixed_now):
+    store = MemoryNonceStore(fixed_now)
+    valid = attestation_from_dict(vectors["attestations"]["valid"])
+    expired = attestation_from_dict(vectors["attestations"]["expired"])
+    assert make_verifier(vectors, fixed_now).verify_attestation(
+        expired, nonce_store=store
+    ).status == "expired"
+    assert make_verifier(
+        vectors, fixed_now, reader=StaticReader({A: None}, source="live")
+    ).verify_attestation(valid, nonce_store=store).status == "unregistered"
+    assert make_verifier(vectors, fixed_now, reader=ThrowingReader()).verify_attestation(
+        valid, nonce_store=store
+    ).status == "unknown"
+    assert store.claims == 0
+    assert store.has(valid.payload.nonce, A) is False
+
+
+def test_nonce_claim_follows_replay_read_without_registration(vectors, fixed_now):
+    calls = []
+
+    class Store:
+        def has(self, nonce, wallet):
+            calls.append("has")
+            return False
+
+        def claim(self, nonce, wallet, expires_at):
+            calls.append("claim")
+            return "claimed"
+
+    result = make_verifier(vectors, fixed_now, reader=ThrowingReader()).verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"]),
+        nonce_store=Store(), check_registration=False,
+    )
+    assert result.status == "verified"
+    assert calls == ["has", "claim"]
+
+
+def test_two_concurrent_presentations_only_one_claims(vectors, fixed_now):
+    store = MemoryNonceStore(fixed_now)
+    barrier = threading.Barrier(2)
+    original_has = store.has
+
+    def concurrent_has(nonce, wallet):
+        result = original_has(nonce, wallet)
+        barrier.wait(timeout=10)
+        return result
+
+    store.has = concurrent_has
+    verifier = make_verifier(vectors, fixed_now)
+    att = attestation_from_dict(vectors["attestations"]["valid"])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a = pool.submit(verifier.verify_attestation, att, nonce_store=store)
+        b = pool.submit(verifier.verify_attestation, att, nonce_store=store)
+        results = [a.result(timeout=20), b.result(timeout=20)]
+    assert sorted(result.status for result in results) == ["invalid", "verified"]
+    assert next(result for result in results if result.status == "invalid").failures == [
+        "replay_detected"
+    ]
+
+
+def test_registration_crossing_expiry_does_not_claim(vectors, fixed_now):
+    expires_at = parse_z(vectors["attestations"]["valid"]["payload"]["expiresAt"])
+    clock = [fixed_now]
+
+    class CrossingReader:
+        source = "live"
+
+        def lookup_human(self, address):
+            clock[0] = expires_at + timedelta(milliseconds=1)
+            return HUMAN_1
+
+    store = MemoryNonceStore(fixed_now)
+    verifier = make_verifier(vectors, fixed_now, now=lambda: clock[0], reader=CrossingReader())
+    result = verifier.verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"]), nonce_store=store
+    )
+    assert result.status == "expired"
+    assert result.failures == ["expired"]
+    assert store.claims == 0
+
+
+def test_store_clock_expiry_during_claim_records_nothing(vectors, fixed_now):
+    store_clock = parse_z(vectors["attestations"]["valid"]["payload"]["expiresAt"]) + timedelta(
+        milliseconds=1
+    )
+
+    class ExpiringStore:
+        claims = 0
+
+        def has(self, nonce, wallet):
+            return False
+
+        def claim(self, nonce, wallet, expires_at):
+            if parse_z(expires_at) <= store_clock:
+                return "expired"
+            self.claims += 1
+            return "claimed"
+
+    store = ExpiringStore()
+    result = make_verifier(vectors, fixed_now).verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"]), nonce_store=store
+    )
+    assert result.status == "expired"
+    assert result.failures == ["expired"]
+    assert store.claims == 0
+
+
+def test_claim_crossing_expiry_cannot_return_verified(vectors, fixed_now):
+    expires_at = parse_z(vectors["attestations"]["valid"]["payload"]["expiresAt"])
+    clock = [fixed_now]
+
+    class CrossingStore:
+        def has(self, nonce, wallet):
+            return False
+
+        def claim(self, nonce, wallet, expires_at):
+            assert parse_z(expires_at) > clock[0]
+            clock[0] = parse_z(expires_at) + timedelta(milliseconds=1)
+            return "claimed"
+
+    verifier = make_verifier(vectors, fixed_now, now=lambda: clock[0])
+    result = verifier.verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"]), nonce_store=CrossingStore()
+    )
+    assert result.status == "expired"
+    assert result.failures == ["expired"]
 
 
 # -- 7.5 regressions: guarded collaborators (M3/M12/m1) ---------------------------

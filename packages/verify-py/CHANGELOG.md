@@ -12,14 +12,15 @@ version now tracks the TS core's.)
 
 Breaking:
 
-- The nonce store contract is now a single atomic
-  `claim(nonce, wallet, expires_at) -> bool` (True = newly claimed,
-  False = replay), replacing the `has`/`add` pair and its
-  check-then-set race (B2). Replay is now evaluated before the
-  expired return, so a claimed nonce on an expired attestation
-  reports `invalid` + `replay_detected` (M1). A store whose `claim`
-  raises fails closed as `unknown` + `lookup_failed` instead of
-  propagating out of `verify_attestation` (M2).
+- The nonce store contract is now a strongly consistent read-only
+  `has(nonce, wallet) -> bool` and an atomic
+  `claim(nonce, wallet, expires_at) -> 'claimed' | 'replay' | 'expired'`.
+  The store checks its own clock at the write point, never records
+  after expiry, and returns one successful claim for concurrent
+  presentations. Replay still outranks expiry; a fresh nonce is not
+  consumed by expired, unregistered, or uncertain checks. Store
+  failures return `unknown` + `lookup_failed` except when expiry
+  already determines the result.
 - `attestation_lifetime_invalid` is a failure code of its own,
   split out of `malformed_attestation` (M6). Consumers matching on
   the old code for over-lifetime documents must match the new one.
@@ -32,12 +33,15 @@ Fixes:
   65-byte gate now applies to `eip191` only), and runs under the
   same deadline/abort race as the AgentBook lookup, so a hanging
   `eth_call` returns `unknown` + `lookup_timeout` at `timeout_ms`
-  instead of hanging (B1). A signature-step network failure no
-  longer discards binding failures or pre-empts an established
-  expiry.
+  instead of hanging (B1). A same-chain HTTP failure returns
+  `unknown` + `lookup_failed`; a definite contract revert or a
+  non-magic answer is a signature mismatch. A signature-step network
+  failure no longer discards binding failures or pre-empts an
+  established expiry.
 - The attestation envelope and subject objects are closed: keys
   outside `{payload, signature, signatureType}` and `{type, id}`
-  are `malformed_attestation` (B3).
+  are `malformed_attestation` (B3). Present optional fields set to
+  null are malformed, as in the TypeScript verifier.
 - Canonical form: the message is assembled field by field from
   `extra` entries sorted by UTF-8 byte order, so integer-like keys
   order lexicographically ("1","10","2") and a signed `__proto__`
@@ -45,7 +49,8 @@ Fixes:
   pre-existing fixture vectors keep byte-identical canonical
   messages, proven by signature recovery over the regenerated
   vectors (which add `extraProtoKey`, `extraIntegerKeys`, and
-  `extraAstralKeys`).
+  `extraAstralKeys`). Escaped lone UTF-16 surrogates and valid
+  surrogate pairs now follow JavaScript's JSON.stringify behavior.
 - Strict calendar validation for `issued_at`/`expires_at`:
   impossible dates (2026-02-30) are malformed instead of being
   rolled over (M9).
@@ -66,10 +71,10 @@ Fixes:
   contract-address error no longer interpolates the value (M14).
 
 Adaptations (no verdict changes): the ERC-1271 chain-identity call
-and `eth_call` share one deadline budget (the TS core races each
-separately); `to_public_verify_result` already enumerated
-`agent_book`'s fields rather than copying wholesale, and still
-does (M13, verified by test rather than changed).
+and `eth_call` share one deadline budget;
+`to_public_verify_result` already enumerated `agent_book`'s fields
+rather than copying wholesale, and still does (M13, verified by test
+rather than changed).
 
 ## 0.1.0 — 2026-10-26
 

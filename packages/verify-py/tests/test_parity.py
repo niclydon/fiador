@@ -51,6 +51,7 @@ def test_vectors_are_the_shared_synthetic_set(vectors: dict[str, Any]):
     assert "SYNTHETIC" in vectors["note"]
     assert len(vectors["lookups"]) == 4
     assert len(vectors["attestations"]) == 9
+    assert len(vectors["signedMessages"]) == 1
     assert len(vectors["humans"]) == 2
 
 
@@ -142,6 +143,23 @@ def test_canonical_message_pathological_extra_shapes(vectors: dict[str, Any]):
     assert astral.index("\ue000") < astral.index("\U00020000")
 
 
+def test_canonical_message_matches_json_stringify_for_surrogates(vectors: dict[str, Any]):
+    payload = payload_from_dict(vectors["attestations"]["valid"]["payload"])
+    payload.extra = {
+        "\U00020000": "astral",
+        "\ud800": "lone",
+        "\ue000": "bmp",
+    }
+    message = canonical_attestation_message(payload)
+    assert '"extra":{"\ue000":"bmp","\\ud800":"lone","\U00020000":"astral"}' in message
+    assert "\ud800" not in message
+
+    # JavaScript stores astral characters as UTF-16 surrogate pairs,
+    # but JSON.stringify emits the scalar character.
+    payload.extra = {"\ud83d\ude00": "smile"}
+    assert '"extra":{"😀":"smile"}' in canonical_attestation_message(payload)
+
+
 def test_valid_disclosure_none_strips_hash_publicly_only(vectors: dict[str, Any], fixed_now):
     verifier = make_verifier(vectors, fixed_now)
     internal = verifier.verify_attestation(
@@ -182,7 +200,7 @@ def test_signed_message_outcomes_for_every_shared_vector(vectors: dict[str, Any]
     failures. Mirrors the TS suite's use of the same vector
     (packages/verify-ts/test/verify.test.ts)."""
     verifier = make_verifier(vectors, fixed_now)
-    for name, vector in vectors.get("signedMessages", {}).items():
+    for name, vector in vectors["signedMessages"].items():
         # Fixture sanity, as in the TS suite: the vector's signer is
         # the wallet recorded under the same name.
         assert vector["signer"] == vectors["wallets"][name], name
