@@ -159,17 +159,61 @@ def test_reader_throw_is_unknown_never_unregistered(vectors, fixed_now):
 
 
 def test_hanging_reader_times_out(vectors, fixed_now):
+    release = threading.Event()
+
     class HangingReader:
         source = "live"
 
         def lookup_human(self, address):
-            threading.Event().wait(30)
+            release.wait(30)
             return None
 
     verifier = make_verifier(vectors, fixed_now, reader=HangingReader(), timeout_ms=40)
-    result = verifier.verify_address(A)
+    try:
+        result = verifier.verify_address(A)
+    finally:
+        release.set()
     assert result.status == "unknown"
     assert result.failures == ["lookup_timeout"]
+
+
+def test_hung_collaborators_have_process_wide_capacity_bound(vectors, fixed_now):
+    release = threading.Event()
+    starts = 0
+    guard = threading.Lock()
+
+    class HangingReader:
+        source = "live"
+
+        def lookup_human(self, address):
+            nonlocal starts
+            with guard:
+                starts += 1
+            release.wait(30)
+            return None
+
+    verifier = make_verifier(vectors, fixed_now, reader=HangingReader(), timeout_ms=2)
+    started_at = time.monotonic()
+    try:
+        results = [verifier.verify_address(A) for _ in range(25)]
+        assert time.monotonic() - started_at < 1
+        assert all(result.status == "unknown" for result in results)
+        assert all(result.failures in (["lookup_timeout"], ["lookup_failed"]) for result in results)
+        assert any(result.failures == ["lookup_failed"] for result in results)
+        assert starts <= 8
+    finally:
+        release.set()
+
+    # Slots are released by the underlying work, not by the callers'
+    # timeouts. Once those calls finish, a new lookup can proceed.
+    healthy = make_verifier(vectors, fixed_now, timeout_ms=100)
+    until = time.monotonic() + 2
+    while time.monotonic() < until:
+        if healthy.verify_address(A).status == "verified":
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("deadline capacity did not recover after readers completed")
 
 
 def test_caller_abort_is_lookup_failed(vectors, fixed_now):
@@ -1045,17 +1089,22 @@ def test_claim_crossing_expiry_cannot_return_verified(vectors, fixed_now):
 
 
 def test_hanging_resolver_obeys_the_deadline(vectors, fixed_now):
+    release = threading.Event()
+
     def hanging(subject):
-        threading.Event().wait(30)
+        release.wait(30)
         return None
 
     verifier = make_verifier(vectors, fixed_now, timeout_ms=40)
-    result = verifier.resolve_status(
-        AttestedSubject(
-            subject=Subject(type="discord_application", id="555555555555555555"),
-            resolve_attestation=hanging,
+    try:
+        result = verifier.resolve_status(
+            AttestedSubject(
+                subject=Subject(type="discord_application", id="555555555555555555"),
+                resolve_attestation=hanging,
+            )
         )
-    )
+    finally:
+        release.set()
     assert result.status == "unknown"
     assert result.failures == ["lookup_timeout"]
 

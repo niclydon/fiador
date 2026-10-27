@@ -58,6 +58,8 @@ ERC1271_MAGIC = "0x1626ba7e"
 MAX_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000
 _IS_VALID_SIGNATURE_SELECTOR = "0x1626ba7e"  # isValidSignature(bytes32,bytes)
 _ADDRESS_SHAPE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_MAX_INFLIGHT_DEADLINE_CALLS = 8
+_DEADLINE_SLOTS = threading.BoundedSemaphore(_MAX_INFLIGHT_DEADLINE_CALLS)
 
 
 def eip191_digest(message: str) -> bytes:
@@ -199,9 +201,19 @@ class Verifier:
         function whose contract is 'returns a result'.
 
         A Python parity adaptation: the operation runs on a daemon
-        thread so a hung collaborator cannot hang the caller (the TS
-        core races promises the same way). Returns (kind, value) with
-        kind 'value' | 'timeout' | 'aborted' | 'failed'."""
+        thread so a hung collaborator cannot hang the caller. A
+        process-wide capacity bound prevents timed-out collaborators
+        from spawning unbounded threads; their slot stays occupied
+        until the underlying call actually ends. Saturation fails
+        closed immediately. Returns (kind, value) with kind 'value' |
+        'timeout' | 'aborted' | 'failed'."""
+        if signal is not None and signal.is_set():
+            return "aborted", None
+        deadline = time.monotonic() + self._timeout_ms / 1000.0
+        if self._timeout_ms <= 0:
+            return "timeout", None
+        if not _DEADLINE_SLOTS.acquire(blocking=False):
+            return "failed", RuntimeError("deadline worker capacity exhausted")
         box: dict[str, Any] = {}
 
         def run() -> None:
@@ -209,10 +221,15 @@ class Verifier:
                 box["value"] = start()
             except BaseException as exc:  # collaborator contract: raise on failure
                 box["error"] = exc
+            finally:
+                _DEADLINE_SLOTS.release()
 
         worker = threading.Thread(target=run, daemon=True)
-        worker.start()
-        deadline = time.monotonic() + self._timeout_ms / 1000.0
+        try:
+            worker.start()
+        except BaseException as exc:
+            _DEADLINE_SLOTS.release()
+            return "failed", exc
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

@@ -60,7 +60,8 @@ Fixes:
   `attestation_not_found` (M3/m1).
 - Collaborators are invoked inside the guarded deadline region: a
   synchronously-raising reader maps to `unknown` + `lookup_failed`
-  (M12).
+  (M12). In-flight deadline workers are capped at eight per process;
+  saturation fails closed without spawning more threads.
 - `expected_wallet` compares normalised forms (case/checksum
   spelling of the same address is not a mismatch) and never raises
   on a non-string value (m2).
@@ -69,6 +70,9 @@ Fixes:
 - Default-reader endpoint policy: non-https RPC URLs are rejected
   at construction except on loopback (M17). The `create_verifier`
   contract-address error no longer interpolates the value (M14).
+- The wheel includes the PEP 561 `py.typed` marker. CI type-checks a
+  consumer installed from the built wheel and diffs complete
+  normalized TypeScript/Python fixture results.
 
 Adaptations (no verdict changes): the ERC-1271 chain-identity call
 and `eth_call` share one deadline budget;

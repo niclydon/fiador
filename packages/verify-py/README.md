@@ -10,12 +10,12 @@ This package is the Python parity port of
 TypeScript core field-for-field with snake_case names (W1 DESIGN
 4.1): same check order, same statuses, same failure codes, same
 canonical signing form byte-for-byte, same canonical human hash.
-Parity is not asserted by this README; it is proven by the test
-suite, which runs the TypeScript package's committed fixture vectors
-(`packages/verify-ts/fixtures/vectors.json`, read from the sibling
-path at test time) through this implementation and diffs the
-outcomes. If the TS vectors change, the Python tests fail loudly
-until the port is reconciled.
+Parity is checked in CI against the TypeScript package's committed
+fixture vectors (`packages/verify-ts/fixtures/vectors.json`). The
+cross-language gate runs the same vectors through both packages and
+diffs complete internal and public results, signed-message results,
+canonical messages, and hashes. It normalizes measured lookup latency
+only. A shape or outcome change in one package fails the gate.
 
 ## Install
 
@@ -33,6 +33,9 @@ that transport failures stay visible as failures instead of being
 collapsed into a null result by middleware — the distinction between
 "checked, not registered" and "could not check" is the core's reason
 to exist (spec 3.1).
+
+The wheel includes `py.typed`. CI installs that wheel in a clean
+environment and checks the public return type with mypy.
 
 ## Usage
 
@@ -82,6 +85,12 @@ explicitly disables that check. Store failures return `unknown` +
 registration answers: non-https RPC URLs are rejected at
 construction, except loopback endpoints (`localhost`, `127.0.0.1`,
 `::1`) where plaintext never leaves the machine.
+
+The synchronous Python verifier bounds in-flight deadline workers to
+eight per process. A timed-out collaborator keeps its slot until it
+actually finishes; a saturated verifier returns `unknown` +
+`lookup_failed` promptly. Callers should configure finite timeouts on
+custom readers and resolvers.
 
 Two deliberate Python adaptations, neither of which changes any
 verdict:
