@@ -73,6 +73,26 @@ class CheckEvidence:
 
 
 @dataclass
+class RegistrationLookupFact:
+    """The step-6 registration lookup's fate, recorded on attestation
+    results so the SPEC 11.2 checks projection can report the
+    registration stage from fact rather than from status/latency
+    inference (TS fix pass 3, D6). Present on results that reached
+    step 6; absent when an earlier stage already decided the
+    result, which is itself the fact that the lookup never ran."""
+
+    ran: bool  # False only when check_registration=False skipped it
+    # 'registered' | 'unregistered' | 'failed'; present iff ran.
+    outcome: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"ran": self.ran}
+        if self.outcome is not None:
+            out["outcome"] = self.outcome
+        return out
+
+
+@dataclass
 class VerifyResult:
     """INTERNAL shape: server-side only, between trusted components."""
 
@@ -92,6 +112,10 @@ class VerifyResult:
     # and never copied into the public shape. New internal fields are
     # private by default (SPEC 3.0).
     disclosure: Optional[str] = None  # 'hash' | 'none'
+    # INTERNAL ONLY: the step-6 registration lookup's fate (TS fix
+    # pass 3, D6), read by the MCP checks projection (SPEC 11.2).
+    # Never copied into the public shape.
+    registration: Optional[RegistrationLookupFact] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Internal serialisation. The human_id key is present only when
@@ -108,6 +132,8 @@ class VerifyResult:
             out["human_id"] = self.human_id
         if self.disclosure is not None:
             out["disclosure"] = self.disclosure
+        if self.registration is not None:
+            out["registration"] = self.registration.to_dict()
         return out
 
 

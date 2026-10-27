@@ -45,6 +45,7 @@ from .types import (
     AttestedSubject,
     AttestationSubjectInput,
     CheckEvidence,
+    RegistrationLookupFact,
     SignedAttestation,
     SignedMessageResult,
     Subject,
@@ -271,6 +272,7 @@ class Verifier:
         human_id: Optional[str] = None,
         latency_ms: Optional[int] = None,
         disclosure: Optional[str] = None,
+        registration: Optional[RegistrationLookupFact] = None,
     ) -> VerifyResult:
         return VerifyResult(
             status=status,
@@ -285,6 +287,7 @@ class Verifier:
             evidence=self._evidence(latency_ms),
             human_id=human_id if (self._include_raw_human_id and human_id is not None) else None,
             disclosure=disclosure,
+            registration=registration,
         )
 
     def _lookup(self, address: str, signal: Any = None) -> _LookupOutcome:
@@ -420,6 +423,11 @@ class Verifier:
         payload = signed.payload
         wallet = payload.agent_wallet_address
         failures = []
+        # The step-6 lookup's fate, recorded for the SPEC 11.2
+        # checks projection (TS fix pass 3, D6). Assigned when the
+        # pipeline reaches step 6; stays None on earlier returns,
+        # which is itself the fact that the lookup never ran.
+        registration: Optional[RegistrationLookupFact] = None
 
         def finish(
             status: str,
@@ -434,6 +442,7 @@ class Verifier:
                 human_id=human_id,
                 latency_ms=latency_ms,
                 disclosure=disclosure,
+                registration=registration,
             )
 
         # Step 2, binding (SPEC 3.3).
@@ -539,6 +548,20 @@ class Verifier:
         # check_registration=False) may consume the nonce. Recheck the
         # verifier clock because the lookup can cross expires_at.
         outcome = self._lookup(wallet, opts.signal) if opts.check_registration else None
+        registration = (
+            RegistrationLookupFact(ran=False)
+            if not opts.check_registration
+            else RegistrationLookupFact(
+                ran=True,
+                outcome=(
+                    "registered"
+                    if outcome is not None and outcome.state == "registered"
+                    else "unregistered"
+                    if outcome is not None and outcome.state == "unregistered"
+                    else "failed"
+                ),
+            )
+        )
         if expires_ms <= current_ms():
             return finish("expired", ["expired"])
         if outcome is not None and outcome.state == "unknown":
