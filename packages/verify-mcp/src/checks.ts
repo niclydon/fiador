@@ -1,4 +1,4 @@
-import type { PublicVerifyResult } from '@fiador/verify';
+import type { PublicVerifyResult, RegistrationLookupFact } from '@fiador/verify';
 
 // The per-check breakdown for verify_attestation (SPEC 11.2): a
 // deterministic projection of the core's failure codes, fixed here so
@@ -22,20 +22,19 @@ import type { PublicVerifyResult } from '@fiador/verify';
 //   lookup ran and failed; not_checked only when the pipeline
 //   failed before the lookup step.
 //
-// Proving which network stage a lookup failure came from: the
-// registration lookup is the only stage whose outcome carries
-// `evidence.rpcLatencyMs` (the core records lookup latency only
-// there for attestation results; an ERC-1271 signature-stage
-// failure returns before any latency is recorded), and a failed
-// registration lookup is also the only lookup failure that
-// produces status 'unknown' — earlier-stage failures surface as
-// 'invalid' or 'expired' with their established codes preserved,
-// and claim-store failures carry no latency. The pair (status
-// 'unknown', latency present) therefore proves the registration
-// lookup ran — and, since the pipeline only reaches registration
-// after the signature cleared, it also proves the signature
-// passed. A not_registered failure likewise proves both stages
-// ran.
+// Which stages ran is FACT, not inference (fix pass 3, D6): the
+// core records the step-6 lookup's fate on the internal result
+// (`registration`), and the server hands that fact to this
+// projection alongside the public result. An earlier version of
+// this projection inferred "the registration lookup ran" from
+// the pair (status 'unknown', evidence.rpcLatencyMs present);
+// that inference was wrong for every claim-store outcome — a
+// claim replay, a claim expiry, and a claim failure all follow a
+// completed registration lookup but carry no latency, so they
+// were misreported as not_checked. When the caller supplies no
+// fact (unit tests of this projection, older cores), only the
+// certainties remain: a verified result's lookup resolved with
+// an entry, an unregistered result's resolved null.
 export type CheckState = 'pass' | 'fail' | 'not_checked';
 
 export interface AttestationChecks {
@@ -48,15 +47,17 @@ export interface AttestationChecks {
 export function computeChecks(
   result: PublicVerifyResult,
   asserted: { subject: boolean; wallet: boolean },
+  registrationFact?: RegistrationLookupFact,
 ): AttestationChecks {
   const failures = new Set<string>(result.failures);
   const shapeFailed =
     failures.has('malformed_attestation') || failures.has('unsupported_version');
   const lookupFailed =
     failures.has('lookup_failed') || failures.has('lookup_timeout');
-  // The registration lookup demonstrably ran (see the header note).
-  const registrationRan =
-    result.status === 'unknown' && result.evidence.rpcLatencyMs !== undefined;
+  // The registration lookup ran (core-recorded fact, D6). Reaching
+  // registration at all also proves the signature stage cleared:
+  // the pipeline only gets there past it.
+  const registrationRan = registrationFact?.ran === true;
   const notRegistered = failures.has('not_registered');
 
   // Codes that can only be produced at or after the dates step,
@@ -120,12 +121,18 @@ export function computeChecks(
           : 'valid';
 
   const registration: AttestationChecks['registration'] =
-    result.status === 'verified'
-      ? 'registered'
-      : result.status === 'unregistered' || notRegistered
-        ? 'unregistered'
-        : lookupFailed && registrationRan
-          ? 'unknown'
+    registrationFact !== undefined
+      ? !registrationFact.ran
+        ? 'not_checked'
+        : registrationFact.outcome === 'registered'
+          ? 'registered'
+          : registrationFact.outcome === 'unregistered'
+            ? 'unregistered'
+            : 'unknown'
+      : result.status === 'verified'
+        ? 'registered'
+        : result.status === 'unregistered' || notRegistered
+          ? 'unregistered'
           : 'not_checked';
 
   return {

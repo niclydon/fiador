@@ -8,6 +8,64 @@ regression test. It follows the 0.2.0 D5 `verifySignedMessage`
 release and preserves that API and its ERC-1271 input and failure
 semantics.
 
+### Fix pass 3 (re-review 2)
+
+The second re-review closed most of pass 2 and failed the gate
+on the items below; all are fixed here, each with regression
+tests. Two pass-2 statements below are corrected where they
+appear: the optional `release()` is removed, and store timeouts
+map to `lookup_failed`, not `lookup_timeout`.
+
+- Nonce burn on the post-claim expiry recheck (NF-A): the final
+  expiry recheck now runs BEFORE the claim — the claim is the
+  last mutating action before a verified return — so an expiry
+  that crosses during the registration lookup returns `expired`
+  with no claim call, and a later presentation on a normal clock
+  verifies. (The earlier "a claim made just before expiry
+  cannot return verified" pin is replaced: the store's clock at
+  its atomic write is authoritative for the claim outcome, and
+  a claim recorded while live governs.)
+- Store failure codes (NF-B/D1/D2): SPEC 3.3 stands as written.
+  A `has()` failure including a timeout, and a failed, timed-out,
+  or lost `claim`, are `unknown` + `lookup_failed`;
+  `lookup_timeout` remains reserved for the chain/RPC reads.
+- The nonce contract is exactly `{ has, claim }` (D3):
+  `release()` is removed from the options type and from
+  `InMemoryNonceStore`. The verifier never called it, and SPEC
+  3.3 forbids releasing a claim whose outcome is ambiguous.
+  The no-burn guarantee, stated exactly: no burn on any outcome
+  resolved before the final claim; a lost or timed-out claim
+  response is `unknown` + `lookup_failed` with the nonce
+  possibly consumed, per SPEC 3.3.
+- Registration facts for the checks projection (D5/D6):
+  attestation results now record the step-6 lookup's fate
+  (`registration: { ran, outcome }`, internal only, never in
+  the public shape), so the SPEC 11.2 projection reports
+  claim-replay, claim-expired, and claim-failure results
+  truthfully instead of inferring `not_checked` from missing
+  latency. An expiry crossing during the lookup also collects
+  a simultaneous lookup failure: `['expired', 'lookup_failed']`
+  in check order.
+- Replay reads on both signature-failure paths (D8/NF-D): the
+  read-only `has()` now runs on the signature-mismatch path
+  too, and on the signature-unknown path even when a binding
+  failure coexists — a replayed nonce is never masked by the
+  failure that accompanies it.
+- Reference store outcome order (D9): `claim()` reports a
+  retained claim (`'replay'`) before the store-clock expiry
+  outcome, matching SPEC 3.3's listing order.
+- Clock and expectation containment (NF-C/NF-F/NF-G):
+  `safeNow` requires `getTime()` to return a finite number (a
+  fake Date returning a string is contained, and a fresh Date
+  is built over the validated number); `expectedSubject: null`
+  fails closed as `subject_mismatch`; a pre-aborted signal wins
+  over an instantly-resolving reader.
+- `verifySignedMessage`'s ERC-1271 path enforces the same 8 KB
+  signature cap as the attestation shape gate and rejects an
+  empty signature before any RPC call (NF-E).
+- The RPC-policy comment in reader.ts now lists the loopback
+  set exactly as the code has it, including `'[::1]'` (M17).
+
 ### Fix pass 2 (re-review)
 
 The re-review closed nine findings and failed the gate on the

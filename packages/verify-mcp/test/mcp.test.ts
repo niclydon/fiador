@@ -535,8 +535,9 @@ describe('7.5 regressions: verify_attestation inputs (M10/M11/M5/M6)', () => {
     // Fix pass 2 (re-review M5, restoring SPEC 11.2 exactly): the
     // registration lookup RAN and failed — the local eip191
     // signature was evaluated and passed before it, and the dates
-    // were evaluated too. The result's rpcLatencyMs (recorded only
-    // by the registration lookup) is what proves the stage.
+    // were evaluated too. Since fix pass 3 (D6) the stage is
+    // proven by the core's recorded registration fact, not by
+    // inference from the result's rpcLatencyMs.
     expect(body.checks.signature).toBe('pass');
     expect(body.checks.expiry).toBe('valid');
     expect(body.checks.registration).toBe('unknown');
@@ -839,6 +840,144 @@ describe('fix pass 2: body cap and arrival deadline (B4)', () => {
       server.close();
     }
   }, 10000);
+
+  it('a header drip on a REUSED connection is terminated at the headers deadline (NEW-1)', async () => {
+    // Regression for re-review 2's NEW-1: the pass-2 timers armed
+    // the headers deadline once per connection and cleared it at
+    // the first request event, so a second request's header phase
+    // on a keep-alive connection was bounded by nothing (this
+    // probe ran unbounded before the fix). The deadlines are now
+    // per request: the headers timer re-arms when the socket goes
+    // idle after each response.
+    const server = createVerifyHttpServer(makeDeps(), {
+      host: '127.0.0.1',
+      port: 0,
+      headersTimeoutMs: 300,
+      requestTimeoutMs: 5000,
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no port');
+    try {
+      const elapsed = await new Promise<number>((resolve, reject) => {
+        const socket = netConnect(address.port, '127.0.0.1');
+        let phase: 'first' | 'drip' = 'first';
+        let dripStartedAt = 0;
+        let drip: NodeJS.Timeout | undefined;
+        const fail = setTimeout(() => {
+          if (drip) clearInterval(drip);
+          socket.destroy();
+          reject(new Error('server never terminated the second-request header drip'));
+        }, 6000);
+        socket.on('connect', () => {
+          socket.write(
+            'GET /health HTTP/1.1\r\n' +
+              `host: 127.0.0.1:${address.port}\r\n` +
+              'connection: keep-alive\r\n\r\n',
+          );
+        });
+        socket.on('data', (chunk) => {
+          if (phase === 'first' && chunk.toString('latin1').includes('200')) {
+            phase = 'drip';
+            dripStartedAt = Date.now();
+            socket.write('GET /health HTTP/1.1\r\n');
+            drip = setInterval(() => socket.write('x-probe: 1\r\n'), 100);
+          }
+        });
+        const done = () => {
+          if (phase !== 'drip') return;
+          clearTimeout(fail);
+          if (drip) clearInterval(drip);
+          resolve(Date.now() - dripStartedAt);
+        };
+        socket.on('close', done);
+        socket.on('error', done);
+      });
+      expect(elapsed).toBeGreaterThanOrEqual(250);
+      expect(elapsed).toBeLessThan(2000);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  }, 10000);
+
+  it('the total deadline on a REUSED connection is measured from the request start (NEW-1)', async () => {
+    // Second leg of NEW-1: on a reused connection the total
+    // deadline previously started only when the second request's
+    // headers had fully arrived (the elapsed clock was reset), so
+    // a slow header phase consumed none of the total budget. Now
+    // the header phase counts against the same total.
+    const server = createVerifyHttpServer(makeDeps(), {
+      host: '127.0.0.1',
+      port: 0,
+      headersTimeoutMs: 800,
+      requestTimeoutMs: 1200,
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no port');
+    try {
+      const elapsed = await new Promise<number>((resolve, reject) => {
+        const socket = netConnect(address.port, '127.0.0.1');
+        let phase: 'first' | 'second' = 'first';
+        let secondStartedAt = 0;
+        let drip: NodeJS.Timeout | undefined;
+        const fail = setTimeout(() => {
+          if (drip) clearInterval(drip);
+          socket.destroy();
+          reject(new Error('server never terminated the reused-connection drip'));
+        }, 6000);
+        socket.on('connect', () => {
+          socket.write(
+            'GET /health HTTP/1.1\r\n' +
+              `host: 127.0.0.1:${address.port}\r\n` +
+              'connection: keep-alive\r\n\r\n',
+          );
+        });
+        socket.on('data', (chunk) => {
+          if (phase === 'first' && chunk.toString('latin1').includes('200')) {
+            phase = 'second';
+            secondStartedAt = Date.now();
+            // Drip headers for ~500 ms (inside the 800 ms headers
+            // deadline), complete them, then drip the body: the
+            // total deadline (1200 ms from the request's first
+            // byte) must end the socket at ~1200 ms overall, not
+            // 1200 ms after the headers completed.
+            socket.write('POST /mcp HTTP/1.1\r\n');
+            let sent = 0;
+            drip = setInterval(() => {
+              sent += 1;
+              if (sent <= 5) {
+                socket.write('x-probe: 1\r\n');
+              } else if (sent === 6) {
+                socket.write(
+                  `host: 127.0.0.1:${address.port}\r\n` +
+                    'content-type: application/json\r\n' +
+                    'accept: application/json, text/event-stream\r\n' +
+                    'content-length: 100\r\n\r\n',
+                );
+              } else {
+                socket.write('x');
+              }
+            }, 100);
+          }
+        });
+        const done = () => {
+          if (phase !== 'second') return;
+          clearTimeout(fail);
+          if (drip) clearInterval(drip);
+          resolve(Date.now() - secondStartedAt);
+        };
+        socket.on('close', done);
+        socket.on('error', done);
+      });
+      expect(elapsed).toBeGreaterThanOrEqual(1000);
+      expect(elapsed).toBeLessThan(1600);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  }, 10000);
 });
 
 describe('fix pass 2: host normalisation (M15)', () => {
@@ -1052,10 +1191,53 @@ describe('fix pass 2: checks mapping probes (M5)', () => {
         },
       }),
       noAssert,
+      { ran: true, outcome: 'failed' },
     );
     expect(checks.registration).toBe('unknown');
     expect(checks.signature).toBe('pass');
     expect(checks.expiry).toBe('valid');
+  });
+
+  it('claim outcomes report the completed registration lookup truthfully (D6)', () => {
+    // A claim replay follows a registration lookup that resolved
+    // with an entry; the old status+latency inference reported
+    // not_checked because claim results carry no latency.
+    const replay = computeChecks(
+      pub({ status: 'invalid', failures: ['replay_detected'] }),
+      noAssert,
+      { ran: true, outcome: 'registered' },
+    );
+    expect(replay.registration).toBe('registered');
+    expect(replay.signature).toBe('pass');
+    // A claim failure: the lookup ran and resolved; the store
+    // failed afterwards. Registration is 'registered', and the
+    // lookup_failed code must not drag it to 'unknown'.
+    const claimFailed = computeChecks(
+      pub({ status: 'unknown', failures: ['lookup_failed'] }),
+      noAssert,
+      { ran: true, outcome: 'registered' },
+    );
+    expect(claimFailed.registration).toBe('registered');
+    expect(claimFailed.signature).toBe('pass');
+    // A skipped lookup (checkRegistration: false) is not_checked
+    // even on a verified result.
+    const skipped = computeChecks(
+      pub({ status: 'verified', failures: [] }),
+      noAssert,
+      { ran: false },
+    );
+    expect(skipped.registration).toBe('not_checked');
+  });
+
+  it('an expiry crossing with a failed lookup reports registration unknown (D5)', () => {
+    const checks = computeChecks(
+      pub({ status: 'expired', failures: ['expired', 'lookup_failed'] }),
+      noAssert,
+      { ran: true, outcome: 'failed' },
+    );
+    expect(checks.registration).toBe('unknown');
+    expect(checks.expiry).toBe('expired');
+    expect(checks.signature).toBe('pass');
   });
 });
 

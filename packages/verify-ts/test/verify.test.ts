@@ -1024,7 +1024,56 @@ describe('7.5 regressions: nonce store claim contract (B2/M1/M2)', () => {
     expect(activeClaims).toBe(0);
   });
 
-  it('a claim made just before expiry cannot return verified after the clock crosses', async () => {
+  it('an expiry crossing during the lookup returns expired and burns nothing (NF-A)', async () => {
+    // The re-review's probe: the verifier's clock crosses
+    // expiresAt while the registration lookup is in flight, so
+    // the crossing is first visible at the post-lookup recheck.
+    // That recheck runs BEFORE the claim (the claim is the last
+    // mutating action), so the outcome is 'expired', no claim is
+    // taken, and a later presentation on a normal clock verifies.
+    // The pre-fix shape claimed first and rechecked afterwards,
+    // returning 'expired' with the nonce already consumed.
+    let clock = NOW;
+    const afterExpiry = new Date(Date.parse(vectors.attestations.valid.payload.expiresAt) + 1);
+    let lookups = 0;
+    const crossingReader: AgentBookReader = {
+      source: 'live',
+      async lookupHuman() {
+        lookups += 1;
+        if (lookups === 1) clock = afterExpiry; // the crossing lands during the lookup
+        return HUMAN_1;
+      },
+    };
+    const backing = new InMemoryNonceStore({ now: () => NOW });
+    let claimCalls = 0;
+    const store = {
+      has: (nonce: string, wallet: EvmAddress) => backing.has(nonce, wallet),
+      claim: (nonce: string, wallet: EvmAddress, expiresAt: string) => {
+        claimCalls += 1;
+        return backing.claim(nonce, wallet, expiresAt);
+      },
+    };
+    const v = verifier({ reader: crossingReader, now: () => clock });
+    const att = vectors.attestations.valid;
+    const first = await v.verifyAttestation(att, { nonceStore: store });
+    expect(first.status).toBe('expired');
+    expect(first.failures).toEqual(['expired']);
+    expect(claimCalls).toBe(0);
+    expect(await backing.has(att.payload.nonce, A)).toBe(false);
+    clock = NOW; // a later presentation, on a normal clock
+    const second = await v.verifyAttestation(att, { nonceStore: store });
+    expect(second.status).toBe('verified');
+    expect(second.failures).toEqual([]);
+  });
+
+  it('a claim recorded while live governs, even if the response lands after the verifier clock crosses', async () => {
+    // The store's clock at its atomic write is authoritative for
+    // the claim outcome (SPEC 3.3): a claim recorded while the
+    // attestation was live returns 'claimed', and the verifier —
+    // whose claim is its last mutating action (NF-A) — maps that
+    // to verified. There is no post-claim recheck; that recheck
+    // was the burn source. The claim itself still lapses at
+    // expiresAt in the store.
     let clock = NOW;
     let claimExpiresAt = 0;
     const afterExpiry = new Date(Date.parse(vectors.attestations.valid.payload.expiresAt) + 1);
@@ -1040,7 +1089,7 @@ describe('7.5 regressions: nonce store claim contract (B2/M1/M2)', () => {
     const result = await v.verifyAttestation(vectors.attestations.valid, {
       nonceStore: store,
     });
-    expect(result.status).toBe('expired');
+    expect(result.status).toBe('verified');
     expect(await store.has()).toBe(false); // its expiry makes the claim non-persistent
   });
 });
@@ -1344,6 +1393,48 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
       const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage({
         message: SM.message,
         signature: '0x11',
+        signatureType: 'erc1271',
+        expectedAddress: CONTRACT,
+      });
+      expect(result.verified).toBe(true);
+      expect(ethCalls()).toBe(1);
+    });
+  });
+
+  it('ERC-1271: an empty signature is rejected before any RPC call (NF-E)', async () => {
+    await with1271Rpc(`0x1626ba7e${'00'.repeat(28)}`, async (rpcUrl, ethCalls) => {
+      const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage({
+        message: SM.message,
+        signature: '0x',
+        signatureType: 'erc1271',
+        expectedAddress: CONTRACT,
+      });
+      expect(result.verified).toBe(false);
+      expect(result.failures).toEqual(['signature_mismatch']);
+      expect(result.address).toBe(CONTRACT);
+      expect(ethCalls()).toBe(0);
+    });
+  });
+
+  it('ERC-1271: a signature over the 8 KB cap is rejected before any RPC call (NF-E)', async () => {
+    await with1271Rpc(`0x1626ba7e${'00'.repeat(28)}`, async (rpcUrl, ethCalls) => {
+      const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage({
+        message: SM.message,
+        signature: `0x${'11'.repeat(8193)}`,
+        signatureType: 'erc1271',
+        expectedAddress: CONTRACT,
+      });
+      expect(result.verified).toBe(false);
+      expect(result.failures).toEqual(['signature_mismatch']);
+      expect(ethCalls()).toBe(0);
+    });
+  });
+
+  it('ERC-1271: a signature at exactly the 8 KB cap reaches the contract (NF-E)', async () => {
+    await with1271Rpc(`0x1626ba7e${'00'.repeat(28)}`, async (rpcUrl, ethCalls) => {
+      const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage({
+        message: SM.message,
+        signature: `0x${'11'.repeat(8192)}`,
         signatureType: 'erc1271',
         expectedAddress: CONTRACT,
       });
@@ -1672,7 +1763,11 @@ describe('fix pass 2: collaborator containment (N2)', () => {
     expect(Number.isNaN(Date.parse(result.evidence.checkedAt))).toBe(false);
   });
 
-  it('a hanging claim store is lookup_failed and possibly consumed, never unsettled', async () => {
+  it('a hanging claim store is lookup_failed, never an unsettled promise (D1/D2)', async () => {
+    // SPEC 3.3 pins a failed, timed-out, or lost claim to
+    // lookup_failed — the write may have committed, so the code
+    // must not claim the narrower "we know it timed out" reading
+    // lookup_timeout carries for chain reads.
     const store = {
       async has() { return false; },
       claim: () => new Promise<never>(() => {}),
@@ -1687,7 +1782,7 @@ describe('fix pass 2: collaborator containment (N2)', () => {
     expect(result.failures).toEqual(['lookup_failed']);
   });
 
-  it('a hanging replay read is lookup_failed', async () => {
+  it('a hanging replay read is lookup_failed (D1/D2)', async () => {
     const store = {
       has: () => new Promise<never>(() => {}),
       async claim() { return 'claimed' as const; },
@@ -1820,15 +1915,30 @@ describe('fix pass 2: reference store conformance and no-burn outcomes (B2/N3)',
     expect(second.failures).toEqual(['replay_detected']);
   });
 
-  it('the reference store lapses entries at expiresAt (B2)', async () => {
-    let clock = NOW;
-    const store = new InMemoryNonceStore({ now: () => clock });
+  it('the reference store lapses entries at expiresAt and offers no release (B2/D3)', async () => {
+    const store = new InMemoryNonceStore({ now: () => NOW });
     const att = vectors.attestations.valid;
     expect(await store.claim(att.payload.nonce, A, att.payload.expiresAt)).toBe('claimed');
     expect(await store.has(att.payload.nonce, A)).toBe(true);
-    clock = new Date(Date.parse(att.payload.expiresAt) + 1000);
-    expect(await store.has(att.payload.nonce, A)).toBe(false);
-    expect(await store.claim(att.payload.nonce, A, att.payload.expiresAt)).toBe('expired');
+    // The contract is exactly { has, claim } (SPEC 3.3): there is
+    // no release() to free a claim early (fix pass 3, D3).
+    expect((store as unknown as { release?: unknown }).release).toBeUndefined();
+    const later = new InMemoryNonceStore({
+      now: () => new Date(Date.parse(att.payload.expiresAt) + 1000),
+    });
+    expect(await later.claim(att.payload.nonce, A, att.payload.expiresAt)).toBe('expired');
+  });
+
+  it('reference store: a retained claim reports replay before the expiry outcome (D9)', async () => {
+    // SPEC 3.3's outcome order: 'replay' if a claim is still
+    // retained; 'expired' is for a nonce with no retained claim.
+    // A second presentation carrying an already-past expiresAt
+    // must still hear 'replay' while the first claim is retained.
+    const store = new InMemoryNonceStore({ now: () => NOW });
+    const att = vectors.attestations.valid;
+    expect(await store.claim(att.payload.nonce, A, att.payload.expiresAt)).toBe('claimed');
+    const alreadyPast = new Date(NOW.getTime() - 1000).toISOString();
+    expect(await store.claim(att.payload.nonce, A, alreadyPast)).toBe('replay');
   });
 });
 
@@ -2047,5 +2157,155 @@ describe('fix pass 2: caps, lifetime equality, expectation probes, surrogates (M
     const lowResult = await verifier().verifyAttestation(low);
     expect(lowResult.status).toBe('invalid');
     expect(lowResult.failures).toEqual(['malformed_attestation']);
+  });
+});
+
+describe('fix pass 3: clock containment, replay reads, expectations (NF-C/NF-D/D8/NF-F/NF-G)', () => {
+  it('a fake Date whose getTime() returns a string cannot escape (NF-C)', async () => {
+    // Number.isNaN does not coerce: the old guard accepted this
+    // clock, and the TypeError from toISOString() escaped.
+    const fake = Object.create(Date.prototype) as Date;
+    fake.getTime = () => 'not a number' as unknown as number;
+    const v = verifier({ now: () => fake });
+    const byAddress = await v.verifyAddress(A);
+    expect(byAddress.status).toBe('verified');
+    expect(Number.isNaN(Date.parse(byAddress.evidence.checkedAt))).toBe(false);
+    // The attestation path must not throw either: with the fake
+    // rejected, the fallback system clock evaluates the fixture's
+    // dates coherently (the fixture window is in the past for the
+    // real clock, so 'expired' is the honest fallback outcome).
+    const att = await v.verifyAttestation(vectors.attestations.valid);
+    expect(att.status).toBe('expired');
+    expect(Number.isNaN(Date.parse(att.evidence.checkedAt))).toBe(false);
+  });
+
+  it('a replayed nonce under a bad signature collects replay_detected (D8)', async () => {
+    let hasCalls = 0;
+    const store = {
+      async has() { hasCalls += 1; return true; },
+      async claim() { return 'claimed' as const; },
+    };
+    const att = clone(vectors.attestations.valid) as SignedAttestation;
+    att.signature = `0x${'22'.repeat(65)}`; // well-formed, wrong signer
+    const result = await verifier().verifyAttestation(att, { nonceStore: store });
+    expect(result.status).toBe('invalid');
+    expect(result.failures).toEqual(['signature_mismatch', 'replay_detected']);
+    expect(hasCalls).toBe(1);
+  });
+
+  it('the replay read runs on the signature-unknown path even with a binding failure (NF-D)', async () => {
+    const { server } = startStubRpc(() => '0x1'); // chain 1: the 1271 check cannot run
+    const rpcUrl = await listen(server);
+    try {
+      let hasCalls = 0;
+      const store = {
+        async has() { hasCalls += 1; return true; },
+        async claim() { return 'claimed' as const; },
+      };
+      const att = eip1271Attestation(vectors.attestations.expired);
+      const v = createVerifier({
+        reader: createStaticReader({ [CONTRACT_WALLET]: HUMAN_1 }, 'live'),
+        rpcUrl,
+        now: () => NOW,
+      });
+      const result = await v.verifyAttestation(att, {
+        nonceStore: store,
+        expectedSubject: { type: 'discord_application', id: 'wrong-subject' },
+      });
+      expect(hasCalls).toBe(1);
+      expect(result.status).toBe('invalid');
+      expect(result.failures).toEqual(['subject_mismatch', 'expired', 'lookup_failed', 'replay_detected']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('expectedSubject: null fails closed as subject_mismatch (NF-F)', async () => {
+    const result = await verifier().verifyAttestation(vectors.attestations.valid, {
+      expectedSubject: null as unknown as { type: string; id: string },
+    });
+    expect(result.status).toBe('invalid');
+    expect(result.failures).toEqual(['subject_mismatch']);
+  });
+
+  it('a pre-aborted signal wins over an instantly-resolving reader (NF-G)', async () => {
+    let readerCalls = 0;
+    const instant: AgentBookReader = {
+      source: 'live',
+      async lookupHuman() {
+        readerCalls += 1;
+        return HUMAN_1;
+      },
+    };
+    const controller = new AbortController();
+    controller.abort();
+    const result = await verifier({ reader: instant }).verifyAddress(A, {
+      signal: controller.signal,
+    });
+    expect(result.status).toBe('unknown');
+    expect(result.failures).toEqual(['lookup_failed']);
+    expect(readerCalls).toBe(0);
+  });
+});
+
+describe('fix pass 3: registration facts for the checks projection (D5/D6)', () => {
+  it('expiry crossing plus a failed lookup collects both codes and records the fact (D5)', async () => {
+    let clock = NOW;
+    const afterExpiry = new Date(Date.parse(vectors.attestations.valid.payload.expiresAt) + 1);
+    let lookups = 0;
+    const crossingFailer: AgentBookReader = {
+      source: 'live',
+      async lookupHuman() {
+        lookups += 1;
+        if (lookups === 1) {
+          clock = afterExpiry;
+          throw new Error('RPC died mid-flight');
+        }
+        return HUMAN_1;
+      },
+    };
+    const v = verifier({ reader: crossingFailer, now: () => clock });
+    const result = await v.verifyAttestation(vectors.attestations.valid);
+    expect(result.status).toBe('expired');
+    expect(result.failures).toEqual(['expired', 'lookup_failed']);
+    expect(result.registration).toEqual({ ran: true, outcome: 'failed' });
+  });
+
+  it('claim outcomes carry the completed registration fact (D6)', async () => {
+    const replayStore = {
+      async has() { return false; },
+      async claim() { return 'replay' as const; },
+    };
+    const replayed = await verifier().verifyAttestation(vectors.attestations.valid, {
+      nonceStore: replayStore,
+    });
+    expect(replayed.status).toBe('invalid');
+    expect(replayed.registration).toEqual({ ran: true, outcome: 'registered' });
+
+    const failingStore = {
+      async has() { return false; },
+      async claim() { throw new Error('store down'); },
+    };
+    const failed = await verifier().verifyAttestation(vectors.attestations.valid, {
+      nonceStore: failingStore,
+    });
+    expect(failed.status).toBe('unknown');
+    expect(failed.failures).toEqual(['lookup_failed']);
+    expect(failed.registration).toEqual({ ran: true, outcome: 'registered' });
+  });
+
+  it('checkRegistration: false records that the lookup did not run (D6)', async () => {
+    const result = await verifier().verifyAttestation(vectors.attestations.valid, {
+      checkRegistration: false,
+    });
+    expect(result.status).toBe('verified');
+    expect(result.registration).toEqual({ ran: false });
+  });
+
+  it('the public projection never carries the registration fact (D6)', async () => {
+    const result = await verifier().verifyAttestation(vectors.attestations.valid);
+    expect(result.registration).toEqual({ ran: true, outcome: 'registered' });
+    const pub = toPublicVerifyResult(result);
+    expect('registration' in pub).toBe(false);
   });
 });

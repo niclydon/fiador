@@ -43,6 +43,17 @@ export interface CheckEvidence {
   rpcLatencyMs?: number;
 }
 
+// The step-6 registration lookup's fate, recorded on attestation
+// results so the SPEC 11.2 checks projection can report the
+// registration stage from fact rather than from status/latency
+// inference (fix pass 3, D6). Present on results that reached
+// step 6; absent when an earlier stage already decided the
+// result — which is itself the fact that the lookup never ran.
+export interface RegistrationLookupFact {
+  ran: boolean; // false only when checkRegistration: false skipped it
+  outcome?: 'registered' | 'unregistered' | 'failed'; // present iff ran
+}
+
 export interface VerifyResult {
   // INTERNAL shape: server-side only, between trusted components.
   status: VerificationStatus;
@@ -58,6 +69,10 @@ export interface VerifyResult {
   // omits humanHash when it is 'none') and never copied into the public
   // shape. New internal fields are private by default (SPEC 3.0).
   disclosure?: 'hash' | 'none';
+  // INTERNAL ONLY: the step-6 registration lookup's fate (fix pass
+  // 3, D6), read by the MCP checks projection (SPEC 11.2). Never
+  // copied into the public shape.
+  registration?: RegistrationLookupFact;
 }
 
 export interface PublicVerifyResult {
@@ -159,6 +174,18 @@ export interface VerifyAttestationOptions {
       wallet: EvmAddress,
       expiresAt: string,
     ): Promise<NonceClaimResult>;
+    // The contract is exactly { has, claim } (SPEC 3.3). There is
+    // deliberately no release(): this verifier takes its claim
+    // only at the terminal step — after every transient or
+    // not-yet outcome (lookup failure, unregistered, expiry) has
+    // already returned — so a claim it takes never needs freeing,
+    // and after an ambiguous claim outcome (a lost or timed-out
+    // response, where the write may have committed) SPEC 3.3
+    // forbids releasing a claim the caller cannot prove it owns.
+    // An optional release() shipped in the contract in fix pass 2
+    // and was removed in fix pass 3 (D3): nothing in this
+    // verifier called it, and its presence invited exactly the
+    // ambiguous-commit delete the spec prohibits.
   };
   checkRegistration?: boolean; // default true: also run the AgentBook lookup
   signal?: AbortSignal;

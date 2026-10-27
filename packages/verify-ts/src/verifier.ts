@@ -12,13 +12,18 @@ import {
   type Hex,
 } from 'viem';
 import { worldchain } from 'viem/chains';
-import { canonicalAttestationMessage, validateSignedAttestation } from './canonical.js';
+import {
+  MAX_EIP1271_SIGNATURE_BYTES,
+  canonicalAttestationMessage,
+  validateSignedAttestation,
+} from './canonical.js';
 import { hashHumanId, truncateAddress } from './hash.js';
 import { AGENTBOOK_CONTRACT, assertRpcUrlAllowed, createLiveReader } from './reader.js';
 import type {
   CheckEvidence,
   EvmAddress,
   FailureCode,
+  RegistrationLookupFact,
   SignedAttestation,
   SignedMessageResult,
   StatusSubject,
@@ -174,7 +179,16 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
   function safeNow(): Date {
     try {
       const value = now();
-      if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+      if (value instanceof Date) {
+        const ms = value.getTime();
+        // The typeof/finiteness test is the substance (fix pass 3,
+        // NF-C): Number.isNaN does not coerce, so a fake Date whose
+        // getTime() returns a string passed the old guard, and the
+        // TypeError from its toISOString() then escaped both entry
+        // points. Returning a fresh Date over the validated number
+        // also means a forged prototype never reaches toISOString.
+        if (typeof ms === 'number' && Number.isFinite(ms)) return new Date(ms);
+      }
     } catch {
       // fall through to the system clock
     }
@@ -280,6 +294,7 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     humanId?: string | null;
     latencyMs?: number;
     disclosure?: 'hash' | 'none';
+    registration?: RegistrationLookupFact;
   }): VerifyResult {
     const humanId = args.humanId ?? null;
     return {
@@ -292,6 +307,7 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       failures: args.failures,
       evidence: evidence(args.latencyMs),
       ...(args.disclosure !== undefined ? { disclosure: args.disclosure } : {}),
+      ...(args.registration !== undefined ? { registration: args.registration } : {}),
     };
   }
 
@@ -301,6 +317,14 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
   ): Promise<LookupOutcome> {
     const start = Date.now();
     const latency = () => Date.now() - start;
+    if (signal?.aborted) {
+      // A signal already aborted at entry wins over a collaborator
+      // that resolves instantly (fix pass 3, NF-G): inside the race
+      // an already-resolved deadline and an already-resolved call
+      // settle in attachment order, not in importance, so the race
+      // alone cannot promise this ordering.
+      return { state: 'unknown', code: 'lookup_failed', latencyMs: 0 };
+    }
     const outcome = await raceDeadline(() => reader.lookupHuman(address), timeoutMs, signal);
     switch (outcome.kind) {
       case 'value': {
@@ -390,12 +414,18 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     const { payload } = envelope.attestation;
     const wallet = payload.agentWalletAddress;
     const failures: FailureCode[] = [];
+    // The step-6 lookup's fate, recorded for the SPEC 11.2 checks
+    // projection (fix pass 3, D6). Assigned when the pipeline
+    // reaches step 6; stays undefined on earlier returns, which is
+    // itself the fact that the lookup never ran.
+    let registration: RegistrationLookupFact | undefined;
     const finish = (status: VerificationStatus, extra: Partial<Parameters<typeof buildResult>[0]> = {}) =>
       buildResult({
         status,
         address: wallet,
         failures,
         ...(disclosure !== undefined ? { disclosure } : {}),
+        ...(registration !== undefined ? { registration } : {}),
         ...extra,
       });
 
@@ -403,12 +433,18 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     // normalised (lowercased) forms (7.5 review m2): a differently-cased
     // or bad-checksum spelling of the same address is the same wallet,
     // and a non-string expectation is a mismatch, never a throw.
-    if (
-      opts.expectedSubject &&
-      (opts.expectedSubject.type !== payload.subject.type ||
-        opts.expectedSubject.id !== payload.subject.id)
-    ) {
-      failures.push('subject_mismatch');
+    if (opts.expectedSubject !== undefined) {
+      // A null or malformed expectation fails closed (fix pass 3,
+      // NF-F), symmetric with expectedWallet below: a caller that
+      // builds the expectation from untrusted data must not
+      // silently lose the binding check.
+      const expected: unknown = opts.expectedSubject;
+      const matches =
+        typeof expected === 'object' &&
+        expected !== null &&
+        (expected as { type?: unknown }).type === payload.subject.type &&
+        (expected as { id?: unknown }).id === payload.subject.id;
+      if (!matches) failures.push('subject_mismatch');
     }
     if (opts.expectedWallet !== undefined) {
       const expected: unknown = opts.expectedWallet;
@@ -444,17 +480,19 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
 
     if (signature.kind === 'unknown') {
       failures.push(...dateFailures());
-      const invalidClass = failures.some((f) => f !== 'expired');
-      if (invalidClass) {
-        return finish('invalid', { failures: [...failures, signature.code] });
-      }
       // The replay step (SPEC 3.3 step 5) still runs on this path
       // (7.5 re-review M1): the read-only has() consumes nothing,
       // so a nonce claimed by an earlier verified presentation is
       // reported as a replay rather than masked by the signature
-      // stage's network failure. A store failure here changes
-      // nothing — the signature outcome already determines the
-      // result below.
+      // stage's network failure. It runs even when a binding or
+      // date failure coexists (fix pass 3, NF-D): returning early
+      // for the invalid class skipped the read and masked the
+      // replay. A store failure here changes nothing - the
+      // signature outcome already determines the result below.
+      // When the replay fires, the uncertain signature code is
+      // preserved alongside it (merge decision, Oct 27, 2026):
+      // consumers must not infer the signature passed, and the
+      // collection rule gathers every applicable code.
       if (opts.nonceStore) {
         const store = opts.nonceStore;
         const has = await raceDeadline(
@@ -463,12 +501,14 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
           opts.signal,
         );
         if (has.kind === 'value' && has.value === true) {
-          // Preserve the uncertain signature fact alongside the
-          // established replay; consumers must not infer it passed.
           return finish('invalid', {
             failures: [...failures, signature.code, 'replay_detected'],
           });
         }
+      }
+      const invalidClass = failures.some((f) => f !== 'expired');
+      if (invalidClass) {
+        return finish('invalid', { failures: [...failures, signature.code] });
       }
       if (expired) {
         return finish('expired', { failures: [...failures, signature.code] });
@@ -482,6 +522,23 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
 
     const invalidFailures = failures.filter((f) => f !== 'expired');
     if (invalidFailures.length > 0) {
+      // The replay read runs on the signature-mismatch path too
+      // (fix pass 3, D8): a replayed nonce under a bad signature
+      // collects replay_detected alongside signature_mismatch,
+      // exactly as the signature-unknown path above collects it —
+      // the two signature-failure paths must not disagree about
+      // whether a replay happened. Read-only: consumes nothing.
+      if (opts.nonceStore && failures.includes('signature_mismatch')) {
+        const store = opts.nonceStore;
+        const has = await raceDeadline(
+          () => store.has(payload.nonce, wallet),
+          timeoutMs,
+          opts.signal,
+        );
+        if (has.kind === 'value' && has.value === true) {
+          failures.push('replay_detected');
+        }
+      }
       return finish('invalid');
     }
 
@@ -490,10 +547,13 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     // The final atomic claim below still decides concurrent attempts.
     if (opts.nonceStore) {
       // The store is a collaborator under the same deadline race
-      // as every other (7.5 re-review N2): a hanging has() is a
-      // failed lookup, a throwing/aborting one is also a failure, and a
-      // non-boolean resolution is a contract violation — all fail
-      // closed, none escape or hang the verification.
+      // as every other (7.5 re-review N2): a hanging has() is cut
+      // at the deadline, a throwing/aborting one is a failure, and
+      // a non-boolean resolution is a contract violation — all
+      // fail closed, none escape or hang the verification. Every
+      // store failure maps to lookup_failed (fix pass 3, D1/D2):
+      // SPEC 3.3 pins the store's failure code with no timeout
+      // carve-out; lookup_timeout belongs to the chain/RPC reads.
       const store = opts.nonceStore;
       const has = await raceDeadline(
         () => store.has(payload.nonce, wallet),
@@ -504,7 +564,7 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
         return finish('invalid', { failures: [...failures, 'replay_detected'] });
       }
       if (has.kind !== 'value' || typeof has.value !== 'boolean') {
-        const code = 'lookup_failed';
+        const code: FailureCode = 'lookup_failed';
         if (expired) {
           return finish('expired', { failures: [...failures, code] });
         }
@@ -520,12 +580,42 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
 
     // Step 6, registration. Only a successful lookup (or an explicit
     // checkRegistration=false) may consume the nonce. A lookup can
-    // cross expiresAt, so recheck the clock before interpreting it.
+    // cross expiresAt, so recheck the clock before interpreting it —
+    // and the recheck happens BEFORE the claim (fix pass 3, NF-A):
+    // the claim is the last mutating action before a verified
+    // return, so an expiry that crossed during the lookup returns
+    // here, without any claim call, and an 'expired' outcome never
+    // burns the nonce. The store's own clock check inside claim()
+    // closes the remaining gap between this recheck and its atomic
+    // write, so a stale verifier cannot make a nonce persist past
+    // expiry either.
     const outcome = opts.checkRegistration === false
       ? undefined
       : await lookup(wallet, opts.signal);
+    registration =
+      opts.checkRegistration === false
+        ? { ran: false }
+        : {
+            ran: true,
+            outcome:
+              outcome?.state === 'registered'
+                ? 'registered'
+                : outcome?.state === 'unregistered'
+                  ? 'unregistered'
+                  : 'failed',
+          };
     if (expiresMs <= safeNow().getTime()) {
-      return finish('expired', { failures: ['expired'] });
+      // Expiry crossed during the lookup. A simultaneous lookup
+      // failure is collected, not discarded (fix pass 3, D5): in
+      // check order, the date code precedes the registration code.
+      // (`failures` is empty here by construction — every earlier
+      // non-date failure already returned.)
+      const crossed: FailureCode[] = ['expired'];
+      if (outcome?.state === 'unknown') crossed.push(outcome.code);
+      return finish('expired', {
+        failures: crossed,
+        ...(outcome ? { latencyMs: outcome.latencyMs } : {}),
+      });
     }
     if (outcome?.state === 'unknown') {
       return finish('unknown', { failures: [outcome.code], latencyMs: outcome.latencyMs });
@@ -537,22 +627,19 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       });
     }
     if (opts.nonceStore) {
-      // claim's own expiry check closes the race between our clock
-      // check and its atomic write. A stale verifier must not make a
-      // nonce persist past expiry. The claim itself runs under the
-      // deadline race (7.5 re-review N2): a hanging store is
-      // lookup_failed, a throwing one is also lookup_failed, and any
-      // resolution outside the NonceClaimResult union is a contract
-      // violation treated as lookup_failed — fail closed.
+      // The claim runs under the deadline race (7.5 re-review N2).
+      // Every non-'claimed' outcome fails closed as unknown: a
+      // throwing store, a resolution outside the NonceClaimResult
+      // union, and a claim whose response is lost or timed out —
+      // which SPEC 3.3 treats as possibly consumed — all map to
+      // lookup_failed, with no timeout carve-out (fix pass 3,
+      // D1/D2) and no release and no retry (SPEC 3.3).
       const store = opts.nonceStore;
       const claim = await raceDeadline(
         () => store.claim(payload.nonce, wallet, payload.expiresAt),
         timeoutMs,
         opts.signal,
       );
-      if (claim.kind === 'timeout') {
-        return finish('unknown', { failures: ['lookup_failed'] });
-      }
       if (claim.kind === 'value' && claim.value === 'replay') {
         return finish('invalid', { failures: ['replay_detected'] });
       }
@@ -562,9 +649,6 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       if (claim.kind !== 'value' || claim.value !== 'claimed') {
         return finish('unknown', { failures: ['lookup_failed'] });
       }
-    }
-    if (expiresMs <= safeNow().getTime()) {
-      return finish('expired', { failures: ['expired'] });
     }
     return finish('verified', {
       failures: [],
@@ -680,6 +764,15 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
         typeof signature !== 'string' ||
         !/^0x(?:[0-9a-fA-F]{2})*$/.test(signature)
       ) {
+        return fail(['signature_mismatch'], expected);
+      }
+      // The attestation shape gate's cap applies here too (fix
+      // pass 3, NF-E): an unbounded caller-supplied byte string
+      // forwarded into an eth_call is the same DoS surface on this
+      // path, and an empty signature is not a signature — '0x'
+      // previously sailed through to the contract call.
+      const signatureBytes = (signature.length - 2) / 2;
+      if (signatureBytes === 0 || signatureBytes > MAX_EIP1271_SIGNATURE_BYTES) {
         return fail(['signature_mismatch'], expected);
       }
       const outcome = await erc1271Check(expected, message, signature);
