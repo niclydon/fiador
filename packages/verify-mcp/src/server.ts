@@ -9,6 +9,23 @@ import {
 import { computeChecks } from './checks.js';
 import { parseJsonStrict } from './json.js';
 
+import { createRequire } from 'node:module';
+
+// The handshake version is read from this package's own package.json
+// at runtime, never a literal: a hardcoded '0.2.0' survived the 0.2.1
+// patch release and the drift was only caught in staging verification.
+// createRequire resolves ../package.json relative to this module,
+// which lands on the package root in both the repo layout
+// (dist/server.js) and an installed node_modules layout; it survives
+// the tsc build because it is a runtime read of a file npm always
+// ships inside the package, not a build-copied asset.
+const require = createRequire(import.meta.url);
+const pkg = require('../package.json') as { version?: unknown };
+if (typeof pkg.version !== 'string' || pkg.version === '') {
+  throw new Error('verify-mcp: package.json does not declare a version');
+}
+export const SERVER_VERSION: string = pkg.version;
+
 // The verify MCP server (SPEC section 11): a thin wrapper over
 // @fiador/verify with no semantics of its own. Every tool calls the
 // core's public API and returns the core's public projection; this
@@ -77,7 +94,7 @@ function badgeUrls(base: string, subjectType: string, subjectId: string) {
 }
 
 export function createVerifyMcpServer(deps: VerifyMcpDeps): McpServer {
-  const server = new McpServer({ name: 'verify-mcp', version: '0.2.0' });
+  const server = new McpServer({ name: 'verify-mcp', version: SERVER_VERSION });
 
   server.registerTool(
     'verify_address',
