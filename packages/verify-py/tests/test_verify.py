@@ -517,7 +517,9 @@ def test_positive_lookup_accepted_only_after_chain_confirms_480(vectors):
     with StubRpc(chain_id="0x1e0", eth_call_result=POSITIVE_LOOKUP_RESULT) as rpc:
         result = create_verifier(rpc_url=rpc.url).verify_address(A)
     assert result.status == "verified"
-    assert result.human_hash == hash_human_id("0x" + "0" * 63 + "1")
+    # The live reader renders the uint256 canonically (32-byte
+    # padded), so the hash is over POSITIVE_LOOKUP_RESULT itself.
+    assert result.human_hash == hash_human_id(POSITIVE_LOOKUP_RESULT)
     assert rpc.eth_calls == 1
 
 
@@ -965,6 +967,71 @@ def test_signature_step_network_failure_preserves_binding_failures(vectors, fixe
     assert "lookup_failed" in result.failures
 
 
+# -- 7.5 re-review N1: lookup fails closed on garbage reader values -------------
+
+
+class _GarbageReader:
+    """A reader that resolves a fixed non-result value."""
+
+    source = "live"
+
+    def __init__(self, value):
+        self._value = value
+
+    def lookup_human(self, address):
+        return self._value
+
+
+_GARBAGE_READER_VALUES = [
+    ("a number", 42),
+    ("a boolean", True),
+    ("a non-hex string", "not-a-human-id"),
+    ("short hex", "0x1234"),
+    ("unpadded hex", "0x1"),
+    ("63-hex-char string", "0x" + "a" * 63),
+    ("65-hex-char string", "0x" + "a" * 65),
+    ("canonical shape plus a trailing newline", "0x" + "a" * 64 + "\n"),
+    ("a mapping", {"human": 1}),
+    ("raw bytes", b"\x11" * 32),
+    ("an arbitrary object", object()),
+]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [value for _label, value in _GARBAGE_READER_VALUES],
+    ids=[label for label, _value in _GARBAGE_READER_VALUES],
+)
+def test_garbage_reader_value_is_unknown_never_verified(value, fixed_now):
+    verifier = create_verifier(reader=_GarbageReader(value), now=lambda: fixed_now)
+    result = verifier.verify_address(A)
+    assert result.status == "unknown"
+    assert result.failures == ["lookup_failed"]
+    assert result.human_hash is None
+
+
+def test_garbage_reader_value_on_attestation_path_is_unknown(vectors, fixed_now):
+    verifier = create_verifier(reader=_GarbageReader(42), now=lambda: fixed_now)
+    result = verifier.verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"])
+    )
+    assert result.status == "unknown"
+    assert result.failures == ["lookup_failed"]
+    assert result.human_hash is None
+
+
+def test_mixed_case_canonical_human_id_is_a_registration(fixed_now):
+    # The canonical shape admits either hex case (SPEC 3.1), as in
+    # the TS core: case alone is not garbage.
+    verifier = create_verifier(
+        reader=_GarbageReader(HUMAN_1.upper().replace("0X", "0x")),
+        now=lambda: fixed_now,
+    )
+    result = verifier.verify_address(A)
+    assert result.status == "verified"
+    assert result.failures == []
+
+
 # -- 7.5 regressions: nonce store claim contract (B2/M1/M2) ----------------------
 
 
@@ -1006,8 +1073,10 @@ def test_replay_outranks_expiry(vectors, fixed_now):
         nonce_store=AlreadyClaimed(),
     )
     assert result.status == "invalid"
-    assert "replay_detected" in result.failures
-    assert "expired" in result.failures
+    # Exact failure list, in check order (SPEC 3.3): dates are
+    # step 4, replay is step 5, so 'expired' precedes
+    # 'replay_detected' - the order the TS core collects.
+    assert result.failures == ["expired", "replay_detected"]
 
 
 def test_throwing_claim_store_fails_closed(vectors, fixed_now):
