@@ -13,6 +13,7 @@
 
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import {
   toPublicVerifyResult,
   type SignedAttestation,
@@ -40,12 +41,15 @@ export interface BadgeServiceDeps {
   staleOnErrorMs?: number; // stale verified ceiling, default 900_000
   rateLimitMax?: number; // per IP per window, default 120
   rateLimitWindowMs?: number; // default 60_000
+  /** Exact IPs of reverse proxies that append X-Forwarded-For. */
+  trustedProxyIps?: readonly string[];
   maxConcurrentLookups?: number; // outbound core-call cap, default 10
 }
 
 interface CacheEntry {
   result: VerifyResult;
   storedAtMs: number;
+  sourceFingerprint: string;
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -61,15 +65,19 @@ export function badgeUrls(base: string, subjectType: string, subjectId: string) 
 }
 
 /** SPEC 4.6 HTTP cache table, keyed by observed status. */
-export function cacheControlFor(status: VerificationStatus): string {
+export function cacheControlFor(status: VerificationStatus, remainingMs?: number): string {
+  if (status === 'unknown') return 'no-store';
+  const limit = status === 'verified' || status === 'expired' ? 300_000 : 60_000;
+  const seconds = Math.max(0, Math.floor(Math.min(limit, remainingMs ?? limit) / 1000));
+  if (seconds === 0) return 'no-store';
   switch (status) {
     case 'verified':
-      return 'public, max-age=300, s-maxage=300, stale-while-revalidate=60';
+      return `public, max-age=${seconds}, s-maxage=${seconds}`;
     case 'expired':
-      return 'public, max-age=300, s-maxage=300';
+      return `public, max-age=${seconds}, s-maxage=${seconds}`;
     case 'unregistered':
     case 'invalid':
-      return 'public, max-age=60, s-maxage=60';
+      return `public, max-age=${seconds}, s-maxage=${seconds}`;
     default:
       return 'no-store';
   }
@@ -77,15 +85,15 @@ export function cacheControlFor(status: VerificationStatus): string {
 
 export function createBadgeService(deps: BadgeServiceDeps): Server {
   const now = deps.now ?? (() => new Date());
-  const ttlVerified = deps.cacheTtlVerifiedMs ?? 300_000;
-  const ttlNegative = deps.cacheTtlNegativeMs ?? 60_000;
-  const staleCeiling = deps.staleOnErrorMs ?? 900_000;
+  const ttlVerified = Math.min(deps.cacheTtlVerifiedMs ?? 300_000, 300_000);
+  const ttlNegative = Math.min(deps.cacheTtlNegativeMs ?? 60_000, 60_000);
+  const staleCeiling = Math.min(deps.staleOnErrorMs ?? 900_000, 900_000);
   const rateMax = deps.rateLimitMax ?? 120;
   const rateWindow = deps.rateLimitWindowMs ?? 60_000;
   const maxConcurrent = deps.maxConcurrentLookups ?? 10;
 
   const cache = new Map<string, CacheEntry>();
-  const inFlight = new Map<string, Promise<{ result: VerifyResult; stale: boolean }>>();
+  const inFlight = new Map<string, Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }>>();
   const rateWindows = new Map<string, number[]>();
   let activeLookups = 0;
   const lookupQueue: Array<() => void> = [];
@@ -110,17 +118,19 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
     return 0; // unknown is never cached (SPEC 4.6: a failure retries next request)
   }
 
-  async function callCore(subjectType: string, subjectId: string): Promise<VerifyResult> {
+  async function callCore(subjectType: string, subjectId: string, attestation: SignedAttestation | null, sourceFailed: boolean): Promise<VerifyResult> {
     await acquireLookup();
     try {
       if (subjectType === 'address') {
         return await deps.verifier.resolveStatus({ kind: 'address', address: subjectId });
       }
-      const resolver = deps.resolveAttestation ?? (async () => null);
       return await deps.verifier.resolveStatus({
         kind: 'attested_subject',
         subject: { type: subjectType, id: subjectId },
-        resolveAttestation: resolver,
+        resolveAttestation: async () => {
+          if (sourceFailed) throw new Error('attestation source unavailable');
+          return attestation;
+        },
       });
     } finally {
       releaseLookup();
@@ -130,23 +140,43 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
   async function resolveResult(
     subjectType: string,
     subjectId: string,
-  ): Promise<{ result: VerifyResult; stale: boolean }> {
+  ): Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }> {
     const key = subjectType === 'address' ? `address:${subjectId.toLowerCase()}` : `${subjectType}:${subjectId}`;
     const nowMs = now().getTime();
-    const entry = cache.get(key);
-    if (entry && nowMs - entry.storedAtMs < ttlFor(entry.result.status)) {
-      return { result: entry.result, stale: false };
+    let attestation: SignedAttestation | null = null;
+    let sourceFailed = false;
+    if (subjectType !== 'address') {
+      try {
+        attestation = await (deps.resolveAttestation ?? (async () => null))({ type: subjectType, id: subjectId });
+      } catch {
+        sourceFailed = true;
+      }
     }
-    const pending = inFlight.get(key);
+    // Read the source before using the result cache. A removed or
+    // replaced registry entry must not inherit the old verified result.
+    const sourceFingerprint = subjectType === 'address'
+      ? 'address'
+      : sourceFailed ? 'source-error' : attestation
+        ? createHash('sha256').update(JSON.stringify(attestation)).digest('hex') : 'missing';
+    let entry = cache.get(key);
+    if (!sourceFailed && entry && entry.sourceFingerprint !== sourceFingerprint) {
+      cache.delete(key);
+      entry = undefined;
+    }
+    if (!sourceFailed && entry && nowMs - entry.storedAtMs < ttlFor(entry.result.status)) {
+      return { result: entry.result, stale: false, storedAtMs: entry.storedAtMs };
+    }
+    const flightKey = `${key}:${sourceFingerprint}`;
+    const pending = inFlight.get(flightKey);
     if (pending) return pending;
     const flight = (async () => {
-      const result = await callCore(subjectType, subjectId);
+      const result = await callCore(subjectType, subjectId, attestation, sourceFailed);
       if (result.evidence.rpcLatencyMs !== undefined) health.lastLookupMs = result.evidence.rpcLatencyMs;
       const lookupFailed =
         result.status === 'unknown' &&
         (result.failures.includes('lookup_failed') || result.failures.includes('lookup_timeout'));
       if (lookupFailed || result.failures.includes('attestation_not_found')) {
-        if (lookupFailed) health.agentBookReachable = false;
+        if (lookupFailed && !sourceFailed) health.agentBookReachable = false;
       } else {
         health.agentBookReachable = true;
       }
@@ -154,18 +184,18 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
       // verified result younger than the ceiling, with its ORIGINAL
       // check time; older, or none, and the honest answer is unknown.
       if (lookupFailed && entry && entry.result.status === 'verified' && now().getTime() - entry.storedAtMs < staleCeiling) {
-        return { result: entry.result, stale: true };
+        return { result: entry.result, stale: true, storedAtMs: entry.storedAtMs };
       }
-      if (result.status !== 'unknown') {
-        cache.set(key, { result, storedAtMs: now().getTime() });
+      if (!sourceFailed && result.status !== 'unknown') {
+        cache.set(key, { result, storedAtMs: nowMs, sourceFingerprint });
       }
-      return { result, stale: false };
+      return { result, stale: false, storedAtMs: nowMs };
     })();
-    inFlight.set(key, flight);
+    inFlight.set(flightKey, flight);
     try {
       return await flight;
     } finally {
-      inFlight.delete(key);
+      inFlight.delete(flightKey);
     }
   }
 
@@ -175,6 +205,16 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
     hits.push(nowMs);
     rateWindows.set(ip, hits);
     return hits.length > rateMax;
+  }
+
+  function clientIp(req: IncomingMessage): string {
+    const peer = req.socket.remoteAddress ?? 'unknown';
+    if (!deps.trustedProxyIps?.includes(peer)) return peer;
+    const forwarded = req.headers['x-forwarded-for'];
+    // A trusted single-hop proxy appends the actual client as the
+    // rightmost value. Earlier values can be supplied by a client.
+    const candidate = typeof forwarded === 'string' ? forwarded.split(',').at(-1)?.trim() : undefined;
+    return candidate && isIP(candidate) ? candidate : peer;
   }
 
   function etagFor(parts: string[]): string {
@@ -205,19 +245,21 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
       checkedAt: string;
       subjectKey: string;
       forceNoStore?: boolean;
+      cacheControl?: string;
+      labelOverride?: string;
     },
   ): void {
     const state = stateForStatus(args.status);
     const theme: ThemeSelection =
       args.themeParam === 'dark' || args.themeParam === 'light' ? args.themeParam : 'auto';
     const headers: Record<string, string> = {
-      'cache-control': args.forceNoStore || args.stale ? 'no-store' : cacheControlFor(args.status),
+      'cache-control': args.forceNoStore || args.stale ? 'no-store' : args.cacheControl ?? cacheControlFor(args.status),
       'x-checked-at': args.checkedAt,
       'accept-ch': 'Sec-CH-Prefers-Color-Scheme',
     };
     if (args.format === 'svg') {
-      headers['etag'] = etagFor([args.subjectKey, args.status, args.checkedAt, args.variant, theme]);
-      const svg = renderBadgeSvg({ state, theme, variant: args.variant, checkedAt: args.checkedAt, now: now() });
+      headers['etag'] = etagFor([args.subjectKey, args.status, args.checkedAt, args.variant, theme, args.labelOverride ?? '']);
+      const svg = renderBadgeSvg({ state, theme, variant: args.variant, checkedAt: args.checkedAt, now: now(), ...(args.labelOverride ? { labelOverride: args.labelOverride } : {}) });
       res.writeHead(200, { 'content-type': 'image/svg+xml', ...headers });
       res.end(svg);
       return;
@@ -234,8 +276,9 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
       args.checkedAt,
       args.variant,
       theme === 'auto' ? `auto:${resolved}` : theme,
+      args.labelOverride ?? '',
     ]);
-    const png = renderBadgePng({ state, theme: resolved, variant: args.variant, checkedAt: args.checkedAt, now: now() });
+    const png = renderBadgePng({ state, theme: resolved, variant: args.variant, checkedAt: args.checkedAt, now: now(), ...(args.labelOverride ? { labelOverride: args.labelOverride } : {}) });
     res.writeHead(200, { 'content-type': 'image/png', ...headers });
     res.end(png);
   }
@@ -244,7 +287,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
     try {
       const url = new URL(req.url ?? '/', 'http://badge.local');
       const path = url.pathname;
-      const ip = req.socket.remoteAddress ?? 'unknown';
+      const ip = clientIp(req);
 
       if (req.method !== 'GET') {
         sendJson(res, 404, { error: 'not found' });
@@ -280,7 +323,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
           sendJson(res, 400, { error: 'malformed address subject' }, { 'cache-control': 'no-store' });
           return;
         }
-        const { result, stale } = await resolveResult(subjectType, subjectId);
+        const { result, stale, storedAtMs } = await resolveResult(subjectType, subjectId);
         const pub = toPublicVerifyResult(result);
         if (stale) pub.evidence = { ...pub.evidence, source: 'cache' };
         const body = {
@@ -294,7 +337,8 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
           badge: badgeUrls(baseFrom(req), subjectType, subjectId),
         };
         sendJson(res, 200, body, {
-          'cache-control': stale ? 'no-store' : cacheControlFor(result.status),
+          'cache-control': stale || subjectType === 'discord_application'
+            ? 'no-store' : cacheControlFor(result.status, ttlFor(result.status) - (now().getTime() - storedAtMs)),
           etag: etagFor([`${subjectType}:${subjectId}`, result.status, pub.evidence.checkedAt, 'json']),
           'x-checked-at': pub.evidence.checkedAt,
         });
@@ -328,11 +372,15 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
           });
           return;
         }
-        const { result, stale } = await resolveResult(subjectType, subjectId);
+        const { result, stale, storedAtMs } = await resolveResult(subjectType, subjectId);
+        const claimUnconfirmed = subjectType === 'discord_application' && result.status === 'verified';
         sendBadge(res, {
-          status: result.status, stale, themeParam, variant, format,
+          status: claimUnconfirmed ? 'unknown' : result.status, stale, themeParam, variant, format,
           clientHint: req.headers['sec-ch-prefers-color-scheme'] as string | undefined,
           checkedAt: result.evidence.checkedAt, subjectKey: `${subjectType}:${subjectId}`,
+          forceNoStore: subjectType === 'discord_application',
+          cacheControl: cacheControlFor(result.status, ttlFor(result.status) - (now().getTime() - storedAtMs)),
+          ...(claimUnconfirmed ? { labelOverride: 'Claim unconfirmed' } : {}),
         });
         return;
       }

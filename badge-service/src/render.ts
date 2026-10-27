@@ -69,8 +69,8 @@ function paintAttrs(
   return pairs.map(([slot, kind]) => `${kind}="${palette[slot]}"`).join(' ');
 }
 
-function pillInner(p: PillPalette, state: BadgeState, checkedLabel: string, mode: 'attrs' | 'classes'): string {
-  const width = PILL_WIDTHS[state];
+function pillInner(p: PillPalette, state: BadgeState, checkedLabel: string, mode: 'attrs' | 'classes', labelOverride?: string): string {
+  const width = labelOverride ? 280 : PILL_WIDTHS[state];
   const pal = p as unknown as Record<string, string>;
   const parts: string[] = [];
   parts.push(
@@ -81,7 +81,7 @@ function pillInner(p: PillPalette, state: BadgeState, checkedLabel: string, mode
       `<circle cx="15" cy="14" r="2.6" ${paintAttrs(pal, [['dot', 'fill']], mode)}/>`,
   );
   parts.push(
-    `<text x="30" y="18" font-family="${FONT}" font-size="12.5" letter-spacing="0.2" ${paintAttrs(pal, [['label', 'fill']], mode)}>${escapeXml(p.labelText)}</text>`,
+    `<text x="30" y="18" font-family="${FONT}" font-size="12.5" letter-spacing="0.2" ${paintAttrs(pal, [['label', 'fill']], mode)}>${escapeXml(labelOverride ?? p.labelText)}</text>`,
   );
   if (state === 'expired') {
     parts.push(
@@ -120,10 +120,11 @@ export function renderBadgeSvg(args: {
   variant: BadgeVariant;
   checkedAt: string;
   now: Date;
+  labelOverride?: string;
 }): string {
-  const { state, theme, variant, checkedAt, now } = args;
+  const { state, theme, variant, checkedAt, now, labelOverride } = args;
   const checkedLabel = formatCheckedLabel(checkedAt, now);
-  const title = `fiador badge: ${state}, checked ${checkedAt}`;
+  const title = `fiador badge: ${labelOverride ?? state}, checked ${checkedAt}`;
   if (variant === 'icon') {
     const aria = 'fiador agent mark';
     if (theme === 'auto') {
@@ -141,24 +142,24 @@ export function renderBadgeSvg(args: {
       `<title>${escapeXml(title)}</title>${iconInner(ICON_PALETTES[theme][state], 'attrs')}</svg>`
     );
   }
-  const width = PILL_WIDTHS[state];
-  const aria = state === 'unverified' ? 'not verified' : 'fiador';
+  const width = labelOverride ? 280 : PILL_WIDTHS[state];
+  const aria = labelOverride ?? (state === 'unverified' ? 'not verified' : 'fiador');
   if (theme === 'auto') {
     const style = autoStyle((t) => PILL_PALETTES[t][state]);
     return (
       `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${PILL_HEIGHT}" viewBox="0 0 ${width} 28" role="img" aria-label="${aria}" data-checked-at="${escapeXml(checkedAt)}">` +
-      `<title>${escapeXml(title)}</title>${style}${pillInner(PILL_PALETTES.light[state], state, checkedLabel, 'classes')}</svg>`
+      `<title>${escapeXml(title)}</title>${style}${pillInner(PILL_PALETTES.light[state], state, checkedLabel, 'classes', labelOverride)}</svg>`
     );
   }
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${PILL_HEIGHT}" viewBox="0 0 ${width} 28" role="img" aria-label="${aria}" data-checked-at="${escapeXml(checkedAt)}">` +
-    `<title>${escapeXml(title)}</title>${pillInner(PILL_PALETTES[theme][state], state, checkedLabel, 'attrs')}</svg>`
+    `<title>${escapeXml(title)}</title>${pillInner(PILL_PALETTES[theme][state], state, checkedLabel, 'attrs', labelOverride)}</svg>`
   );
 }
 
-export function badgeSvgDimensions(state: BadgeState, variant: BadgeVariant): { width: number; height: number } {
+export function badgeSvgDimensions(state: BadgeState, variant: BadgeVariant, labelOverride?: string): { width: number; height: number } {
   if (variant === 'icon') return { width: ICON_SIZE, height: ICON_SIZE };
-  return { width: PILL_WIDTHS[state], height: PILL_HEIGHT };
+  return { width: labelOverride ? 280 : PILL_WIDTHS[state], height: PILL_HEIGHT };
 }
 
 /** Rasterise the resolved-theme SVG at 3x (SPEC 4.5: pill height
@@ -169,9 +170,10 @@ export function renderBadgePng(args: {
   variant: BadgeVariant;
   checkedAt: string;
   now: Date;
+  labelOverride?: string;
 }): Buffer {
   const svg = renderBadgeSvg({ ...args, theme: args.theme });
-  const { width } = badgeSvgDimensions(args.state, args.variant);
+  const { width } = badgeSvgDimensions(args.state, args.variant, args.labelOverride);
   const resvg = new Resvg(svg, {
     fitTo: { mode: 'width', value: width * 3 },
     font: { loadSystemFonts: true },

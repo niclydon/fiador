@@ -1,17 +1,16 @@
-import { readFileSync } from 'node:fs';
 import {
   createVerifier,
   type EvmAddress,
-  type SignedAttestation,
   type VerifyCoreOptions,
 } from '@fiador/verify';
+import { createRegistryResolver } from './registry.js';
 import type { BadgeServiceDeps } from './service.js';
 
 // Environment configuration (SPEC 4.8): environment only, values
 // never committed. Names mirror the verify MCP package's (SPEC
 // 11.4): VERIFY_RPC_URL, VERIFY_CONTRACT_ADDRESS, VERIFY_TIMEOUT_MS,
 // VERIFY_REGISTRY_FILE; the SPEC 4.8 spellings (WORLDCHAIN_RPC_URL,
-// AGENTBOOK_CONTRACT, REGISTRY_FILE) are accepted as fallbacks.
+// AGENTBOOK_CONTRACT, REGISTRY_FILE/REGISTRY_URL) are accepted.
 // PORT / BADGE_PORT select the listen port, BADGE_PUBLIC_BASE_URL
 // pins the base used in JSON badge URLs, CACHE_TTL_* / STALE_ON_ERROR_MS
 // / RATE_LIMIT_* override the SPEC 4.6 proposals.
@@ -34,19 +33,11 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
   if (env.BADGE_PUBLIC_BASE_URL) deps.publicBaseUrl = env.BADGE_PUBLIC_BASE_URL;
 
   const registryFile = env.VERIFY_REGISTRY_FILE ?? env.REGISTRY_FILE;
-  if (registryFile) {
-    // A registry document maps "subjectType:subjectId" to a signed
-    // attestation object (the verify MCP's shape). It is the
-    // deployment's own file, loaded at startup; restart to reload.
-    // The service fetches nothing: attestation URLs are never
-    // followed (see README, "Registry shape").
-    const registry = JSON.parse(readFileSync(registryFile, 'utf8')) as Record<
-      string,
-      SignedAttestation
-    >;
-    deps.resolveAttestation = async (subject) =>
-      registry[`${subject.type}:${subject.id}`] ?? null;
-  }
+  const registryUrl = env.VERIFY_REGISTRY_URL ?? env.REGISTRY_URL;
+  if (registryFile || registryUrl) deps.resolveAttestation = createRegistryResolver({
+    ...(registryFile ? { file: registryFile } : {}),
+    ...(registryUrl ? { url: registryUrl } : {}),
+  });
 
   const num = (value: string | undefined) => {
     if (value === undefined) return undefined;
@@ -61,6 +52,9 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
   assign('staleOnErrorMs', num(env.STALE_ON_ERROR_MS));
   assign('rateLimitMax', num(env.RATE_LIMIT_MAX));
   assign('rateLimitWindowMs', num(env.RATE_LIMIT_WINDOW_MS));
+  if (env.RATE_LIMIT_TRUSTED_PROXIES) {
+    deps.trustedProxyIps = env.RATE_LIMIT_TRUSTED_PROXIES.split(',').map((ip) => ip.trim()).filter(Boolean);
+  }
   return deps;
 }
 
