@@ -17,8 +17,8 @@ re-order integer-like keys numerically ("1","2","10" instead of
 "1","10","2"), and an ``extra`` key like ``__proto__`` must be bound
 by the signature as ordinary data — in Python it is, provided the
 entries are emitted explicitly in sorted order. Sorting is by the
-keys' UTF-8 encodings; escaped lone UTF-16 surrogates use
-TextEncoder's replacement-character ordering.
+keys' UTF-8 encodings; lone UTF-16 surrogates in ``extra`` keys are
+rejected before signing because they have no Unicode scalar encoding.
 """
 
 from __future__ import annotations
@@ -38,11 +38,11 @@ _B64URL_NONCE = re.compile(r"^[A-Za-z0-9_-]{22,}$")
 
 # The signature shape gate follows the DECLARED type (7.5 review B1):
 # an EIP-191 signature is exactly 65 bytes; an ERC-1271 signature is
-# an opaque blob whose length is the contract's own business (Safe
-# and passkey validators routinely exceed 65 bytes), so it is gated
-# only as non-empty even-length hex.
+# an opaque blob, capped at 8 KB so a hostile document cannot cause
+# an unbounded contract call.
 _EIP191_SIGNATURE_RE = re.compile(r"^0x[0-9a-fA-F]{130}$")
 _EIP1271_SIGNATURE_RE = re.compile(r"^0x(?:[0-9a-fA-F]{2})+$")
+MAX_EIP1271_SIGNATURE_BYTES = 8192
 
 # Length caps on attacker-controlled strings (7.5 review m4):
 # generous for every legitimate use, small enough that a hostile
@@ -143,9 +143,23 @@ def _json_string(value: str) -> str:
 
 
 def _extra_sort_key(key: str) -> bytes:
-    # TextEncoder replaces lone UTF-16 surrogates with U+FFFD. Keep
-    # that ordering when an escaped surrogate appears in a JSON key.
+    # A valid surrogate pair becomes one scalar, matching TextEncoder.
     return key.encode("utf-16", "surrogatepass").decode("utf-16", "replace").encode("utf-8")
+
+
+def _has_lone_surrogate(value: str) -> bool:
+    i = 0
+    while i < len(value):
+        code = ord(value[i])
+        if 0xD800 <= code <= 0xDBFF:
+            if i + 1 >= len(value) or not 0xDC00 <= ord(value[i + 1]) <= 0xDFFF:
+                return True
+            i += 2
+            continue
+        if 0xDC00 <= code <= 0xDFFF:
+            return True
+        i += 1
+    return False
 
 
 def canonical_attestation_message(payload: AttestationPayloadV1 | Mapping[str, Any]) -> str:
@@ -259,7 +273,7 @@ def validate_payload(value: Any) -> tuple[Optional[AttestationPayloadV1], list[s
             return malformed
         extra = {}
         for k, v in value["extra"].items():
-            if not isinstance(k, str) or not isinstance(v, str):
+            if not isinstance(k, str) or not isinstance(v, str) or _has_lone_surrogate(k):
                 return malformed
             extra[k] = v
 
@@ -312,6 +326,7 @@ def validate_signed_attestation(
         _EIP191_SIGNATURE_RE.match(signature)
         if value["signatureType"] == "eip191"
         else _EIP1271_SIGNATURE_RE.match(signature)
+        and len(signature) <= 2 + 2 * MAX_EIP1271_SIGNATURE_BYTES
     )
     if not signature_ok:
         return None, ["malformed_attestation"], wallet

@@ -189,7 +189,8 @@ test('two complete verifier processes have one atomic winner after both read has
 test('uncertain signature or registration never claims in an independent verifier process', async (t) => {
   const path = await temporaryDatabase(t);
   const cases = [
-    ['uncertain-signature', await signedAttestation('45'.repeat(32), 'eip1271'), 0],
+    // M1 preserves replay precedence with one read-only check even when signature verification is uncertain.
+    ['uncertain-signature', await signedAttestation('45'.repeat(32), 'eip1271'), 1],
     ['uncertain-registration', await signedAttestation('56'.repeat(32)), 1],
   ];
   for (const [mode, attestation, expectedReads] of cases) {
