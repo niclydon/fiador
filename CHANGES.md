@@ -1,5 +1,21 @@
 # Changes
 
+## 2026-10-27: static privacy and support pages published
+
+- Published the eight-file static release from branch commit
+  `9b5bc30781333376f8bea1459f03d5069e201858` to fiador.org and
+  www.fiador.org after the operator approved production publication.
+  This was a direct Vercel deployment, not a merge into `main`;
+  draft PR #26 remains open.
+- Live `/privacy/` and `/support/` returned 200. The registry and
+  founding attestation matched the release branch's public files
+  byte for byte; `/verify/`, `/v/example`, and `/api/preview` remained
+  404. The canonical repo registry still differs from its deployed
+  mirror. This release added public information pages; it did not
+  establish live Slack sign-in, a World ID check, or bot control. See
+  `docs/narrative/2026-10-27-static-privacy-support-release.md` and
+  `docs/verification.md` for the release boundary and smoke results.
+
 ## 2026-10-26: verifier bot safety and maintenance
 
 - The bot checks and logs operator claims without creating a new
