@@ -89,7 +89,7 @@ export interface RegistrySource {
   /** Reload the backing file if the refresh interval has elapsed.
    * A failed reload keeps the last good registry. */
   refreshIfDue(nowMs: number): void;
-  /** Bumps whenever a reload actually swaps the registry content,
+  /** Bumps whenever a validated reload swaps the registry map,
    * so the service can drop results cached against the old one:
    * a removed attestation takes effect at refresh, not at some
    * later cache expiry. */
@@ -109,7 +109,6 @@ export class FileRegistry implements RegistrySource {
   private entries = new Map<string, SignedAttestation>();
   private lastAttemptMs = 0;
   private lastSuccessMs = 0;
-  private lastStamp: string | null = null;
   private versionCounter = 0;
 
   get version(): number {
@@ -133,15 +132,6 @@ export class FileRegistry implements RegistrySource {
   private get maxBytes(): number {
     return this.options.maxBytes ?? 1_048_576;
   }
-  private stamp(): string | null {
-    try {
-      const st = statSync(this.file);
-      return `${st.mtimeMs}:${st.size}`;
-    } catch {
-      return null;
-    }
-  }
-
   /** Parse + validate a registry document into the keyed map.
    * Throws ConfigError with a fixed message on any problem. */
   private parse(raw: string): Map<string, SignedAttestation> {
@@ -197,18 +187,14 @@ export class FileRegistry implements RegistrySource {
     const nowMs = (this.options.now ?? Date.now)();
     this.lastAttemptMs = nowMs;
     this.lastSuccessMs = nowMs;
-    this.lastStamp = this.stamp();
   }
 
   refreshIfDue(nowMs: number): void {
     if (nowMs - this.lastAttemptMs < this.refreshMs) return;
     this.lastAttemptMs = nowMs;
-    const stamp = this.stamp();
-    if (stamp !== null && stamp === this.lastStamp) return; // unchanged on disk
     try {
       this.entries = this.readAndParse();
       this.lastSuccessMs = nowMs;
-      this.lastStamp = this.stamp();
       this.versionCounter++;
     } catch {
       // Keep the last good registry; one fixed, sanitised line.

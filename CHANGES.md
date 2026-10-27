@@ -28,6 +28,9 @@
   within 300 seconds, with shared concurrent fetches and cancellation
   of queued source work after all callers time out. The full request
   has a five-second deadline; failures produce neutral, uncached art.
+  A local registry is reread and validated at each refresh so an
+  unchanged healthy file remains fresh past 24 hours; failed reloads
+  still expire the last good entries after 24 hours.
 - An over-limit request reuses observed artwork only until that
   check's original cache deadline; PNG fallbacks are separate for
   each theme and variant. Address status omits a badge URL rather
@@ -35,7 +38,7 @@
   reject credentials, queries, and fragments. The badge registry and
   address response differ from the MCP server's current contract;
   sections 4.2 and 11 parity remains later work.
-- The integrated badge-service suite has 77 route, source, and
+- The integrated badge-service suite has 78 route, source, and
   security tests. Badge checks are configured in CI on Node 22 and 24.
   Nothing was deployed; no public badge instance is claimed.
 

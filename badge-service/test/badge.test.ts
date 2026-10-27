@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createVerifier, hashHumanId, type SignedAttestation, type VerifyResult, type Verifier } from '@fiador/verify';
 import { createBadgeService, type BadgeServiceDeps } from '../src/service.js';
-import { ConfigError, depsFromEnv, hostFromEnv, portFromEnv } from '../src/config.js';
+import { ConfigError, FileRegistry, depsFromEnv, hostFromEnv, portFromEnv } from '../src/config.js';
 import { formatCheckedLabel } from '../src/render.js';
 import { PILL_PALETTES, type BadgeState } from '../src/palettes.js';
 
@@ -1007,6 +1007,41 @@ describe('fix pass: registry refresh and validation (SPEC 4.6)', () => {
     discord_application: {
       app1: { payload: { note }, signature: '0x00', signatureType: 'eip191' },
     },
+  });
+
+  it('keeps an unchanged, validated file fresh across 24 hours and expires after failed reloads', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'badge-reg-'));
+    const file = join(dir, 'registry.json');
+    writeFileSync(file, JSON.stringify(attestationDoc('one')));
+    let clockMs = T0.getTime();
+    const source = new FileRegistry(file, 'VERIFY_REGISTRY_FILE', {
+      now: () => clockMs,
+      refreshMs: 300_000,
+      log: () => {},
+    });
+    const subject = { type: 'discord_application', id: 'app1' };
+    try {
+      source.loadInitial();
+      expect(await source.resolve(subject)).not.toBeNull();
+
+      // Unchanged mtime and size must not make a healthy source age out.
+      clockMs += 300_000;
+      source.refreshIfDue(clockMs);
+      clockMs = T0.getTime() + 86_400_001;
+      source.refreshIfDue(clockMs);
+      expect(await source.resolve(subject)).not.toBeNull();
+
+      // A real failed reload still ages out the last good registry.
+      writeFileSync(file, '{corrupt');
+      clockMs += 300_000;
+      source.refreshIfDue(clockMs);
+      expect(await source.resolve(subject)).not.toBeNull();
+      clockMs += 86_400_001;
+      source.refreshIfDue(clockMs);
+      expect(await source.resolve(subject)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('accepts and validates the canonical entries[] file at startup', async () => {
