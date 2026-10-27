@@ -11,10 +11,12 @@ contract address at construction time (SPEC 3.0).
 from __future__ import annotations
 
 import dataclasses
+import inspect
+import re
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -27,7 +29,13 @@ from .canonical import (
     validate_signed_attestation,
 )
 from .hashes import hash_human_id, truncate_address
-from .reader import AGENTBOOK_CONTRACT, DEFAULT_RPC_URL, JsonRpcClient, LiveReader, RpcError
+from .reader import (
+    AGENTBOOK_CONTRACT,
+    DEFAULT_RPC_URL,
+    JsonRpcClient,
+    LiveReader,
+    assert_rpc_url_allowed,
+)
 from .types import (
     WORLD_CHAIN_ID,
     WORLD_CHAIN_NETWORK,
@@ -47,6 +55,7 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 ERC1271_MAGIC = "0x1626ba7e"
 MAX_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000
 _IS_VALID_SIGNATURE_SELECTOR = "0x1626ba7e"  # isValidSignature(bytes32,bytes)
+_ADDRESS_SHAPE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 def eip191_digest(message: str) -> bytes:
@@ -108,6 +117,27 @@ def _format_iso_z(dt: datetime) -> str:
     return f"{utc:%Y-%m-%dT%H:%M:%S}.{utc.microsecond // 1000:03d}Z"
 
 
+def _call_resolver(resolver: Callable[..., Any], subject: Subject, signal: Any) -> Any:
+    """Call a resolver with (subject), or (subject, signal) when it
+    accepts a second positional argument — the Python form of the TS
+    core passing the caller's AbortSignal (7.5 review M3)."""
+    try:
+        params = list(inspect.signature(resolver).parameters.values())
+        positional = [
+            p
+            for p in params
+            if p.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+        arity = len(positional) + (2 if varargs else 0)
+    except (TypeError, ValueError):
+        arity = 1
+    if arity >= 2:
+        return resolver(subject, signal)
+    return resolver(subject)
+
+
 class _LookupOutcome:
     def __init__(
         self,
@@ -122,14 +152,22 @@ class _LookupOutcome:
         self.latency_ms = latency_ms
 
 
+# Signature outcomes: ('match', None) | ('mismatch', None) |
+# ('unknown', 'lookup_failed' | 'lookup_timeout').
+_SignatureOutcome = tuple[str, Optional[str]]
+
+
 class Verifier:
     def __init__(self, options: Optional[VerifyCoreOptions] = None):
         opts = options or VerifyCoreOptions()
         contract = opts.contract_address or AGENTBOOK_CONTRACT
         if not is_address(contract):
             # Programmer error, not an expected failure: the library
-            # raises here and only here (SPEC 3.0).
-            raise TypeError(f"create_verifier: malformed contract address: {contract}")
+            # raises here and only here (SPEC 3.0). The message names
+            # no value (7.5 review M14): configuration values are
+            # operator material, not diagnostics.
+            raise TypeError("create_verifier: malformed contract address")
+        assert_rpc_url_allowed(opts.rpc_url)
         self._contract = contract
         self._reader = opts.reader or LiveReader(
             rpc_url=opts.rpc_url, contract_address=contract
@@ -139,10 +177,52 @@ class Verifier:
         self._clock_skew_ms = opts.clock_skew_ms
         self._include_raw_human_id = opts.include_raw_human_id
         # The ERC-1271 client, over the same configured RPC (the chain's
-        # public RPC when none is configured, as in the TS core).
-        self._rpc = JsonRpcClient(opts.rpc_url or DEFAULT_RPC_URL)
+        # public RPC when none is configured, as in the TS core). Its
+        # HTTP timeout sits just past the verifier deadline; the
+        # deadline race in _deadline_call is what bounds the check.
+        self._rpc = JsonRpcClient(
+            opts.rpc_url or DEFAULT_RPC_URL, timeout=self._timeout_ms / 1000.0 + 2.0
+        )
 
     # -- internals -----------------------------------------------------
+
+    def _deadline_call(
+        self, start: Callable[[], Any], signal: Any = None
+    ) -> tuple[str, Any]:
+        """Run an operation against the verifier's deadline and an
+        optional caller abort event (a threading.Event). The operation
+        is invoked INSIDE the guarded region (7.5 review M12): a
+        collaborator that raises synchronously — before doing any
+        work — is a 'failed' outcome, never an exception escaping a
+        function whose contract is 'returns a result'.
+
+        A Python parity adaptation: the operation runs on a daemon
+        thread so a hung collaborator cannot hang the caller (the TS
+        core races promises the same way). Returns (kind, value) with
+        kind 'value' | 'timeout' | 'aborted' | 'failed'."""
+        box: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                box["value"] = start()
+            except BaseException as exc:  # collaborator contract: raise on failure
+                box["error"] = exc
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        deadline = time.monotonic() + self._timeout_ms / 1000.0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "timeout", None
+            if signal is not None and signal.is_set():
+                return "aborted", None
+            worker.join(min(remaining, 0.005))
+            if not worker.is_alive():
+                break
+        if "error" in box:
+            return "failed", None
+        return "value", box.get("value")
 
     def _evidence(self, latency_ms: Optional[int] = None) -> CheckEvidence:
         return CheckEvidence(
@@ -177,72 +257,87 @@ class Verifier:
         )
 
     def _lookup(self, address: str, signal: Any = None) -> _LookupOutcome:
-        """Run the reader under the deadline and the caller's abort
-        event. A Python parity adaptation: the reader runs on a daemon
-        thread so a hung reader cannot hang the caller (the TS core
-        races promises the same way)."""
         start = time.monotonic()
 
         def latency_ms() -> int:
             return int(round((time.monotonic() - start) * 1000))
 
-        box: dict[str, Any] = {}
+        kind, value = self._deadline_call(
+            lambda: self._reader.lookup_human(address), signal
+        )
+        if kind == "value":
+            if value is None:
+                return _LookupOutcome("unregistered", latency_ms())
+            return _LookupOutcome("registered", latency_ms(), human_id=value)
+        if kind == "timeout":
+            return _LookupOutcome("unknown", latency_ms(), code="lookup_timeout")
+        return _LookupOutcome("unknown", latency_ms(), code="lookup_failed")
 
-        def run() -> None:
+    def _erc1271_check(
+        self, wallet: str, message: str, signature: str, signal: Any = None
+    ) -> _SignatureOutcome:
+        """ERC-1271 validation for a smart-wallet signer, under the
+        same deadline/abort race as the AgentBook lookup (7.5 review
+        B1): a hanging eth_call must not hold verification open past
+        timeout_ms. Three outcomes, honestly distinguished: the
+        contract answered (match/mismatch), the read itself reverted
+        or returned a non-magic value (mismatch — fail closed on the
+        claim), or the network could not answer at all (unknown).
+
+        Adaptation: the chain-identity call and the eth_call share
+        one deadline budget here (the TS core races each separately,
+        so its worst case is two budgets); the outcomes and codes are
+        identical."""
+
+        def attempt() -> tuple[str, Optional[bool]]:
+            # The configured RPC is the trust oracle for this answer
+            # too; the chain-id call is a misconfiguration guard (it
+            # catches an endpoint answering for another chain), not
+            # an authentication of the RPC (7.5 review M17).
+            if self._rpc.chain_id() != WORLD_CHAIN_ID:
+                return "chain", None
             try:
-                box["value"] = self._reader.lookup_human(address)
-            except BaseException as exc:  # reader contract: raise on failure
-                box["error"] = exc
+                sig_bytes = _signature_bytes(signature)
+            except ValueError:
+                return "mismatch", None
+            calldata = _is_valid_signature_calldata(eip191_digest(message), sig_bytes)
+            try:
+                result = self._rpc.eth_call(wallet, calldata)
+            except Exception:
+                # A wallet that is not a contract, or a reverting
+                # validator, is not a valid ERC-1271 signature. Fail
+                # closed on the claim (SPEC 3.0).
+                return "mismatch", None
+            ok = isinstance(result, str) and result.lower()[:10] == ERC1271_MAGIC
+            return "value", ok
 
-        worker = threading.Thread(target=run, daemon=True)
-        worker.start()
-        deadline = start + self._timeout_ms / 1000.0
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return _LookupOutcome("unknown", latency_ms(), code="lookup_timeout")
-            if signal is not None and signal.is_set():
-                return _LookupOutcome("unknown", latency_ms(), code="lookup_failed")
-            worker.join(min(remaining, 0.005))
-            if not worker.is_alive():
-                break
-        if "error" in box:
-            return _LookupOutcome("unknown", latency_ms(), code="lookup_failed")
-        value = box.get("value")
-        if value is None:
-            return _LookupOutcome("unregistered", latency_ms())
-        return _LookupOutcome("registered", latency_ms(), human_id=value)
+        kind, value = self._deadline_call(attempt, signal)
+        if kind == "timeout":
+            return "unknown", "lookup_timeout"
+        if kind != "value":
+            return "unknown", "lookup_failed"
+        state, ok = value
+        if state == "chain":
+            return "unknown", "lookup_failed"
+        if state == "mismatch":
+            return "mismatch", None
+        return ("match", None) if ok else ("mismatch", None)
 
-    def _erc1271_valid(self, wallet: str, message: str, signature: str) -> bool:
-        # An ERC-1271 magic value on another chain is not a signature
-        # on World Chain. Chain identity failures raise, so they reach
-        # the caller as an unknown check, not a false signature verdict.
-        if self._rpc.chain_id() != WORLD_CHAIN_ID:
-            raise RpcError("ERC-1271 RPC is not World Chain.")
-        try:
-            sig_bytes = _signature_bytes(signature)
-        except ValueError:
-            return False
-        calldata = _is_valid_signature_calldata(eip191_digest(message), sig_bytes)
-        try:
-            result = self._rpc.eth_call(wallet, calldata)
-        except Exception:
-            # A wallet that is not a contract, or a failed read, is not
-            # a valid ERC-1271 signature. Fail closed on the claim
-            # (SPEC 3.0).
-            return False
-        return isinstance(result, str) and result.lower()[:10] == ERC1271_MAGIC
-
-    def _signature_valid(self, attestation: SignedAttestation, message: str) -> bool:
+    def _signature_check(
+        self, attestation: SignedAttestation, message: str, signal: Any = None
+    ) -> _SignatureOutcome:
+        """The declared signature_type selects the ONE verification
+        path (7.5 review B1): 'eip191' is pure local recovery and
+        never touches the network; 'eip1271' never attempts
+        recovery."""
         wallet = attestation.payload.agent_wallet_address
+        if attestation.signature_type == "eip1271":
+            return self._erc1271_check(wallet, message, attestation.signature, signal)
         try:
             recovered = _recover_message_address(message, attestation.signature)
-            if recovered == wallet:
-                return True
         except Exception:
-            # Not an EOA-recoverable signature; fall through to ERC-1271.
-            pass
-        return self._erc1271_valid(wallet, message, attestation.signature)
+            return "mismatch", None
+        return ("match", None) if recovered == wallet else ("mismatch", None)
 
     # -- public API ----------------------------------------------------
 
@@ -288,6 +383,21 @@ class Verifier:
         wallet = payload.agent_wallet_address
         failures = []
 
+        def finish(
+            status: str,
+            result_failures: Optional[list[str]] = None,
+            human_id: Optional[str] = None,
+            latency_ms: Optional[int] = None,
+        ) -> VerifyResult:
+            return self._build_result(
+                status,
+                wallet,
+                failures if result_failures is None else result_failures,
+                human_id=human_id,
+                latency_ms=latency_ms,
+                disclosure=disclosure,
+            )
+
         # Step 2, binding (SPEC 3.3).
         if opts.expected_subject is not None and (
             opts.expected_subject.type != payload.subject.type
@@ -295,89 +405,108 @@ class Verifier:
         ):
             failures.append("subject_mismatch")
         if opts.expected_wallet is not None:
-            try:
-                expected = checksum_address(opts.expected_wallet)
-            except (ValueError, TypeError):
-                expected = (
-                    opts.expected_wallet.lower()
-                    if isinstance(opts.expected_wallet, str)
-                    else opts.expected_wallet
-                )
-            if expected != wallet:
+            # Expected-wallet comparison is on the normalised
+            # (lowercased) forms (7.5 review m2): a differently-cased
+            # or bad-checksum spelling of the same address is the
+            # same wallet, and a non-string expectation is a
+            # mismatch, never a throw.
+            expected = opts.expected_wallet
+            matches = (
+                isinstance(expected, str)
+                and _ADDRESS_SHAPE.match(expected) is not None
+                and expected.lower() == wallet.lower()
+            )
+            if not matches:
                 failures.append("wallet_mismatch")
 
-        # Step 3, signature over the canonical form.
+        # Step 3, signature over the canonical form, on the declared path.
         message = canonical_attestation_message(payload)
-        try:
-            signature_matches = self._signature_valid(signed, message)
-        except Exception:
-            return self._build_result(
-                "unknown", wallet, ["lookup_failed"], disclosure=disclosure
-            )
-        if not signature_matches:
-            failures.append("signature_mismatch")
+        sig_kind, sig_code = self._signature_check(signed, message, opts.signal)
 
-        # Step 4, dates and the protocol lifetime cap. The skew applies
-        # to issuedAt only, never to expiry (SPEC 3.3, as built in TS).
+        # Step 4 facts (dates and the protocol lifetime cap) are
+        # computed before any early return: they are established from
+        # the payload alone, and per SPEC 3.3 precedence they outrank
+        # 'unknown' — a network failure at the signature step must
+        # not pre-empt an expiry or discard a binding failure (7.5
+        # review B1). The skew applies to issued_at only, never to
+        # expiry (SPEC 3.3, as built in TS).
         now_ms = int(_as_utc(self._now()).timestamp() * 1000)
         issued_ms = parse_iso8601_z_ms(payload.issued_at)
         expires_ms = parse_iso8601_z_ms(payload.expires_at)
-        if expires_ms <= issued_ms or expires_ms - issued_ms > MAX_LIFETIME_MS:
-            failures.append("malformed_attestation")
-        if issued_ms > now_ms + self._clock_skew_ms:
-            failures.append("not_yet_valid")
+        lifetime_invalid = (
+            expires_ms <= issued_ms or expires_ms - issued_ms > MAX_LIFETIME_MS
+        )
+        not_yet_valid = issued_ms > now_ms + self._clock_skew_ms
         expired = expires_ms <= now_ms
-        if expired:
-            failures.append("expired")
+
+        def date_failures() -> list[str]:
+            out: list[str] = []
+            if lifetime_invalid:
+                out.append("attestation_lifetime_invalid")
+            if not_yet_valid:
+                out.append("not_yet_valid")
+            if expired:
+                out.append("expired")
+            return out
+
+        if sig_kind == "unknown":
+            failures.extend(date_failures())
+            invalid_class = any(f != "expired" for f in failures)
+            if invalid_class:
+                return finish("invalid", [*failures, sig_code or "lookup_failed"])
+            if expired:
+                return finish("expired", [*failures, sig_code or "lookup_failed"])
+            return finish("unknown", [sig_code or "lookup_failed"])
+        if sig_kind == "mismatch":
+            failures.append("signature_mismatch")
+        failures.extend(date_failures())
 
         invalid_failures = [f for f in failures if f != "expired"]
         if invalid_failures:
-            return self._build_result("invalid", wallet, failures, disclosure=disclosure)
-        if expired:
-            # Expired outranks the lookup outcome (SPEC 3.3 precedence),
-            # so the network check is not run.
-            return self._build_result("expired", wallet, failures, disclosure=disclosure)
+            return finish("invalid")
 
-        # Step 5, replay. A supplied nonce store is caller
-        # infrastructure; its own errors propagate as programmer/infra
-        # errors, not verdicts (as in the TS core).
-        if opts.nonce_store is not None and opts.nonce_store.has(payload.nonce, wallet):
-            return self._build_result(
-                "invalid", wallet, ["replay_detected"], disclosure=disclosure
-            )
+        # Step 5, replay (SPEC 3.3), evaluated BEFORE the expired
+        # return (7.5 review M1): 'invalid' outranks 'expired', so a
+        # nonce that was already claimed makes an otherwise-expired
+        # attestation invalid, not expired. The store contract is a
+        # single atomic claim (B2). A store that throws is caller
+        # infrastructure failing: fail closed as 'unknown' +
+        # lookup_failed (M2), except that an established expiry still
+        # outranks it.
+        if opts.nonce_store is not None:
+            try:
+                claimed = opts.nonce_store.claim(
+                    payload.nonce, wallet, payload.expires_at
+                )
+            except Exception:
+                if expired:
+                    return finish("expired", [*failures, "lookup_failed"])
+                return finish("unknown", ["lookup_failed"])
+            if not claimed:
+                return finish("invalid", [*failures, "replay_detected"])
+
+        if expired:
+            # Expired outranks the lookup outcome (SPEC 3.3
+            # precedence), so the network check is not run.
+            return finish("expired")
 
         # Step 6, registration.
         if not opts.check_registration:
-            if opts.nonce_store is not None:
-                opts.nonce_store.add(payload.nonce, wallet, payload.expires_at)
-            return self._build_result("verified", wallet, [], disclosure=disclosure)
+            return finish("verified", [])
         outcome = self._lookup(wallet, opts.signal)
         if outcome.state == "unknown":
-            return self._build_result(
+            return finish(
                 "unknown",
-                wallet,
                 [outcome.code or "lookup_failed"],
                 latency_ms=outcome.latency_ms,
-                disclosure=disclosure,
             )
         if outcome.state == "unregistered":
             # A valid signature from an unregistered wallet attests nothing.
-            return self._build_result(
-                "unregistered",
-                wallet,
-                ["not_registered"],
-                latency_ms=outcome.latency_ms,
-                disclosure=disclosure,
+            return finish(
+                "unregistered", ["not_registered"], latency_ms=outcome.latency_ms
             )
-        if opts.nonce_store is not None:
-            opts.nonce_store.add(payload.nonce, wallet, payload.expires_at)
-        return self._build_result(
-            "verified",
-            wallet,
-            [],
-            human_id=outcome.human_id,
-            latency_ms=outcome.latency_ms,
-            disclosure=disclosure,
+        return finish(
+            "verified", [], human_id=outcome.human_id, latency_ms=outcome.latency_ms
         )
 
     def resolve_status(self, subject: Any, signal: Any = None) -> VerifyResult:
@@ -399,21 +528,31 @@ class Verifier:
             )
         if kind == "attested_subject":
             subj: Subject = subject.subject if hasattr(subject, "subject") else subject["subject"]
-            resolver = (
-                subject.resolve_attestation
-                if hasattr(subject, "resolve_attestation")
-                else subject["resolveAttestation"]
+            if hasattr(subject, "resolve_attestation"):
+                resolver = subject.resolve_attestation
+            elif "resolveAttestation" in subject:
+                resolver = subject["resolveAttestation"]
+            else:
+                resolver = subject["resolve_attestation"]
+            # The resolver runs under the same deadline/abort race as
+            # the AgentBook lookup and receives the caller's signal
+            # (7.5 review M3): a hanging resolver must not hold
+            # resolve_status open past timeout_ms.
+            resolved_kind, resolved = self._deadline_call(
+                lambda: _call_resolver(resolver, subj, signal), signal
             )
-            try:
-                attestation = resolver(subj)
-            except Exception:
+            if resolved_kind == "timeout":
+                return self._build_result("unknown", ZERO_ADDRESS, ["lookup_timeout"])
+            if resolved_kind != "value":
                 return self._build_result("unknown", ZERO_ADDRESS, ["lookup_failed"])
-            if attestation is None:
+            # A resolver returning None means no attestation for this
+            # subject (7.5 review m1: the TS core's undefined == null).
+            if resolved is None:
                 return self._build_result(
                     "unknown", ZERO_ADDRESS, ["attestation_not_found"]
                 )
             return self.verify_attestation(
-                attestation,
+                resolved,
                 VerifyAttestationOptions(expected_subject=subj, signal=signal),
             )
         raise TypeError(f"resolve_status: unknown subject kind: {kind!r}")
@@ -451,15 +590,15 @@ class Verifier:
             if not is_address(expected_address):
                 return SignedMessageResult(False, None, ["malformed_address"])
             contract = checksum_address(expected_address)
-            try:
-                valid = self._erc1271_valid(contract, message, signature)
-            except Exception:
-                # The check itself could not run (RPC / chain identity):
-                # an unchecked claim is not reported either way.
-                return SignedMessageResult(False, contract, ["lookup_failed"])
-            return SignedMessageResult(
-                valid, contract, [] if valid else ["signature_mismatch"]
-            )
+            kind, code = self._erc1271_check(contract, message, signature)
+            if kind == "unknown":
+                # The check itself could not run (RPC / chain
+                # identity / deadline): an unchecked claim is not
+                # reported either way.
+                return SignedMessageResult(False, contract, [code or "lookup_failed"])
+            if kind == "match":
+                return SignedMessageResult(True, contract, [])
+            return SignedMessageResult(False, contract, ["signature_mismatch"])
         return SignedMessageResult(False, None, ["signature_mismatch"])
 
 

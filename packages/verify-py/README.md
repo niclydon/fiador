@@ -70,15 +70,27 @@ transport failure), `rpc_url`, `contract_address`, `timeout_ms`
 `clock_skew_ms` (default 60_000; applies to `issuedAt` only, never
 to expiry), and `include_raw_human_id` (default False).
 
+A nonce store passed to `verify_attestation` implements a single
+atomic `claim(nonce, wallet, expires_at) -> bool` (True = newly
+claimed, False = replay). Replay is checked before the expired
+return, and a store whose `claim` raises fails closed as `unknown`
++ `lookup_failed`. The configured RPC is the trust oracle for
+registration answers: non-https RPC URLs are rejected at
+construction, except loopback endpoints (`localhost`, `127.0.0.1`,
+`::1`) where plaintext never leaves the machine.
+
 Two deliberate Python adaptations, neither of which changes any
 verdict:
 
-- The API is synchronous. Lookups run under the deadline on a daemon
-  thread, so a hung reader yields `unknown` + `lookup_timeout`
-  exactly as the TS core's promise race does.
+- The API is synchronous. Lookups, ERC-1271 checks, and
+  `resolve_status` resolvers run under the deadline on a daemon
+  thread, so a hung collaborator yields `unknown` +
+  `lookup_timeout` exactly as the TS core's promise race does.
 - Where the TS core takes an `AbortSignal`, Python takes a
-  `threading.Event` (`signal=`); setting it aborts a pending lookup,
-  reported as `unknown` + `lookup_failed`, as in TS.
+  `threading.Event` (`signal=`); setting it aborts a pending
+  operation, reported as `unknown` + `lookup_failed`, as in TS.
+  A resolver that accepts a second positional argument receives
+  the caller's event, mirroring the TS signal parameter.
 
 ## Tests
 

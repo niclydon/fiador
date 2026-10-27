@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fiador-verify"
-version = "0.1.0"
+version = "0.3.0"
 description = "Verify that a unique human stands behind an agent wallet: AgentBook registration lookups and signed operator attestations, with a hash-only public result shape. Python parity port of @fiador/verify."
 readme = "README.md"
 requires-python = ">=3.11"

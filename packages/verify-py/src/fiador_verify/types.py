@@ -27,6 +27,10 @@ FailureCode = Literal[
     "wallet_mismatch",  # attestation wallet != address under check
     "not_yet_valid",  # issuedAt in the future beyond skew
     "expired",
+    # expiresAt - issuedAt exceeds the 90-day protocol lifetime cap (or
+    # is not positive). Split out of malformed_attestation on the 7.5
+    # review's M6 (TS @fiador/verify 0.3.0; SPEC 3.0).
+    "attestation_lifetime_invalid",
     "not_registered",
     "replay_detected",  # nonce already seen (only with a nonce store)
     "lookup_failed",  # RPC / transport failure -> status 'unknown'
@@ -198,10 +202,12 @@ class AgentBookReader(Protocol):
 
 
 class NonceStore(Protocol):
-    def has(self, nonce: str, wallet: str) -> bool:
-        ...
-
-    def add(self, nonce: str, wallet: str, expires_at: str) -> None:
+    def claim(self, nonce: str, wallet: str, expires_at: str) -> bool:
+        """A single ATOMIC claim (7.5 review B2): returns True when this
+        call newly recorded the nonce for the wallet, False when the
+        nonce was already claimed (a replay). The previous has/add pair
+        had a check-then-set race between the two calls; there is no
+        safe way to compose them, so the contract is one operation."""
         ...
 
 
@@ -246,7 +252,12 @@ class AttestationSubjectInput:
 @dataclass
 class AttestedSubject:
     subject: Subject
-    resolve_attestation: Callable[[Subject], Optional[Any]]
+    # The resolver is called with (subject) or (subject, signal) when
+    # it accepts a second positional argument (the caller's abort
+    # event), mirroring the TS core's AbortSignal parameter (7.5
+    # review M3). It runs under the verifier's deadline; returning
+    # None means no attestation for the subject (m1).
+    resolve_attestation: Callable[..., Optional[Any]]
     kind: str = field(default="attested_subject", init=False)
 
 

@@ -14,6 +14,7 @@ honestly.
 from __future__ import annotations
 
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from eth_utils import keccak
@@ -34,6 +35,36 @@ _LOOKUP_HUMAN_SELECTOR = "0x" + keccak(b"lookupHuman(address)")[:4].hex()
 class RpcError(Exception):
     """A JSON-RPC transport or endpoint failure. Readers raise this (or
     any exception) on failure; None is reserved for 'no entry'."""
+
+
+# RPC endpoint policy (7.5 review M17): the configured RPC is the
+# trust oracle for registration answers — whatever it returns IS the
+# lookup result — so a plaintext endpoint is an integrity hole, not a
+# preference. Non-https URLs are rejected at construction, with one
+# exception: loopback endpoints (localhost, 127.0.0.1, ::1), where
+# plaintext never leaves the machine (local dev nodes, test stubs).
+# The error messages never interpolate the URL: RPC URLs routinely
+# carry API keys in their path.
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def assert_rpc_url_allowed(rpc_url: Optional[str]) -> None:
+    if rpc_url is None:
+        return
+    try:
+        url = urlparse(rpc_url)
+        host = url.hostname
+    except Exception:
+        raise TypeError(
+            "malformed RPC URL (expected an https URL, or http on loopback)"
+        ) from None
+    if not url.scheme or host is None:
+        raise TypeError("malformed RPC URL (expected an https URL, or http on loopback)")
+    if url.scheme == "https":
+        return
+    if url.scheme == "http" and host in _LOOPBACK_HOSTS:
+        return
+    raise TypeError("RPC URL must use https (http is allowed only for loopback endpoints)")
 
 
 def lookup_human_calldata(address: str) -> str:
@@ -93,14 +124,17 @@ class LiveReader:
         contract_address: str = AGENTBOOK_CONTRACT,
         client: Optional[JsonRpcClient] = None,
     ):
+        assert_rpc_url_allowed(rpc_url)
         self.contract = contract_address
         self.client = client or JsonRpcClient(rpc_url or DEFAULT_RPC_URL)
 
     def lookup_human(self, address: str) -> Optional[str]:
-        # The configured chain only selects transport metadata. The RPC
-        # endpoint itself can answer for any chain, so pin its live
-        # identity before trusting either a positive or zero AgentBook
-        # response (mirrors the TS reader).
+        # Be precise about what this check is (7.5 review M17): the
+        # configured RPC is the trust oracle for the answer below —
+        # this eth_chainId call does not authenticate it, it only
+        # catches the common misconfiguration of pointing a World
+        # Chain verifier at an endpoint that answers for a different
+        # chain entirely (mirrors the TS reader).
         if self.client.chain_id() != WORLD_CHAIN_ID:
             raise RpcError("AgentBook RPC is not World Chain.")
         result = self.client.eth_call(self.contract, lookup_human_calldata(address))

@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import threading
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -26,7 +27,7 @@ from fiador_verify import (
     to_public_verify_result,
 )
 from fiador_verify.addresses import checksum_address
-from fiador_verify.reader import StaticReader
+from fiador_verify.reader import LiveReader, StaticReader
 from fiador_verify.types import (
     AddressSubject,
     AttestedSubject,
@@ -272,16 +273,22 @@ def test_wrong_expected_subject_and_wallet(vectors, fixed_now):
 
 
 class MemoryNonceStore:
+    """The atomic claim() contract (7.5 review B2): one operation,
+    True when this call newly recorded the (wallet, nonce) pair."""
+
     def __init__(self, now):
         self._records: dict[str, str] = {}
         self._now = now
+        self.claims = 0
 
-    def has(self, nonce, wallet):
-        exp = self._records.get(f"{wallet}:{nonce}")
-        return exp is not None and parse_z(exp) > self._now
-
-    def add(self, nonce, wallet, expires_at):
-        self._records[f"{wallet}:{nonce}"] = expires_at
+    def claim(self, nonce, wallet, expires_at):
+        self.claims += 1
+        key = f"{wallet}:{nonce}"
+        exp = self._records.get(key)
+        if exp is not None and parse_z(exp) > self._now:
+            return False
+        self._records[key] = expires_at
+        return True
 
 
 def test_replay_detected_second_presentation_only(vectors, fixed_now):
@@ -293,9 +300,14 @@ def test_replay_detected_second_presentation_only(vectors, fixed_now):
     second = verifier.verify_attestation(att, nonce_store=store)
     assert second.status == "invalid"
     assert "replay_detected" in second.failures
-    # Same nonce under a different wallet is not a replay: the failure
-    # must be binding, not replay.
-    other = verifier.verify_attestation(att, nonce_store=store, expected_wallet=B)
+    # Same nonce under a different wallet is not a replay: a distinct
+    # attestation from wallet B reusing the nonce verifies clean.
+    account_b = synthetic_account(1)
+    payload_b = base_payload(fixed_now, agent_wallet_address=B, nonce=att.payload.nonce)
+    other = verifier.verify_attestation(
+        sign_payload(account_b, payload_b), nonce_store=store
+    )
+    assert other.status == "verified"
     assert "replay_detected" not in other.failures
 
 
@@ -602,5 +614,278 @@ def test_verify_signed_message_wrong_chain_is_lookup_failed(vectors, fixed_now):
 
 
 def test_create_verifier_rejects_malformed_contract():
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError) as excinfo:
         create_verifier(contract_address="0x123")
+    # The error names no configuration value (7.5 review M14).
+    assert "0x123" not in str(excinfo.value)
+
+
+# -- 7.5 regressions: envelope closure and shape (B3/M9/m4) ---------------------
+
+
+def test_extra_envelope_key_is_malformed(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["humanId"] = HUMAN_1  # a smuggled key riding alongside the payload
+    result = make_verifier(vectors, fixed_now).verify_attestation(att)
+    assert result.status == "invalid"
+    assert result.failures == ["malformed_attestation"]
+
+
+def test_extra_subject_key_is_malformed(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["subject"]["humanId"] = HUMAN_1
+    result = make_verifier(vectors, fixed_now).verify_attestation(att)
+    assert result.status == "invalid"
+    assert result.failures == ["malformed_attestation"]
+
+
+def test_impossible_calendar_date_is_malformed(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["issuedAt"] = "2026-02-30T12:00:00.000Z"
+    att["payload"]["expiresAt"] = "2026-03-30T12:00:00.000Z"
+    result = make_verifier(vectors, fixed_now).verify_attestation(att)
+    assert result.status == "invalid"
+    assert result.failures == ["malformed_attestation"]
+
+
+def test_oversized_nonce_and_subject_fields_are_malformed(vectors, fixed_now):
+    verifier = make_verifier(vectors, fixed_now)
+    cases = []
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["nonce"] = "ab" * 65  # 130 chars > 128 cap
+    cases.append(att)
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["subject"]["type"] = "t" * 65
+    cases.append(att)
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["subject"]["id"] = "i" * 257
+    cases.append(att)
+    for case in cases:
+        result = verifier.verify_attestation(case)
+        assert result.status == "invalid"
+        assert result.failures == ["malformed_attestation"]
+
+
+# -- 7.5 regressions: signatureType is honoured (B1) ---------------------------
+
+
+def test_eip191_document_never_falls_through_to_erc1271(vectors, fixed_now):
+    # The stub RPC would answer the ERC-1271 magic value to anything;
+    # an eip191 document must make no RPC call at all.
+    with StubRpc(chain_id="0x1e0", eth_call_result=MAGIC_RESULT) as rpc:
+        verifier = make_verifier(vectors, fixed_now, rpc_url=rpc.url)
+        result = verifier.verify_attestation(
+            attestation_from_dict(vectors["attestations"]["wrongSigner"])
+        )
+    assert result.status == "invalid"
+    assert "signature_mismatch" in result.failures
+    assert rpc.chain_id_calls == 0
+    assert rpc.eth_calls == 0
+
+
+def test_eip191_claim_by_contract_wallet_is_a_mismatch(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["agentWalletAddress"] = CONTRACT_WALLET
+    att["signatureType"] = "eip191"
+    att["signature"] = "0x" + "11" * 65
+    reader = StaticReader({CONTRACT_WALLET: HUMAN_1}, source="live")
+    with StubRpc(chain_id="0x1e0", eth_call_result=MAGIC_RESULT) as rpc:
+        verifier = make_verifier(vectors, fixed_now, reader=reader, rpc_url=rpc.url)
+        result = verifier.verify_attestation(att)
+    assert result.status == "invalid"
+    assert "signature_mismatch" in result.failures
+    assert rpc.eth_calls == 0
+
+
+def test_erc1271_signature_need_not_be_65_bytes(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["agentWalletAddress"] = CONTRACT_WALLET
+    att["signatureType"] = "eip1271"
+    att["signature"] = "0x" + "11" * 32  # 32-byte validator blob
+    reader = StaticReader({CONTRACT_WALLET: HUMAN_1}, source="live")
+    with StubRpc(chain_id="0x1e0", eth_call_result=MAGIC_RESULT) as rpc:
+        verifier = make_verifier(vectors, fixed_now, reader=reader, rpc_url=rpc.url)
+        result = verifier.verify_attestation(att)
+    assert result.status == "verified"
+
+
+def test_hanging_erc1271_eth_call_obeys_timeout(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["agentWalletAddress"] = CONTRACT_WALLET
+    att["signatureType"] = "eip1271"
+    att["signature"] = "0x" + "11" * 65
+    reader = StaticReader({CONTRACT_WALLET: HUMAN_1}, source="live")
+    with StubRpc(chain_id="0x1e0", hang_eth_call=True) as rpc:
+        verifier = make_verifier(
+            vectors, fixed_now, reader=reader, rpc_url=rpc.url, timeout_ms=100
+        )
+        started = time.monotonic()
+        result = verifier.verify_attestation(att)
+        elapsed = time.monotonic() - started
+    assert elapsed < 2
+    assert result.status == "unknown"
+    assert result.failures == ["lookup_timeout"]
+
+
+def test_signature_step_network_failure_preserves_binding_failures(vectors, fixed_now):
+    att = copy.deepcopy(vectors["attestations"]["valid"])
+    att["payload"]["agentWalletAddress"] = CONTRACT_WALLET
+    att["signatureType"] = "eip1271"
+    att["signature"] = "0x" + "11" * 65
+    reader = StaticReader({CONTRACT_WALLET: HUMAN_1}, source="live")
+    # Chain 1: the 1271 check cannot run at all.
+    with StubRpc(chain_id="0x1", eth_call_result=MAGIC_RESULT) as rpc:
+        verifier = make_verifier(vectors, fixed_now, reader=reader, rpc_url=rpc.url)
+        result = verifier.verify_attestation(
+            att,
+            expected_subject=Subject(
+                type="discord_application", id="999999999999999999"
+            ),
+        )
+    assert result.status == "invalid"  # invalid outranks unknown
+    assert "subject_mismatch" in result.failures
+    assert "lookup_failed" in result.failures
+
+
+# -- 7.5 regressions: nonce store claim contract (B2/M1/M2) ----------------------
+
+
+def test_claim_is_called_exactly_once_on_the_success_path(vectors, fixed_now):
+    store = MemoryNonceStore(fixed_now)
+    result = make_verifier(vectors, fixed_now).verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"]), nonce_store=store
+    )
+    assert result.status == "verified"
+    assert store.claims == 1
+
+
+def test_store_claim_false_on_first_presentation_is_replay(vectors, fixed_now):
+    class AlreadyClaimed:
+        def claim(self, nonce, wallet, expires_at):
+            return False
+
+    result = make_verifier(vectors, fixed_now).verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"]),
+        nonce_store=AlreadyClaimed(),
+    )
+    assert result.status == "invalid"
+    assert result.failures == ["replay_detected"]
+
+
+def test_replay_outranks_expiry(vectors, fixed_now):
+    class AlreadyClaimed:
+        def claim(self, nonce, wallet, expires_at):
+            return False
+
+    result = make_verifier(vectors, fixed_now).verify_attestation(
+        attestation_from_dict(vectors["attestations"]["expired"]),
+        nonce_store=AlreadyClaimed(),
+    )
+    assert result.status == "invalid"
+    assert "replay_detected" in result.failures
+    assert "expired" in result.failures
+
+
+def test_throwing_claim_store_fails_closed(vectors, fixed_now):
+    class ThrowingStore:
+        def claim(self, nonce, wallet, expires_at):
+            raise RuntimeError("store unavailable")
+
+    verifier = make_verifier(vectors, fixed_now)
+    result = verifier.verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"]),
+        nonce_store=ThrowingStore(),
+    )
+    assert result.status == "unknown"
+    assert result.failures == ["lookup_failed"]
+
+
+def test_throwing_claim_store_still_yields_to_established_expiry(vectors, fixed_now):
+    class ThrowingStore:
+        def claim(self, nonce, wallet, expires_at):
+            raise RuntimeError("store unavailable")
+
+    result = make_verifier(vectors, fixed_now).verify_attestation(
+        attestation_from_dict(vectors["attestations"]["expired"]),
+        nonce_store=ThrowingStore(),
+    )
+    assert result.status == "expired"
+    assert "lookup_failed" in result.failures
+
+
+# -- 7.5 regressions: guarded collaborators (M3/M12/m1) ---------------------------
+
+
+def test_hanging_resolver_obeys_the_deadline(vectors, fixed_now):
+    def hanging(subject):
+        threading.Event().wait(30)
+        return None
+
+    verifier = make_verifier(vectors, fixed_now, timeout_ms=40)
+    result = verifier.resolve_status(
+        AttestedSubject(
+            subject=Subject(type="discord_application", id="555555555555555555"),
+            resolve_attestation=hanging,
+        )
+    )
+    assert result.status == "unknown"
+    assert result.failures == ["lookup_timeout"]
+
+
+def test_resolver_receives_the_callers_signal(vectors, fixed_now):
+    seen: dict[str, Any] = {}
+    att = attestation_from_dict(vectors["attestations"]["valid"])
+
+    def resolver(subject, signal):
+        seen["signal"] = signal
+        return att
+
+    signal = threading.Event()
+    result = make_verifier(vectors, fixed_now).resolve_status(
+        AttestedSubject(subject=att.payload.subject, resolve_attestation=resolver),
+        signal=signal,
+    )
+    assert result.status == "verified"
+    assert seen["signal"] is signal
+
+
+# -- 7.5 regressions: expectations and endpoints (m2/M13/M17) ---------------------
+
+
+def test_expected_wallet_case_spelling_is_not_a_mismatch(vectors, fixed_now):
+    upper = "0x" + A[2:].upper()
+    result = make_verifier(vectors, fixed_now).verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"]), expected_wallet=upper
+    )
+    assert result.status == "verified"
+
+
+def test_non_string_expected_wallet_is_a_mismatch_never_a_throw(vectors, fixed_now):
+    result = make_verifier(vectors, fixed_now).verify_attestation(
+        attestation_from_dict(vectors["attestations"]["valid"]), expected_wallet=42
+    )
+    assert result.status == "invalid"
+    assert "wallet_mismatch" in result.failures
+
+
+def test_projection_agent_book_carries_only_its_two_fields(vectors, fixed_now):
+    internal = make_verifier(vectors, fixed_now).verify_address(A)
+    # Poison the internal evidence the way the TS M13 test does: the
+    # projection builds agent_book field by field, so nothing rides.
+    internal.evidence.agent_book.human_id = "injected-value"  # type: ignore[attr-defined]
+    public = to_public_verify_result(internal)
+    assert set(public.evidence.agent_book.to_dict().keys()) == {"network", "contract"}
+    assert "injected-value" not in json.dumps(public.to_dict())
+
+
+def test_non_https_rpc_urls_rejected_at_construction():
+    with pytest.raises(TypeError):
+        create_verifier(rpc_url="http://rpc.example.invalid")
+    with pytest.raises(TypeError):
+        LiveReader(rpc_url="http://rpc.example.invalid")
+    # https anywhere, and http on loopback, construct fine (no calls made).
+    LiveReader(rpc_url="https://rpc.example.invalid")
+    LiveReader(rpc_url="http://127.0.0.1:8545")
+    LiveReader(rpc_url="http://localhost:8545")
+    LiveReader(rpc_url="http://[::1]:8545")
+    create_verifier(rpc_url="http://127.0.0.1:8545")

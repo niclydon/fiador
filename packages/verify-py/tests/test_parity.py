@@ -23,7 +23,6 @@ from fiador_verify.reader import StaticReader
 
 from conftest import (
     MAGIC_RESULT,
-    StubRpc,
     attestation_from_dict,
     make_verifier,
     payload_from_dict,
@@ -36,15 +35,22 @@ EXPECTED_ATTESTATION_OUTCOMES: dict[str, tuple[str, list[str]]] = {
     "validDisclosureNone": ("verified", []),
     "expired": ("expired", ["expired"]),
     "notYetValid": ("invalid", ["not_yet_valid"]),
-    "longLifetime": ("invalid", ["malformed_attestation"]),
+    # The lifetime branch reports its own code since the 7.5 fix
+    # pass (M6), in both implementations.
+    "longLifetime": ("invalid", ["attestation_lifetime_invalid"]),
     "wrongSigner": ("invalid", ["signature_mismatch"]),
+    # The pathological-extra vectors added by the 7.5 fix pass
+    # (M7/M8/m3): all are validly signed and must verify.
+    "extraProtoKey": ("verified", []),
+    "extraIntegerKeys": ("verified", []),
+    "extraAstralKeys": ("verified", []),
 }
 
 
 def test_vectors_are_the_shared_synthetic_set(vectors: dict[str, Any]):
     assert "SYNTHETIC" in vectors["note"]
     assert len(vectors["lookups"]) == 4
-    assert len(vectors["attestations"]) == 6
+    assert len(vectors["attestations"]) == 9
     assert len(vectors["humans"]) == 2
 
 
@@ -76,6 +82,9 @@ def test_canonical_message_recovers_every_vector_signature(vectors: dict[str, An
         # The wrongSigner vector's payload claims operatorA's wallet;
         # its signature is strangerC's.
         "wrongSigner": wallets["strangerC"],
+        "extraProtoKey": wallets["operatorA"],
+        "extraIntegerKeys": wallets["operatorA"],
+        "extraAstralKeys": wallets["operatorA"],
     }
     for name, vector in vectors["attestations"].items():
         message = canonical_attestation_message(payload_from_dict(vector["payload"]))
@@ -100,18 +109,37 @@ def test_lookup_outcomes_for_every_shared_row(vectors: dict[str, Any], fixed_now
 
 
 def test_attestation_outcomes_for_every_shared_vector(vectors: dict[str, Any], fixed_now):
-    # The wrongSigner vector falls through EOA recovery to ERC-1271, so
-    # the verifier needs an RPC that answers chain 480 and refuses the
-    # contract call, exactly as a World Chain EOA read would.
-    with StubRpc(chain_id="0x1e0", eth_call_error=True) as rpc:
-        verifier = make_verifier(vectors, fixed_now, rpc_url=rpc.url)
-        for name, vector in vectors["attestations"].items():
-            expected_status, expected_failures = EXPECTED_ATTESTATION_OUTCOMES[name]
-            result = verifier.verify_attestation(attestation_from_dict(vector))
-            assert result.status == expected_status, name
-            assert result.failures == expected_failures, name
-            if expected_status == "verified":
-                assert result.human_hash == hash_human_id(vectors["humans"]["human1"]), name
+    # Every shared attestation vector is eip191, which since the 7.5
+    # fix pass (B1) never falls through to ERC-1271 — no RPC is
+    # involved at all, the wrongSigner vector included.
+    verifier = make_verifier(vectors, fixed_now)
+    for name, vector in vectors["attestations"].items():
+        expected_status, expected_failures = EXPECTED_ATTESTATION_OUTCOMES[name]
+        result = verifier.verify_attestation(attestation_from_dict(vector))
+        assert result.status == expected_status, name
+        assert result.failures == expected_failures, name
+        if expected_status == "verified":
+            assert result.human_hash == hash_human_id(vectors["humans"]["human1"]), name
+
+
+def test_canonical_message_pathological_extra_shapes(vectors: dict[str, Any]):
+    """The 7.5 canonical regressions (M7/M8/m3), asserted on the
+    produced string as in the TS suite; recovery over every vector
+    (above) proves the same bytes end to end."""
+    attestations = vectors["attestations"]
+    proto = canonical_attestation_message(
+        payload_from_dict(attestations["extraProtoKey"]["payload"])
+    )
+    assert '"__proto__":"proto-value"' in proto
+    integers = canonical_attestation_message(
+        payload_from_dict(attestations["extraIntegerKeys"]["payload"])
+    )
+    assert '"extra":{"1":"one","10":"ten","2":"two","a":"letter"}' in integers
+    astral = canonical_attestation_message(
+        payload_from_dict(attestations["extraAstralKeys"]["payload"])
+    )
+    assert astral.index("\ue000") > -1
+    assert astral.index("\ue000") < astral.index("\U00020000")
 
 
 def test_valid_disclosure_none_strips_hash_publicly_only(vectors: dict[str, Any], fixed_now):

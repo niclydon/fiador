@@ -93,18 +93,23 @@ def make_verifier(vectors: dict[str, Any], fixed_now: datetime, **overrides: Any
 class StubRpc:
     """A local JSON-RPC stub server, mirroring the TS tests' stubbed
     RPC. Answers eth_chainId with a configurable chain and eth_call
-    with a configurable result or error; counts eth_call invocations."""
+    with a configurable result or error; counts eth_chainId and
+    eth_call invocations. With hang_eth_call=True an eth_call is
+    accepted and never answered (the 7.5 B1 deadline tests)."""
 
     def __init__(
         self,
         chain_id: str = "0x1e0",  # 480
         eth_call_result: str | None = None,
         eth_call_error: bool = False,
+        hang_eth_call: bool = False,
     ):
         self.chain_id = chain_id
         self.eth_call_result = eth_call_result
         self.eth_call_error = eth_call_error
+        self.hang_eth_call = hang_eth_call
         self.eth_calls = 0
+        self.chain_id_calls = 0
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -112,8 +117,15 @@ class StubRpc:
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length) or b"{}")
                 method = body.get("method")
+                if method == "eth_chainId":
+                    outer.chain_id_calls += 1
                 if method == "eth_call":
                     outer.eth_calls += 1
+                    if outer.hang_eth_call:
+                        # Never respond: the client must bound this
+                        # with its own deadline, not ours.
+                        threading.Event().wait(30)
+                        return
                     if outer.eth_call_error:
                         payload = {
                             "jsonrpc": "2.0",
@@ -143,6 +155,8 @@ class StubRpc:
                 pass
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        # A hanging eth_call handler must not hold test teardown open.
+        self._server.daemon_threads = True
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
     @property
