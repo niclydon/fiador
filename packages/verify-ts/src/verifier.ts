@@ -496,15 +496,19 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       if (expected === undefined) {
         return fail(['signature_mismatch']);
       }
-      let valid = false;
+      let valid: boolean;
       try {
         valid = await erc1271Valid(expected, message, signature);
       } catch {
-        // erc1271Valid deliberately lets a wrong-chain RPC surface
-        // for verifyAttestation, which can report 'unknown'. This
-        // result type has no unknown state and the amendment adds
-        // no failure code for it, so the check fails closed here.
-        valid = false;
+        // The check could not be executed at all (RPC transport
+        // failure or a wrong-chain RPC). SPEC 3.6 D5 amendment,
+        // pinned Oct 26, 2026 (world-program cba7539): that case is
+        // unchecked, not mismatched — lookup_failed, never
+        // signature_mismatch, because asserting the signature is
+        // wrong would claim knowledge the verifier does not have
+        // (the same discipline that keeps 'unknown' distinct from
+        // 'unregistered' everywhere else in the spec).
+        return fail(['lookup_failed'], expected);
       }
       if (!valid) {
         return fail(['signature_mismatch'], expected);

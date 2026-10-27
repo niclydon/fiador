@@ -558,6 +558,7 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
   async function with1271Rpc(
     ethCallResult: string,
     check: (rpcUrl: string, ethCalls: () => number) => Promise<void>,
+    chainId = '0x1e0',
   ) {
     let ethCalls = 0;
     const server = createServer((req, res) => {
@@ -571,7 +572,7 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
           JSON.stringify({
             jsonrpc: '2.0',
             id: parsed.id,
-            result: parsed.method === 'eth_call' ? ethCallResult : '0x1e0',
+            result: parsed.method === 'eth_call' ? ethCallResult : chainId,
           }),
         );
       });
@@ -719,6 +720,31 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
       expect(result.failures).toEqual(['signature_mismatch']);
       expect(result.address).toBe(CONTRACT);
     });
+  });
+
+  it('ERC-1271: wrong-chain RPC -> lookup_failed (check unexecutable, not a mismatch)', async () => {
+    // SPEC 3.6 D5 amendment, pinned Oct 26, 2026 (world-program
+    // cba7539): an ERC-1271 check that cannot be executed at all is
+    // unchecked (lookup_failed), never signature_mismatch. The stub
+    // answers eth_chainId with chain 1 while standing ready to
+    // return the magic value on eth_call; the ethCalls assertion
+    // proves the check itself never ran.
+    await with1271Rpc(
+      `0x1626ba7e${'00'.repeat(28)}`,
+      async (rpcUrl, ethCalls) => {
+        const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage({
+          message: SM.message,
+          signature: `0x${'11'.repeat(65)}`,
+          signatureType: 'erc1271',
+          expectedAddress: CONTRACT,
+        });
+        expect(result.verified).toBe(false);
+        expect(result.failures).toEqual(['lookup_failed']);
+        expect(result.address).toBe(CONTRACT);
+        expect(ethCalls()).toBe(0);
+      },
+      '0x1',
+    );
   });
 
   it('ERC-1271: missing expectedAddress -> signature_mismatch, no signer named', async () => {
