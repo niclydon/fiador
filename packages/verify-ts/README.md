@@ -76,5 +76,9 @@ raw value.
   that.
 - Clocks are injectable (`now`, `clockSkewMs`), so expiry behaviour
   is deterministically testable.
+- One-use flows can pass the optional Node-only
+  `@fiador/verify-nonce-sqlite` store as `nonceStore`. Published
+  attestations and the bot's periodic checks are repeatable and do
+  not use it.
 
 Apache-2.0. Created by Nic Lydon.
