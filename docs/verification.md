@@ -13,7 +13,13 @@ the wallet address required by the protocol.
 - The local web build includes `/privacy/` and `/support/`; `npm run
   test:web` passed both web build tests. The pages describe the public
   attestation site and the prepared, owner-only Slack trial. No Slack
-  sign-in or World proof was run for this candidate.
+  sign-in or World proof was run for this candidate. The private F9
+  backend health check subsequently ran live; owner enrollment has
+  not run live as of 27 October 2026.
+- After correcting the live-status sentence, `npm run test:web`
+  passed both web build tests. A repeat full-tree gitleaks v8.30.1
+  scan found the same nine existing fixture matches and no finding
+  in the three changed copy and record files.
 - Manual gitleaks v8.30.1 scans of the full working tree and git
   history found nine current matches and 15 historical instances.
   Seven current matches are Discord application IDs in synthetic test
