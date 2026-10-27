@@ -1151,6 +1151,7 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
       delayMs?: number;
       chainDelayMs?: number;
       onChainReply?: () => void;
+      onEthCall?: (reply: () => void) => void;
       revert?: boolean;
     } = {},
   ) {
@@ -1192,6 +1193,10 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
         const delay = parsed.method === 'eth_call'
           ? ethCallBehavior.delayMs
           : ethCallBehavior.chainDelayMs;
+        if (parsed.method === 'eth_call' && ethCallBehavior.onEthCall) {
+          ethCallBehavior.onEthCall(reply);
+          return;
+        }
         if (delay !== undefined) {
           setTimeout(reply, delay);
         } else {
@@ -1460,32 +1465,49 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
   });
 
   it('ERC-1271: chain identity and contract call share one deadline', async () => {
-    const realNow = performance.now.bind(performance);
+    const initialTime = performance.now();
     let elapsedMs = 0;
-    const clock = vi.spyOn(performance, 'now').mockImplementation(() => realNow() + elapsedMs);
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => initialTime + elapsedMs);
+    let signalEthCall!: () => void;
+    const ethCallSeen = new Promise<void>((resolve) => { signalEthCall = resolve; });
+    let releaseEthCall: (() => void) | undefined;
     try {
       await with1271Rpc(
         `0x1626ba7e${'00'.repeat(28)}`,
-        async (rpcUrl, _ethCalls, rpcCalls) => {
-          const result = await noLookupVerifier({ rpcUrl, timeoutMs: 10_000 }).verifySignedMessage({
-            message: SM.message,
-            signature: `0x${'11'.repeat(65)}`,
-            signatureType: 'erc1271',
-            expectedAddress: CONTRACT,
-          });
-          expect(rpcCalls()).toBeGreaterThanOrEqual(1);
-          expect(result.verified).toBe(false);
-          expect(result.failures).toEqual(['lookup_timeout']);
+        async (rpcUrl, ethCalls) => {
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+          try {
+            const pending = noLookupVerifier({ rpcUrl, timeoutMs: 10_000 }).verifySignedMessage({
+              message: SM.message,
+              signature: `0x${'11'.repeat(65)}`,
+              signatureType: 'erc1271',
+              expectedAddress: CONTRACT,
+            });
+            await ethCallSeen;
+            expect(ethCalls()).toBe(1);
+            await vi.advanceTimersByTimeAsync(2_001);
+            // A reset 10-second deadline would still be active and accept
+            // this magic response; the shared 2-second remainder has elapsed.
+            releaseEthCall?.();
+            releaseEthCall = undefined;
+            const result = await pending;
+            expect(result.verified).toBe(false);
+            expect(result.failures).toEqual(['lookup_timeout']);
+          } finally {
+            vi.useRealTimers();
+          }
         },
         '0x1e0',
         {
-          // Advance the verifier's clock when chain identity is answered,
-          // without making that RPC depend on an overloaded event loop.
-          onChainReply: () => { elapsedMs = 9_800; },
-          delayMs: 400,
+          onChainReply: () => { elapsedMs = 8_000; },
+          onEthCall: (reply) => {
+            releaseEthCall = reply;
+            signalEthCall();
+          },
         },
       );
     } finally {
+      releaseEthCall?.();
       clock.mockRestore();
     }
   });
