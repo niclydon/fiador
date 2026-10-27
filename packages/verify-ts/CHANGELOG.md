@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 — 2026-10-27
+
+Patch release carrying the gate-passed fix pass 3 as merged
+(PR #35), with the merge-time reconciliations: main’s humanId
+case normalization retained (a mixed-case reader value hashes
+identically to its lowercase form), and the signature-unknown
+replay path collecting the uncertain signature code alongside
+`replay_detected`. No API changes.
+
 ## 0.3.0 — 2026-10-26
 
 The §7.5 adversarial-review fix pass. The review failed the gate on
