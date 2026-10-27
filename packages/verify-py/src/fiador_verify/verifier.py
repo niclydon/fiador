@@ -58,6 +58,7 @@ ERC1271_MAGIC = "0x1626ba7e"
 MAX_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000
 _IS_VALID_SIGNATURE_SELECTOR = "0x1626ba7e"  # isValidSignature(bytes32,bytes)
 _ADDRESS_SHAPE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_HUMAN_ID_SHAPE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 _MAX_INFLIGHT_DEADLINE_CALLS = 8
 _DEADLINE_SLOTS = threading.BoundedSemaphore(_MAX_INFLIGHT_DEADLINE_CALLS)
 
@@ -190,6 +191,16 @@ class Verifier:
 
     # -- internals -----------------------------------------------------
 
+    def _safe_now(self) -> datetime:
+        """Keep a faulty injected clock inside the result contract."""
+        try:
+            value = self._now()
+            if isinstance(value, datetime):
+                return _as_utc(value).astimezone(timezone.utc)
+        except Exception:
+            pass
+        return datetime.now(timezone.utc)
+
     def _deadline_call(
         self, start: Callable[[], Any], signal: Any = None
     ) -> tuple[str, Any]:
@@ -245,7 +256,7 @@ class Verifier:
 
     def _evidence(self, latency_ms: Optional[int] = None) -> CheckEvidence:
         return CheckEvidence(
-            checked_at=_format_iso_z(self._now()),
+            checked_at=_format_iso_z(self._safe_now()),
             source=getattr(self._reader, "source", None) or "live",
             agent_book=AgentBookRef(network=WORLD_CHAIN_NETWORK, contract=self._contract),
             rpc_latency_ms=latency_ms,
@@ -287,7 +298,10 @@ class Verifier:
         if kind == "value":
             if value is None:
                 return _LookupOutcome("unregistered", latency_ms())
-            return _LookupOutcome("registered", latency_ms(), human_id=value)
+            if isinstance(value, str) and _HUMAN_ID_SHAPE.fullmatch(value):
+                # The chain returns a uint256; hex letter case must not split its hash.
+                return _LookupOutcome("registered", latency_ms(), human_id=value.lower())
+            return _LookupOutcome("unknown", latency_ms(), code="lookup_failed")
         if kind == "timeout":
             return _LookupOutcome("unknown", latency_ms(), code="lookup_timeout")
         return _LookupOutcome("unknown", latency_ms(), code="lookup_failed")
@@ -445,7 +459,7 @@ class Verifier:
         # review B1). The skew applies to issued_at only, never to
         # expiry (SPEC 3.3, as built in TS).
         def current_ms() -> int:
-            return int(_as_utc(self._now()).timestamp() * 1000)
+            return int(self._safe_now().timestamp() * 1000)
 
         now_ms = current_ms()
         issued_ms = parse_iso8601_z_ms(payload.issued_at)
@@ -471,6 +485,15 @@ class Verifier:
             invalid_class = any(f != "expired" for f in failures)
             if invalid_class:
                 return finish("invalid", [*failures, sig_code or "lookup_failed"])
+            if opts.nonce_store is not None:
+                kind, replay = self._deadline_call(
+                    lambda: opts.nonce_store.has(payload.nonce, wallet), opts.signal
+                )
+                if kind == "value" and replay is True:
+                    # Keep the uncertain signature fact alongside established replay.
+                    return finish(
+                        "invalid", [*failures, sig_code or "lookup_failed", "replay_detected"]
+                    )
             if expired:
                 return finish("expired", [*failures, sig_code or "lookup_failed"])
             return finish("unknown", [sig_code or "lookup_failed"])
@@ -486,13 +509,15 @@ class Verifier:
         # existing claim's precedence without consuming a fresh nonce.
         # The atomic claim after registration decides concurrent races.
         if opts.nonce_store is not None:
-            try:
-                replay = opts.nonce_store.has(payload.nonce, wallet)
-            except Exception:
+            kind, replay = self._deadline_call(
+                lambda: opts.nonce_store.has(payload.nonce, wallet), opts.signal
+            )
+            if kind != "value" or type(replay) is not bool:
+                code = "lookup_failed"
                 if expired:
-                    return finish("expired", [*failures, "lookup_failed"])
-                return finish("unknown", ["lookup_failed"])
-            if replay:
+                    return finish("expired", [*failures, code])
+                return finish("unknown", [code])
+            if replay is True:
                 return finish("invalid", [*failures, "replay_detected"])
 
         if expired:
@@ -518,9 +543,13 @@ class Verifier:
                 "unregistered", ["not_registered"], latency_ms=outcome.latency_ms
             )
         if opts.nonce_store is not None:
-            try:
-                claim = opts.nonce_store.claim(payload.nonce, wallet, payload.expires_at)
-            except Exception:
+            kind, claim = self._deadline_call(
+                lambda: opts.nonce_store.claim(payload.nonce, wallet, payload.expires_at),
+                opts.signal,
+            )
+            if kind == "timeout":
+                return finish("unknown", ["lookup_failed"])
+            if kind != "value":
                 return finish("unknown", ["lookup_failed"])
             if claim == "replay":
                 return finish("invalid", ["replay_detected"])

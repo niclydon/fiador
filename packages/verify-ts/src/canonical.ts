@@ -88,6 +88,31 @@ const B64URL_NONCE = /^[A-Za-z0-9_-]{22,}$/;
 export const MAX_NONCE_LENGTH = 128;
 export const MAX_SUBJECT_TYPE_LENGTH = 64;
 export const MAX_SUBJECT_ID_LENGTH = 256;
+// ERC-1271 signatures are opaque validator blobs, but not unbounded
+// ones (7.5 re-review M4): 8 KB is far beyond any real validator
+// (Safe, passkey/WebAuthn envelopes included) and small enough that
+// a hostile document cannot make the verifier ferry arbitrary data
+// into an eth_call.
+export const MAX_EIP1271_SIGNATURE_BYTES = 8192;
+
+// A string that is not a sequence of valid Unicode scalar values
+// (7.5 re-review NF-2): a lone surrogate has no UTF-8 encoding —
+// TextEncoder silently replaces it with U+FFFD — so a canonical
+// form built over it would not be the bytes any conforming signer
+// produced, and sort order over `extra` keys would be undefined.
+export function hasLoneSurrogate(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      i += 1; // consume the low half of the pair
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // Strict calendar validation (7.5 review M9): Date.parse rolls
 // impossible dates over (2026-02-30 parses as March 2), so the
@@ -203,6 +228,11 @@ export function validatePayload(value: unknown): PayloadValidation {
     extra = Object.create(null) as Record<string, string>;
     for (const [k, v] of Object.entries(value.extra)) {
       if (typeof v !== 'string') return { ok: false, failures: ['malformed_attestation'] };
+      // NF-2: an extra key carrying a lone surrogate is not a
+      // valid Unicode scalar string; it cannot round-trip through
+      // the canonical form's UTF-8 ordering, so the document is
+      // malformed rather than verified over replacement bytes.
+      if (hasLoneSurrogate(k)) return { ok: false, failures: ['malformed_attestation'] };
       extra[k] = v;
     }
   }
@@ -274,7 +304,8 @@ export function validateSignedAttestation(value: unknown): AttestationValidation
     typeof signature === 'string' &&
     (value.signatureType === 'eip191'
       ? /^0x[0-9a-fA-F]{130}$/.test(signature)
-      : /^0x(?:[0-9a-fA-F]{2})+$/.test(signature));
+      : /^0x(?:[0-9a-fA-F]{2})+$/.test(signature) &&
+        signature.length <= 2 + 2 * MAX_EIP1271_SIGNATURE_BYTES);
   if (!signatureOk) {
     return {
       ok: false,
