@@ -221,6 +221,7 @@ The combined source and verification work has a five-second
 response deadline. A request that exceeds it returns `unknown`
 with `lookup_timeout` in JSON, or a grey `no-store` badge. A timed
 out caller does not cancel a shared check needed by another caller.
+Queued source work is dropped if every caller times out before it starts.
 
 Abuse posture: per-IP rate limit (default 120 req/min) on the
 badge and status routes; over-limit returns 429 on the JSON route

@@ -408,6 +408,73 @@ describe('cache behaviour (SPEC 4.6 proposals)', () => {
     expect(peak).toBe(3);
   });
 
+  it('drops queued source jobs after every caller times out', async () => {
+    let sourceStarts = 0;
+    let markStarted!: () => void;
+    let releaseSource!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const sourceGate = new Promise<void>((resolve) => { releaseSource = resolve; });
+    const base = await start({
+      maxConcurrentLookups: 1,
+      requestTimeoutMs: 150,
+      resolveAttestation: async () => {
+        sourceStarts++;
+        if (sourceStarts === 1) {
+          markStarted();
+          await sourceGate;
+        }
+        return ATTESTATION;
+      },
+    });
+    const requests = Promise.all(Array.from({ length: 3 }, (_, id) =>
+      get(base, `/v1/status/discord_application/app${id}`)));
+    await started;
+    const responses = await requests;
+    expect(responses.map(({ text }) => (JSON.parse(text) as { status: string }).status))
+      .toEqual(['unknown', 'unknown', 'unknown']);
+    expect(sourceStarts).toBe(1);
+    releaseSource();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sourceStarts).toBe(1);
+  });
+
+  it('keeps a queued source job while a later shared caller is waiting', async () => {
+    let applicationStarts = 0;
+    let markBlockerStarted!: () => void;
+    let releaseBlocker!: () => void;
+    const blockerStarted = new Promise<void>((resolve) => { markBlockerStarted = resolve; });
+    const blockerGate = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+    const base = await start({
+      maxConcurrentLookups: 1,
+      requestTimeoutMs: 500,
+      resolveAttestation: async (subject) => {
+        if (subject.id === 'blocker') {
+          markBlockerStarted();
+          await blockerGate;
+        } else {
+          applicationStarts++;
+        }
+        return ATTESTATION;
+      },
+    });
+    const blocker = get(base, '/v1/status/discord_application/blocker');
+    await blockerStarted;
+    const first = get(base, '/v1/status/discord_application/app1');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const second = get(base, '/v1/status/discord_application/app1');
+    let timedOut;
+    try {
+      timedOut = await first;
+    } finally {
+      releaseBlocker();
+    }
+    const surviving = await second;
+    await blocker;
+    expect((JSON.parse(timedOut.text) as { status: string }).status).toBe('unknown');
+    expect((JSON.parse(surviving.text) as { status: string }).status).toBe('verified');
+    expect(applicationStarts).toBe(1);
+  });
+
   it('lets a later caller complete a shared check after an earlier caller times out', async () => {
     let notifyStarted!: () => void;
     let finishCore!: () => void;

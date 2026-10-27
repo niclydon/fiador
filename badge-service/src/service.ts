@@ -56,6 +56,13 @@ interface CacheEntry {
   sourceFingerprint: string;
 }
 
+interface SourceFlight {
+  promise: Promise<{ attestation: SignedAttestation | null; failed: boolean }>;
+  controller: AbortController;
+  started: { value: boolean };
+  waiters: number;
+}
+
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const ZERO_ADDRESS: EvmAddress = '0x0000000000000000000000000000000000000000';
 const AGENTBOOK_CONTRACT: EvmAddress = '0xA23aB2712eA7BBa896930544C7d6636a96b944dA';
@@ -103,22 +110,36 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
 
   const cache = new Map<string, CacheEntry>();
   const inFlight = new Map<string, Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }>>();
-  const sourceInFlight = new Map<string, Promise<{ attestation: SignedAttestation | null; failed: boolean }>>();
+  const sourceInFlight = new Map<string, SourceFlight>();
   const rateWindows = new Map<string, number[]>();
   let activeLookups = 0;
-  const lookupQueue: Array<() => void> = [];
+  const lookupQueue: Array<{ grant: () => void }> = [];
   const health = { agentBookReachable: true, lastLookupMs: null as number | null };
 
-  function acquireLookup(): Promise<void> {
+  function acquireLookup(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new Error('lookup cancelled'));
     if (activeLookups < maxConcurrent) {
       activeLookups++;
       return Promise.resolve();
     }
-    return new Promise((resolve) => lookupQueue.push(resolve));
+    return new Promise((resolve, reject) => {
+      const entry = { grant: () => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      } };
+      const onAbort = () => {
+        const index = lookupQueue.indexOf(entry);
+        if (index < 0) return;
+        lookupQueue.splice(index, 1);
+        reject(new Error('lookup cancelled'));
+      };
+      lookupQueue.push(entry);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
   function releaseLookup(): void {
     const next = lookupQueue.shift();
-    if (next) next();
+    if (next) next.grant();
     else activeLookups--;
   }
 
@@ -134,8 +155,10 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
     // expire while another caller still has time left.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
-    await acquireLookup();
+    let acquired = false;
     try {
+      await acquireLookup(controller.signal);
+      acquired = true;
       if (controller.signal.aborted) throw new Error('core lookup deadline exceeded');
       if (subjectType === 'address') {
         return await deps.verifier.resolveStatus({ kind: 'address', address: subjectId }, { signal: controller.signal });
@@ -148,31 +171,61 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
           return attestation;
         },
       }, { signal: controller.signal });
+    } catch (error) {
+      if (controller.signal.aborted) return timeoutResult(subjectType, subjectId);
+      throw error;
     } finally {
       clearTimeout(timer);
-      releaseLookup();
+      if (acquired) releaseLookup();
     }
   }
 
-  async function resolveSource(key: string, subjectType: string, subjectId: string): Promise<{ attestation: SignedAttestation | null; failed: boolean }> {
-    const pending = sourceInFlight.get(key);
-    if (pending) return pending;
-    const flight = (async () => {
-      await acquireLookup();
-      try {
-        const attestation = await (deps.resolveAttestation ?? (async () => null))({ type: subjectType, id: subjectId });
-        return { attestation, failed: false };
-      } catch {
-        return { attestation: null, failed: true };
-      } finally {
-        releaseLookup();
-      }
-    })();
-    sourceInFlight.set(key, flight);
+  async function resolveSource(key: string, subjectType: string, subjectId: string, signal: AbortSignal): Promise<{ attestation: SignedAttestation | null; failed: boolean }> {
+    if (signal.aborted) throw new Error('request deadline exceeded');
+    let flight = sourceInFlight.get(key);
+    if (!flight || flight.controller.signal.aborted) {
+      const controller = new AbortController();
+      const started = { value: false };
+      const promise = (async () => {
+        let acquired = false;
+        try {
+          await acquireLookup(controller.signal);
+          acquired = true;
+          if (controller.signal.aborted) throw new Error('lookup cancelled');
+          started.value = true;
+          const attestation = await (deps.resolveAttestation ?? (async () => null))({ type: subjectType, id: subjectId });
+          return { attestation, failed: false };
+        } catch {
+          return { attestation: null, failed: true };
+        } finally {
+          if (acquired) releaseLookup();
+        }
+      })();
+      flight = { promise, controller, started, waiters: 0 };
+      sourceInFlight.set(key, flight);
+      const current = flight;
+      void promise.then(() => {
+        if (sourceInFlight.get(key) === current) sourceInFlight.delete(key);
+      });
+    }
+    const joined = flight;
+    joined.waiters++;
+    let waiting = true;
+    const leave = () => {
+      if (!waiting) return;
+      waiting = false;
+      signal.removeEventListener('abort', leave);
+      joined.waiters--;
+      // A running resolver may still finish and serve a later caller.
+      // A queued resolver with no callers must never consume a slot.
+      if (joined.waiters === 0 && !joined.started.value) joined.controller.abort();
+    };
+    signal.addEventListener('abort', leave, { once: true });
+    if (signal.aborted) leave();
     try {
-      return await flight;
+      return await joined.promise;
     } finally {
-      if (sourceInFlight.get(key) === flight) sourceInFlight.delete(key);
+      leave();
     }
   }
 
@@ -185,7 +238,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
     const nowMs = now().getTime();
     const source = subjectType === 'address'
       ? { attestation: null, failed: false }
-      : await resolveSource(key, subjectType, subjectId);
+      : await resolveSource(key, subjectType, subjectId, signal);
     if (signal.aborted) throw new Error('request deadline exceeded');
     const { attestation, failed: sourceFailed } = source;
     // Read the source before using the result cache. A removed or
