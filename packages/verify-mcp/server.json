@@ -1,6 +1,6 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-08/server.schema.json",
-  "description": "Read-only verification tools over the AgentBook registry on World Chain: is a unique human behind this agent wallet, and is this operator attestation authentic? Results carry the canonical human hash only, never the full identifier.",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "description": "Verify AgentBook registration and operator attestations for agent wallets on World Chain.",
   "name": "io.github.niclydon/verify-mcp",
   "packages": [
     {
