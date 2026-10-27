@@ -4,8 +4,11 @@ The dynamic badge service from the W0 verify core spec (section 4):
 a stateless HTTP service whose only job is to resolve a subject,
 run `@fiador/verify` at request time, and render the project's
 badge for the observed state. A static badge is a claim anyone can
-copy; a served badge names its subject in its URL and always
-reports that subject's real, freshly checked status.
+copy; a served badge names its subject in its URL and reports the
+latest checked status within its stated cache window. A passing
+wallet check for a Discord application still does not establish
+control of that application. Until an independent control gate
+exists, its badge says `Claim unconfirmed` in neutral artwork.
 
 Framework choice, in one line as the spec's build-choice clause
 asks: plain Node HTTP (`node:http`), no framework — the routes and
@@ -84,9 +87,15 @@ Rendered states are the badge set's, exactly: `verified`,
 `expired`, `unverified`, in both themes and both variants, from
 the canonical palette tables in `assets/badges/` (ported into
 `src/palettes.ts`; the tests fail if the renderer's colours drift
-from them). The core's status maps as: `verified` → verified;
+from them). For an `address` subject, the core's status maps as:
+`verified` → verified;
 `expired` → expired; `unregistered`, `invalid`, `unknown`, and no
-attestation found → unverified. A check that did not complete
+attestation found → unverified. For a `discord_application` subject,
+even a `verified` core result renders neutral `Claim unconfirmed`
+art, because the signature and AgentBook check do not prove control
+of the named application. The JSON route preserves the core status
+and evidence; readers must not treat it as an app-control or
+guild-role decision. A check that did not complete
 never renders verified and never renders the verified design's
 colours. Failure is grey.
 
@@ -108,9 +117,11 @@ a person or machine chose to look, in the public shape only.
 `GET /v1/status/...` returns the core's public projection
 (`toPublicVerifyResult`) — status, truncated address, the
 canonical human hash when verified, failure codes, evidence —
-plus `subject`, `checkedAt`, and the badge URL block
-`badge: { svg: { auto, dark, light }, png: { auto, dark, light } }`,
-the same shape the verify MCP's `badge_status` tool returns. The
+plus `subject`, `checkedAt`, and, for application subjects, the badge
+URL block `badge: { svg: { auto, dark, light }, png: { auto, dark,
+light } }`. Address subjects return `badge: null`; a working
+address badge URL would have to include the full address and expose
+it to logs and browser history. The
 internal verify result is never serialised on any route. A subject
 with no attestation returns status `unknown` with failure
 `attestation_not_found` (never `unregistered`: nothing was checked
@@ -123,10 +134,9 @@ usefully show a 400), and only an internal rendering fault 500s.
 
 For an `address` subject, the disclosure rule is exact: the
 queried address appears **once** in the body, as the explicit
-`subject` echo. Every other field — evidence, results, and the
-badge URLs — carries the truncated form only (a full wallet
-address in a URL is a leak into logs and browser history,
-spec 4.9). For every other subject type the body contains no
+`subject` echo. The response omits address badge URLs rather than
+publishing dead links made from a truncated address (spec 4.9).
+For every other subject type the body contains no
 wallet address at all unless it is the subject itself.
 
 Responses that report no check — rate-limited (429) and
@@ -162,14 +172,16 @@ stack) and exit non-zero.
 | `VERIFY_CONTRACT_ADDRESS` (`AGENTBOOK_CONTRACT`) | AgentBook contract override |
 | `VERIFY_TIMEOUT_MS` | core per-lookup deadline (default 5000) |
 | `VERIFY_REGISTRY_FILE` (`REGISTRY_FILE`) | registry file, see below |
+| `VERIFY_REGISTRY_URL` (`REGISTRY_URL`) | HTTPS registry URL; use instead of a file |
 | `REGISTRY_REFRESH_MS` | registry reload interval (default 300000, spec 4.6) |
 | `REGISTRY_MAX_BYTES` | registry file size bound at load (default 1048576) |
 | `BADGE_PUBLIC_BASE_URL` | base for badge URLs in JSON; configuration only — request headers are never used (default: path-relative URLs) |
-| `BADGE_TRUST_PROXY` | `1`/`true` to key rate limiting on `X-Forwarded-For`; only behind a trusted proxy that sets it (default off: socket address) |
+| `RATE_LIMIT_TRUSTED_PROXIES` | comma-separated exact proxy IPs allowed to supply the rightmost `X-Forwarded-For` client address (default: none) |
 | `CACHE_TTL_VERIFIED_MS`, `CACHE_TTL_NEGATIVE_MS`, `STALE_ON_ERROR_MS` | cache overrides |
 | `CACHE_MAX_ENTRIES` | result-cache LRU bound (default 1000) |
 | `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS` | rate limit overrides |
 | `MAX_CONCURRENT_LOOKUPS`, `LOOKUP_QUEUE_MAX`, `LOOKUP_DEADLINE_MS` | outbound lookup concurrency, queue bound, and per-lookup deadline |
+| `BADGE_REQUEST_TIMEOUT_MS` | whole source and core request deadline, capped at 5000 ms |
 
 The bind is **loopback by default**: this service is
 unauthenticated by design, so a wildcard bind is an exposure
@@ -183,52 +195,36 @@ in-memory cache; a restart costs one re-check per subject.
 
 ## Registry shape
 
-The attestation source is a local JSON file: an object mapping
-subject type → subject ID → signed attestation object. The nested
-shape is deliberate: every (type, id) pair is unambiguous by
-construction, where a flat `"type:id"` string key would conflate
-distinct subjects whose parts contain the separator. Internally,
-every keyed structure in the service (registry, caches,
-single-flight, ETags) keys a subject by the JSON encoding of its
-`[type, id]` pair.
+The public `registry.json` uses `version: 1` and `entries[]`.
+Each active entry names a Discord application ID and an HTTPS
+attestation URL. The service can read this file locally or fetch
+the registry from an HTTPS URL. It fetches the selected attestation
+through a guarded HTTPS client with destination and response bounds.
+Registry and attestation data refresh after 300 seconds. A removed
+or revoked entry then stops verifying. A failed source request
+produces an uncached unknown result; it does not claim that
+AgentBook is unavailable.
 
 ```json
 {
-  "discord_application": {
-    "123456789012345678": {
-      "payload": { "...": "the attestation payload" },
-      "signature": "0x...",
-      "signatureType": "eip191"
+  "version": 1,
+  "entries": [
+    {
+      "discord_application_id": "123456789012345678",
+      "attestation_url": "https://example.com/attestations/example.json"
     }
-  }
+  ]
 }
 ```
 
-The file is validated at load and size-bounded
-(`REGISTRY_MAX_BYTES`): a missing file, invalid JSON, a
-non-object document, or a value that is not an attestation-shaped
-object is a clean startup error with a sanitised fixed message
-(variable + problem class only — never file content, never a
-stack). It is then **reloaded on the refresh interval**
-(`REGISTRY_REFRESH_MS`, default 300 s, spec 4.6) without a
-restart: a successful reload swaps the registry and drops results
-cached against the old one, so removing an attestation takes
-effect at the next refresh. A failed reload keeps the last good
-registry, logs one fixed line, and the service keeps serving;
-registry state after boot never takes a route down. A registry
-that has not loaded successfully for 24 h is treated as absent
-(spec 4.6 ceiling).
-
-One deliberate divergence from the spec text, flagged in the PR:
-spec 4.2 describes the v1 registry as the W1 `registry.json` shape
-(subject → attestation URL) with an optional fetch fallback under
-4.7's SSRF guard set. This build takes attestations as data in
-the deployment's own file instead, and the service fetches
-nothing, ever. There is no `?url=` route and no fetch helper; a
-caller gains no SSRF primitive from this service. Supporting the
-URL registry shape later is an additive change behind the same
-resolver interface, with 4.7's guards implemented in full at that
-point.
+For self-hosted installations, the original nested map of subject
+type → subject ID → signed attestation remains supported as a local
+file. It is size-bounded and validated at startup, then refreshed
+on the configured interval. Internal subject keys use the JSON
+encoding of `[type, id]`, avoiding collisions between pairs that
+contain punctuation. The canonical `entries[]` file and remote URL
+use the guarded resolver; malformed or unavailable sources fail
+closed. There is no request-selected `?url=` fetch route.
 
 ## Cache policy (spec 4.6, proposals implemented as configuration)
 
@@ -237,10 +233,14 @@ as configuration defaults, labelled as proposals, not constants:
 
 | Observed state | `Cache-Control` |
 |---|---|
-| `verified` | `public, max-age=300, s-maxage=300, stale-while-revalidate=60` |
+| `verified` | `public, max-age=300, s-maxage=300` for address checks at first check, reduced on server cache hits |
 | `expired` | `public, max-age=300, s-maxage=300` |
 | `unregistered` / `invalid` | `public, max-age=60, s-maxage=60` |
 | `unknown` / any failure | `no-store` |
+
+Discord application claims are always `no-store`. Even when the
+wallet check passes, their image stays neutral and says
+`Claim unconfirmed` until a separate application-control gate exists.
 
 Server-side, verification results cache under the same TTLs
 (theme-independent; one entry serves every theme) in a **bounded
@@ -265,17 +265,16 @@ store in shared caches — no matter what `Host` a request carried.
 
 Abuse posture: per-key rate limit (default 120 req/min) on the
 badge and status routes, keyed on the socket address (or on
-`X-Forwarded-For` only when `BADGE_TRUST_PROXY` says a trusted
-proxy sets it). Over-limit returns 429 on the JSON route; on badge
+`X-Forwarded-For` only from an IP in `RATE_LIMIT_TRUSTED_PROXIES`).
+Over-limit returns 429 on the JSON route; on badge
 routes it serves the subject's last render when one exists, else
-a cheap static unchecked badge — in both cases `no-store`, and in
-neither case a fresh render, so limiting sheds cost instead of
-adding it. A global concurrency cap plus a bounded queue with a
+a reusable unchecked badge — in both cases `no-store`. A global
+concurrency cap plus a bounded queue with a
 per-lookup deadline bounds outbound core lookups (the core
 receives the deadline's `AbortSignal`); saturation returns 503 on
 the JSON route and the unchecked badge on badge routes. HTTP
-server timeouts are set explicitly (`requestTimeout` 30 s,
-`headersTimeout` 15 s by default).
+server timeouts are set explicitly. The whole source and core
+response has a five-second deadline.
 
 ## Tests
 

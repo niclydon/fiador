@@ -16,6 +16,22 @@
   `docs/narrative/2026-10-27-static-privacy-support-release.md` and
   `docs/verification.md` for the release boundary and smoke results.
 
+## 2026-10-26: dynamic badge service (W0 SPEC section 4)
+
+- badge-service/: a top-level, keyless app over the public exports of
+  @fiador/verify. It serves SVG and PNG badges, public JSON status,
+  health, and an explainer. Its Discord application badge stays
+  neutral even when an operator wallet check passes, because that
+  check does not prove control of the named application.
+- The canonical `entries[]` registry is read from a file or fetched
+  over guarded HTTPS. Registry and attestation sources are refreshed
+  within 300 seconds, with shared concurrent fetches and cancellation
+  of queued source work after all callers time out. The full request
+  has a five-second deadline; failures produce neutral, uncached art.
+- The integrated badge-service suite has 74 route, source, and
+  security tests. Badge checks are configured in CI on Node 22 and 24.
+  Nothing was deployed; no public badge instance is claimed.
+
 ## 2026-10-26: verifier bot safety and maintenance
 
 - The bot checks and logs operator claims without creating a new

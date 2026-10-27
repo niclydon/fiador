@@ -19,8 +19,11 @@
 
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import {
   toPublicVerifyResult,
+  truncateAddress,
+  type EvmAddress,
   type SignedAttestation,
   type VerificationStatus,
   type VerifyResult,
@@ -54,7 +57,6 @@ export interface BadgeServiceDeps {
    * service sits behind a trusted proxy that sets the header —
    * otherwise the header is client-controlled and the limiter is
    * decorative. (Mirrored in the README.) */
-  trustProxy?: boolean;
   /** SPEC 4.6 proposals, as configuration (not code constants). */
   cacheTtlVerifiedMs?: number; // verified + expired, default 300_000
   cacheTtlNegativeMs?: number; // unregistered + invalid, default 60_000
@@ -66,11 +68,14 @@ export interface BadgeServiceDeps {
   renderCacheMaxEntries?: number;
   rateLimitMax?: number; // per key per window, default 120
   rateLimitWindowMs?: number; // default 60_000
+  /** Exact IPs of reverse proxies that append X-Forwarded-For. */
+  trustedProxyIps?: readonly string[];
   maxConcurrentLookups?: number; // outbound core-call cap, default 10
   lookupQueueMax?: number; // queued lookups awaiting a slot, default 100
   lookupDeadlineMs?: number; // per-lookup queue+call deadline, default 10_000
-  requestTimeoutMs?: number; // HTTP request timeout, default 30_000
+  requestTimeoutMs?: number; // total source + core deadline, capped at 5000
   headersTimeoutMs?: number; // HTTP headers timeout, default 15_000
+  agentBookContract?: EvmAddress;
   /** Test seam: invoked once per actual badge render (SVG build or
    * PNG rasterisation), so tests can prove cost is shed. */
   onRender?: (kind: 'svg' | 'png') => void;
@@ -79,6 +84,14 @@ export interface BadgeServiceDeps {
 interface CacheEntry {
   result: VerifyResult;
   storedAtMs: number;
+  sourceFingerprint: string;
+}
+
+interface SourceFlight {
+  promise: Promise<{ attestation: SignedAttestation | null; failed: boolean }>;
+  controller: AbortController;
+  started: { value: boolean };
+  waiters: number;
 }
 
 interface RenderEntry {
@@ -90,6 +103,8 @@ interface RenderEntry {
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const MAX_TYPE_LENGTH = 64; // aligned with the core's subject limits
 const MAX_ID_LENGTH = 256;
+const ZERO_ADDRESS: EvmAddress = '0x0000000000000000000000000000000000000000';
+const AGENTBOOK_CONTRACT: EvmAddress = '0xA23aB2712eA7BBa896930544C7d6636a96b944dA';
 
 export function badgeUrls(base: string, subjectType: string, subjectId: string) {
   const path = `${base.replace(/\/$/, '')}/badge/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`;
@@ -102,15 +117,19 @@ export function badgeUrls(base: string, subjectType: string, subjectId: string) 
 }
 
 /** SPEC 4.6 HTTP cache table, keyed by observed status. */
-export function cacheControlFor(status: VerificationStatus): string {
+export function cacheControlFor(status: VerificationStatus, remainingMs?: number): string {
+  if (status === 'unknown') return 'no-store';
+  const limit = status === 'verified' || status === 'expired' ? 300_000 : 60_000;
+  const seconds = Math.max(0, Math.floor(Math.min(limit, remainingMs ?? limit) / 1000));
+  if (seconds === 0) return 'no-store';
   switch (status) {
     case 'verified':
-      return 'public, max-age=300, s-maxage=300, stale-while-revalidate=60';
+      return `public, max-age=${seconds}, s-maxage=${seconds}`;
     case 'expired':
-      return 'public, max-age=300, s-maxage=300';
+      return `public, max-age=${seconds}, s-maxage=${seconds}`;
     case 'unregistered':
     case 'invalid':
-      return 'public, max-age=60, s-maxage=60';
+      return `public, max-age=${seconds}, s-maxage=${seconds}`;
     default:
       return 'no-store';
   }
@@ -138,6 +157,9 @@ class LruCache<V> {
       this.map.delete(oldest);
     }
   }
+  delete(key: string): void {
+    this.map.delete(key);
+  }
   get size(): number {
     return this.map.size;
   }
@@ -160,21 +182,23 @@ export interface BadgeServiceInternals {
 
 export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInternals: BadgeServiceInternals } {
   const now = deps.now ?? (() => new Date());
-  const ttlVerified = deps.cacheTtlVerifiedMs ?? 300_000;
-  const ttlNegative = deps.cacheTtlNegativeMs ?? 60_000;
-  const staleCeiling = deps.staleOnErrorMs ?? 900_000;
+  const ttlVerified = Math.min(deps.cacheTtlVerifiedMs ?? 300_000, 300_000);
+  const ttlNegative = Math.min(deps.cacheTtlNegativeMs ?? 60_000, 60_000);
+  const staleCeiling = Math.min(deps.staleOnErrorMs ?? 900_000, 900_000);
   const rateMax = deps.rateLimitMax ?? 120;
   const rateWindow = deps.rateLimitWindowMs ?? 60_000;
   const maxConcurrent = deps.maxConcurrentLookups ?? 10;
   const queueMax = deps.lookupQueueMax ?? 100;
   const lookupDeadline = deps.lookupDeadlineMs ?? 10_000;
+  const requestTimeoutMs = Math.min(deps.requestTimeoutMs ?? 5_000, 5_000);
 
   const cache = new LruCache<CacheEntry>(deps.cacheMaxEntries ?? 1000);
   const renderCache = new LruCache<RenderEntry>(deps.renderCacheMaxEntries ?? 500);
   /** Last render per route shape, for shedding rate-limited load:
    * a limited request serves this instead of rasterising. */
   const lastRender = new LruCache<RenderEntry>(deps.renderCacheMaxEntries ?? 500);
-  const inFlight = new Map<string, Promise<{ result: VerifyResult; stale: boolean }>>();
+  const inFlight = new Map<string, Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }>>();
+  const sourceInFlight = new Map<string, SourceFlight>();
   const rateWindows = new Map<string, number[]>();
   const health = { agentBookReachable: true, lastLookupMs: null as number | null };
 
@@ -235,7 +259,13 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     return 0; // unknown is never cached (SPEC 4.6: a failure retries next request)
   }
 
-  async function callCore(subjectType: string, subjectId: string, signal: AbortSignal): Promise<VerifyResult> {
+  async function callCore(
+    subjectType: string,
+    subjectId: string,
+    attestation: SignedAttestation | null,
+    sourceFailed: boolean,
+    signal: AbortSignal,
+  ): Promise<VerifyResult> {
     await acquireLookup(signal);
     try {
       if (canonicalSubject(subjectType, subjectId)[0] === 'address') {
@@ -244,15 +274,14 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
           { signal },
         );
       }
-      const resolver: NonNullable<BadgeServiceDeps['resolveAttestation']> =
-        deps.registrySource?.resolve.bind(deps.registrySource) ??
-        deps.resolveAttestation ??
-        (async () => null);
       return await deps.verifier.resolveStatus(
         {
           kind: 'attested_subject',
           subject: { type: subjectType, id: subjectId },
-          resolveAttestation: resolver,
+          resolveAttestation: async () => {
+            if (sourceFailed) throw new Error('attestation source unavailable');
+            return attestation;
+          },
         },
         { signal },
       );
@@ -261,12 +290,63 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     }
   }
 
+  async function resolveSource(key: string, subjectType: string, subjectId: string, signal: AbortSignal): Promise<{ attestation: SignedAttestation | null; failed: boolean }> {
+    if (signal.aborted) throw new Error('request deadline exceeded');
+    let flight = sourceInFlight.get(key);
+    if (!flight || flight.controller.signal.aborted) {
+      const controller = new AbortController();
+      const started = { value: false };
+      const promise = (async () => {
+        let acquired = false;
+        try {
+          await acquireLookup(controller.signal);
+          acquired = true;
+          if (controller.signal.aborted) throw new Error('lookup cancelled');
+          started.value = true;
+          const resolver = deps.registrySource?.resolve.bind(deps.registrySource) ?? deps.resolveAttestation ?? (async () => null);
+          const attestation = await resolver({ type: subjectType, id: subjectId });
+          return { attestation, failed: false };
+        } catch {
+          return { attestation: null, failed: true };
+        } finally {
+          if (acquired) releaseLookup();
+        }
+      })();
+      flight = { promise, controller, started, waiters: 0 };
+      sourceInFlight.set(key, flight);
+      const current = flight;
+      void promise.then(() => {
+        if (sourceInFlight.get(key) === current) sourceInFlight.delete(key);
+      });
+    }
+    const joined = flight;
+    joined.waiters++;
+    let waiting = true;
+    const leave = () => {
+      if (!waiting) return;
+      waiting = false;
+      signal.removeEventListener('abort', leave);
+      joined.waiters--;
+      // A running resolver may still finish and serve a later caller.
+      // A queued resolver with no callers must never consume a slot.
+      if (joined.waiters === 0 && !joined.started.value) joined.controller.abort();
+    };
+    signal.addEventListener('abort', leave, { once: true });
+    if (signal.aborted) leave();
+    try {
+      return await joined.promise;
+    } finally {
+      leave();
+    }
+  }
+
   let lastRegistryVersion = deps.registrySource?.version ?? 0;
 
   async function resolveResult(
     subjectType: string,
     subjectId: string,
-  ): Promise<{ result: VerifyResult; stale: boolean }> {
+    signal: AbortSignal,
+  ): Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }> {
     deps.registrySource?.refreshIfDue(now().getTime());
     const registryVersion = deps.registrySource?.version ?? 0;
     if (registryVersion !== lastRegistryVersion) {
@@ -281,11 +361,27 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     }
     const key = subjectKey(subjectType, subjectId);
     const nowMs = now().getTime();
-    const entry = cache.get(key);
-    if (entry && nowMs - entry.storedAtMs < ttlFor(entry.result.status)) {
-      return { result: entry.result, stale: false };
+    const source = subjectType === 'address'
+      ? { attestation: null, failed: false }
+      : await resolveSource(key, subjectType, subjectId, signal);
+    if (signal.aborted) throw new Error('request deadline exceeded');
+    const { attestation, failed: sourceFailed } = source;
+    // Read the source before using the result cache. A removed or
+    // replaced registry entry must not inherit the old verified result.
+    const sourceFingerprint = subjectType === 'address'
+      ? 'address'
+      : sourceFailed ? 'source-error' : attestation
+        ? createHash('sha256').update(JSON.stringify(attestation)).digest('hex') : 'missing';
+    let entry = cache.get(key);
+    if (!sourceFailed && entry && entry.sourceFingerprint !== sourceFingerprint) {
+      cache.delete(key);
+      entry = undefined;
     }
-    const pending = inFlight.get(key);
+    if (!sourceFailed && entry && nowMs - entry.storedAtMs < ttlFor(entry.result.status)) {
+      return { result: entry.result, stale: false, storedAtMs: entry.storedAtMs };
+    }
+    const flightKey = JSON.stringify([key, sourceFingerprint]);
+    const pending = inFlight.get(flightKey);
     if (pending) return pending;
     const flight = (async () => {
       // One deadline covers queue wait + the core call; its signal
@@ -295,7 +391,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       const timer = setTimeout(() => controller.abort(), lookupDeadline);
       let result: VerifyResult;
       try {
-        result = await callCore(subjectType, subjectId, controller.signal);
+        result = await callCore(subjectType, subjectId, attestation, sourceFailed, controller.signal);
       } catch (err) {
         if (err instanceof OverloadedError) throw err;
         throw err;
@@ -307,7 +403,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
         result.status === 'unknown' &&
         (result.failures.includes('lookup_failed') || result.failures.includes('lookup_timeout'));
       if (lookupFailed || result.failures.includes('attestation_not_found')) {
-        if (lookupFailed) health.agentBookReachable = false;
+        if (lookupFailed && !sourceFailed) health.agentBookReachable = false;
       } else {
         health.agentBookReachable = true;
       }
@@ -315,28 +411,60 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       // verified result younger than the ceiling, with its ORIGINAL
       // check time; older, or none, and the honest answer is unknown.
       if (lookupFailed && entry && entry.result.status === 'verified' && now().getTime() - entry.storedAtMs < staleCeiling) {
-        return { result: entry.result, stale: true };
+        return { result: entry.result, stale: true, storedAtMs: entry.storedAtMs };
       }
-      if (ttlFor(result.status) > 0) {
-        cache.set(key, { result, storedAtMs: now().getTime() });
+      if (!sourceFailed && ttlFor(result.status) > 0) {
+        cache.set(key, { result, storedAtMs: now().getTime(), sourceFingerprint });
       }
-      return { result, stale: false };
+      return { result, stale: false, storedAtMs: nowMs };
     })();
-    inFlight.set(key, flight);
+    inFlight.set(flightKey, flight);
     try {
       return await flight;
     } finally {
-      inFlight.delete(key);
+      inFlight.delete(flightKey);
+    }
+  }
+
+  function timeoutResult(subjectType: string, subjectId: string): VerifyResult {
+    const address = subjectType === 'address' ? subjectId as EvmAddress : ZERO_ADDRESS;
+    return {
+      status: 'unknown',
+      address,
+      addressTruncated: truncateAddress(address),
+      humanHash: null,
+      failures: ['lookup_timeout'],
+      evidence: {
+        checkedAt: now().toISOString(),
+        source: 'live',
+        agentBook: { network: 'eip155:480', contract: deps.agentBookContract ?? AGENTBOOK_CONTRACT },
+      },
+    };
+  }
+
+  async function resolveWithDeadline(subjectType: string, subjectId: string): Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve({ result: timeoutResult(subjectType, subjectId), stale: false, storedAtMs: now().getTime() });
+      }, requestTimeoutMs);
+    });
+    try {
+      return await Promise.race([resolveResult(subjectType, subjectId, controller.signal), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
   function rateKey(req: IncomingMessage): string {
-    if (deps.trustProxy) {
-      const fwd = req.headers['x-forwarded-for'];
-      const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim();
-      if (first) return first;
-    }
-    return req.socket.remoteAddress ?? 'unknown';
+    const peer = req.socket.remoteAddress ?? 'unknown';
+    if (!deps.trustedProxyIps?.includes(peer)) return peer;
+    const forwarded = req.headers['x-forwarded-for'];
+    // The nearest trusted proxy appends the actual peer on the right.
+    const candidate = typeof forwarded === 'string' ? forwarded.split(',').at(-1)?.trim() : undefined;
+    return candidate && isIP(candidate) ? candidate : peer;
   }
 
   function rateLimited(key: string): boolean {
@@ -397,6 +525,8 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     checkedAt: string | null;
     subjectKeyValue: string;
     forceNoStore?: boolean;
+    labelOverride?: string;
+    cacheControl?: string;
   }
 
   /** Returns true when a response was sent. Honours the render
@@ -425,9 +555,10 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       args.format,
       themeKey,
       base,
+      args.labelOverride ?? '',
     ]);
     const headers: Record<string, string> = {
-      'cache-control': args.forceNoStore || args.stale ? 'no-store' : cacheControlFor(args.status),
+      'cache-control': args.forceNoStore || args.stale ? 'no-store' : args.cacheControl ?? cacheControlFor(args.status),
       etag,
       'accept-ch': 'Sec-CH-Prefers-Color-Scheme',
     };
@@ -462,10 +593,10 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     const body =
       args.format === 'svg'
         ? Buffer.from(
-            renderBadgeSvg({ state, theme: args.theme, variant: args.variant, checkedAt: args.checkedAt, now: now() }),
+            renderBadgeSvg({ state, theme: args.theme, variant: args.variant, checkedAt: args.checkedAt, now: now(), ...(args.labelOverride ? { labelOverride: args.labelOverride } : {}) }),
             'utf8',
           )
-        : renderBadgePng({ state, theme: resolved!, variant: args.variant, checkedAt: args.checkedAt, now: now() });
+        : renderBadgePng({ state, theme: resolved!, variant: args.variant, checkedAt: args.checkedAt, now: now(), ...(args.labelOverride ? { labelOverride: args.labelOverride } : {}) });
     const entry: RenderEntry = { body, etag, resolvedTheme: resolved };
     renderCache.set(renderKey, entry);
     lastRender.set(routeKey, entry);
@@ -613,9 +744,9 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
           );
           return;
         }
-        let resolvedResult: { result: VerifyResult; stale: boolean };
+        let resolvedResult: { result: VerifyResult; stale: boolean; storedAtMs: number };
         try {
-          resolvedResult = await resolveResult(parsed.type, parsed.id);
+          resolvedResult = await resolveWithDeadline(parsed.type, parsed.id);
         } catch (err) {
           if (err instanceof OverloadedError) {
             sendJson(res, 503, { error: 'service busy' }, { 'cache-control': 'no-store' }, head);
@@ -623,18 +754,17 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
           }
           throw err;
         }
-        const { result, stale } = resolvedResult;
+        const { result, stale, storedAtMs } = resolvedResult;
         const pub = toPublicVerifyResult(result);
         if (stale) pub.evidence = { ...pub.evidence, source: 'cache' };
         // Address-subject disclosure rule (spec reconciliation):
         // the queried address appears ONCE in this body, as the
         // explicit subject echo below. Every other field carries
-        // the truncated form only — including the badge URLs, which
-        // are therefore built from the truncated address for
-        // address subjects (a full wallet address in a URL is a
-        // log/history leak, SPEC 4.9).
+        // the truncated form only. A badge URL requires the full
+        // address to work, so this response omits address badge URLs
+        // rather than publishing a dead link or leaking the address
+        // through a URL (SPEC 4.9).
         const [canonType] = canonicalSubject(parsed.type, parsed.id);
-        const urlSubjectId = canonType === 'address' ? (pub.addressTruncated ?? '') : parsed.id;
         const body = {
           subject: { type: parsed.type, id: parsed.id },
           status: pub.status,
@@ -643,12 +773,13 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
           failures: pub.failures,
           evidence: pub.evidence,
           checkedAt: pub.evidence.checkedAt,
-          badge: badgeUrls(effectiveBase(), parsed.type, urlSubjectId),
+          badge: canonType === 'address' ? null : badgeUrls(effectiveBase(), parsed.type, parsed.id),
         };
         const text = JSON.stringify(body);
         const etag = etagFor(['status-json', text]);
         const headers: Record<string, string> = {
-          'cache-control': stale ? 'no-store' : cacheControlFor(result.status),
+          'cache-control': stale || parsed.type === 'discord_application'
+            ? 'no-store' : cacheControlFor(result.status, ttlFor(result.status) - (now().getTime() - storedAtMs)),
           etag,
           'x-checked-at': pub.evidence.checkedAt,
         };
@@ -722,9 +853,9 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
           uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
           return;
         }
-        let resolvedResult: { result: VerifyResult; stale: boolean };
+        let resolvedResult: { result: VerifyResult; stale: boolean; storedAtMs: number };
         try {
-          resolvedResult = await resolveResult(parsed.type, parsed.id);
+          resolvedResult = await resolveWithDeadline(parsed.type, parsed.id);
         } catch (err) {
           if (err instanceof OverloadedError) {
             uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
@@ -732,12 +863,13 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
           }
           throw err;
         }
-        const { result, stale } = resolvedResult;
+        const { result, stale, storedAtMs } = resolvedResult;
+        const claimUnconfirmed = parsed.type === 'discord_application' && result.status === 'verified';
         sendBadge(
           req,
           res,
           {
-            status: result.status,
+            status: claimUnconfirmed ? 'unknown' : result.status,
             stale,
             theme,
             variant,
@@ -745,6 +877,9 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
             clientHint,
             checkedAt: result.evidence.checkedAt,
             subjectKeyValue: key,
+            forceNoStore: parsed.type === 'discord_application',
+            cacheControl: cacheControlFor(result.status, ttlFor(result.status) - (now().getTime() - storedAtMs)),
+            ...(claimUnconfirmed ? { labelOverride: 'Claim unconfirmed' } : {}),
           },
           head,
         );

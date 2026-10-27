@@ -33,18 +33,19 @@ export function explainerHtml(): string {
   <h1>What the Fiador badge means</h1>
   <button id="theme-toggle" type="button">Switch theme</button>
 </header>
-<p>A Fiador badge is served, not static: the image always reports the
-status of the subject named in its URL, checked live when the badge
-was rendered. A <strong>verified</strong> badge means a unique human
-stands behind the subject's agent wallet, registered in AgentBook on
-World Chain. It does not mean anyone endorses the bot, and it does
-not prove a human wrote or approved any particular message.</p>
+<p>A Fiador badge names the subject in its URL and shows when its
+status was checked. A verified wallet badge means that wallet was
+registered in AgentBook on World Chain when checked. A Discord
+application badge stays neutral even when its operator's wallet
+passes: the check does not prove that signer controls the named
+application. It does not endorse a bot or prove who wrote a message.</p>
 <p>Copying a badge URL to a different bot's page still reports the
 original subject. Copying the image file is only a stale screenshot;
-the check time printed on the pill says how stale. Grey means not
-verified: unregistered, expired, invalid, and failed checks all
-render grey, and a check that did not complete never renders
-verified.</p>
+the check time printed on the pill says how stale. Grey does not
+always mean a claim failed. A valid operator claim stays grey on a
+Discord application badge because control of that app has not been
+confirmed. Unregistered, invalid, and incomplete checks also use
+neutral artwork. Expired claims have their own muted style.</p>
 <div class="card">
   <p>Live examples, for a synthetic example subject (it is not
   registered, so these honestly render <em>not verified</em>):</p>

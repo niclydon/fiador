@@ -4,7 +4,7 @@ import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { hashHumanId, type SignedAttestation, type VerifyResult, type Verifier } from '@fiador/verify';
+import { createVerifier, hashHumanId, type SignedAttestation, type VerifyResult, type Verifier } from '@fiador/verify';
 import { createBadgeService, type BadgeServiceDeps } from '../src/service.js';
 import { ConfigError, depsFromEnv, hostFromEnv, portFromEnv } from '../src/config.js';
 import { formatCheckedLabel } from '../src/render.js';
@@ -145,11 +145,9 @@ function assertAddressEchoOnce(body: string, headers: Headers): void {
   expect(body).not.toContain(RAW_HUMAN);
   expect(body).not.toContain('"humanId"');
   expect(countOccurrences(body, ADDR)).toBe(1);
-  const parsed = JSON.parse(body) as { subject: { id: string }; badge: { svg: Record<string, string> } };
+  const parsed = JSON.parse(body) as { subject: { id: string }; badge: null };
   expect(parsed.subject.id).toBe(ADDR);
-  for (const url of Object.values(parsed.badge.svg)) {
-    expect(url.toLowerCase()).not.toContain(ADDR.toLowerCase());
-  }
+  expect(parsed.badge).toBeNull();
   headers.forEach((value) => {
     expect(value).not.toContain(RAW_HUMAN);
     expect(value.toLowerCase()).not.toContain(ADDR.toLowerCase());
@@ -204,7 +202,7 @@ function pixel(png: PNG, x: number, y: number): [number, number, number] {
 }
 
 const MATRIX: Array<{ mode: Mode; state: BadgeState; cacheControl: string }> = [
-  { mode: 'verified', state: 'verified', cacheControl: 'public, max-age=300, s-maxage=300, stale-while-revalidate=60' },
+  { mode: 'verified', state: 'verified', cacheControl: 'public, max-age=300, s-maxage=300' },
   { mode: 'expired', state: 'expired', cacheControl: 'public, max-age=300, s-maxage=300' },
   { mode: 'unregistered', state: 'unverified', cacheControl: 'public, max-age=60, s-maxage=60' },
   { mode: 'invalid', state: 'unverified', cacheControl: 'public, max-age=60, s-maxage=60' },
@@ -212,13 +210,23 @@ const MATRIX: Array<{ mode: Mode; state: BadgeState; cacheControl: string }> = [
 ];
 
 describe('badge routes: state x theme x format matrix', () => {
+  it('keeps a passing Discord operator claim in neutral art until application control is proven', async () => {
+    const base = await start();
+    const image = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    expect(image.text).toContain('Claim unconfirmed');
+    expect(image.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+    expect(image.text).not.toContain(`stroke="${PILL_PALETTES.dark.verified.ring}"`);
+    const status = await get(base, '/v1/status/discord_application/app1');
+    expect((JSON.parse(status.text) as { status: string }).status).toBe('verified');
+  });
+
   for (const { mode, state, cacheControl } of MATRIX) {
     it(`${mode} renders the ${state} badge in both explicit themes, svg + png`, async () => {
-      fake.attestationMode = mode;
+      fake.addressMode = mode;
       const base = await start();
       for (const theme of ['dark', 'light'] as const) {
         const palette = PILL_PALETTES[theme][state];
-        const svg = await get(base, `/badge/discord_application/app1.svg?theme=${theme}`);
+        const svg = await get(base, `/badge/address/${ADDR}.svg?theme=${theme}`, {}, { addressSubject: true });
         expect(svg.res.status).toBe(200);
         expect(svg.res.headers.get('content-type')).toBe('image/svg+xml');
         expect(svg.res.headers.get('cache-control')).toBe(cacheControl);
@@ -231,7 +239,7 @@ describe('badge routes: state x theme x format matrix', () => {
         expect(svg.text).toContain('checked 14:03 UTC');
         expect(svg.text).toContain(`data-checked-at="${T0.toISOString()}"`);
 
-        const png = await getPng(base, `/badge/discord_application/app1.png?theme=${theme}`);
+        const png = await getPng(base, `/badge/address/${ADDR}.png?theme=${theme}`);
         expect(png.res.status).toBe(200);
         expect(png.res.headers.get('content-type')).toBe('image/png');
         expect(png.res.headers.get('cache-control')).toBe(cacheControl);
@@ -244,13 +252,13 @@ describe('badge routes: state x theme x format matrix', () => {
     });
 
     it(`${mode} icon variant carries no timestamp text, in both themes`, async () => {
-      fake.attestationMode = mode;
+      fake.addressMode = mode;
       const base = await start();
       for (const theme of ['dark', 'light'] as const) {
-        const svg = await get(base, `/badge/discord_application/app1.svg?theme=${theme}&variant=icon`);
+        const svg = await get(base, `/badge/address/${ADDR}.svg?theme=${theme}&variant=icon`, {}, { addressSubject: true });
         expect(svg.text).toContain('width="64"');
         expect(svg.text).not.toContain('font-size="8.5"');
-        const png = await getPng(base, `/badge/discord_application/app1.png?theme=${theme}&variant=icon`);
+        const png = await getPng(base, `/badge/address/${ADDR}.png?theme=${theme}&variant=icon`);
         const image = PNG.sync.read(png.buf);
         expect(image.width).toBe(192);
         expect(image.height).toBe(192);
@@ -260,33 +268,33 @@ describe('badge routes: state x theme x format matrix', () => {
 
   it('auto SVG embeds both palettes and the prefers-color-scheme block, no third palette', async () => {
     const base = await start();
-    const svg = await get(base, '/badge/discord_application/app1.svg?theme=auto');
+    const svg = await get(base, `/badge/address/${ADDR}.svg?theme=auto`, {}, { addressSubject: true });
     expect(svg.text).toContain('@media (prefers-color-scheme: dark)');
     expect(svg.text).toContain(`.c-bg{fill:${PILL_PALETTES.light.verified.bg}}`);
     expect(svg.text).toContain(`.c-bg{fill:${PILL_PALETTES.dark.verified.bg}}`);
     expect(svg.text).toContain(`.c-ring{stroke:${PILL_PALETTES.light.verified.ring}}`);
     expect(svg.text).toContain(`.c-ring{stroke:${PILL_PALETTES.dark.verified.ring}}`);
     // Default (no theme param) is auto.
-    const dflt = await get(base, '/badge/discord_application/app1.svg');
+    const dflt = await get(base, `/badge/address/${ADDR}.svg`, {}, { addressSubject: true });
     expect(dflt.text).toContain('@media (prefers-color-scheme: dark)');
   });
 
   it('auto PNG resolves from the client hint, falls back to dark, reports X-Badge-Theme + Vary', async () => {
     const base = await start();
-    const light = await getPng(base, '/badge/discord_application/app1.png?theme=auto', {
+    const light = await getPng(base, `/badge/address/${ADDR}.png?theme=auto`, {
       'sec-ch-prefers-color-scheme': 'light',
     });
     expect(light.res.headers.get('x-badge-theme')).toBe('light');
     expect(light.res.headers.get('vary')).toBe('Sec-CH-Prefers-Color-Scheme');
     expect(pixel(PNG.sync.read(light.buf), 300, 6)).toEqual(hexToRgb(PILL_PALETTES.light.verified.bg));
 
-    const dark = await getPng(base, '/badge/discord_application/app1.png?theme=auto', {
+    const dark = await getPng(base, `/badge/address/${ADDR}.png?theme=auto`, {
       'sec-ch-prefers-color-scheme': 'dark',
     });
     expect(dark.res.headers.get('x-badge-theme')).toBe('dark');
     expect(pixel(PNG.sync.read(dark.buf), 300, 6)).toEqual(hexToRgb(PILL_PALETTES.dark.verified.bg));
 
-    const none = await getPng(base, '/badge/discord_application/app1.png?theme=auto');
+    const none = await getPng(base, `/badge/address/${ADDR}.png?theme=auto`);
     expect(none.res.headers.get('x-badge-theme')).toBe('dark');
     expect(pixel(PNG.sync.read(none.buf), 300, 6)).toEqual(hexToRgb(PILL_PALETTES.dark.verified.bg));
   });
@@ -295,7 +303,8 @@ describe('badge routes: state x theme x format matrix', () => {
     const base = await start();
     const svg = await get(base, '/badge/app1.svg?theme=dark');
     expect(svg.res.status).toBe(200);
-    expect(svg.text).toContain(`stroke="${PILL_PALETTES.dark.verified.ring}"`);
+    expect(svg.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+    expect(svg.text).toContain('Claim unconfirmed');
   });
 });
 
@@ -346,8 +355,8 @@ describe('JSON status route', () => {
     const res = await fetch(`${base}/v1/status/address/${ADDR}`);
     const text = await res.text();
     // Spec reconciliation: the queried address appears exactly
-    // once, as the subject echo; URLs and all other fields are
-    // truncated only.
+    // once, as the subject echo; the response does not invent a
+    // non-working truncated-address badge URL.
     assertAddressEchoOnce(text, res.headers);
     expect((JSON.parse(text) as { status: string }).status).toBe('verified');
     const svg = await get(base, `/badge/address/${ADDR}.svg?theme=light`);
@@ -377,6 +386,218 @@ describe('JSON status route', () => {
 });
 
 describe('cache behaviour (SPEC 4.6 proposals)', () => {
+  it('shares source resolution before verification for concurrent badge requests', async () => {
+    let resolutions = 0;
+    let activeResolutions = 0;
+    let maxActiveResolutions = 0;
+    const base = await start({
+      resolveAttestation: async () => {
+        resolutions++;
+        activeResolutions++;
+        maxActiveResolutions = Math.max(maxActiveResolutions, activeResolutions);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        activeResolutions--;
+        return ATTESTATION;
+      },
+    });
+    const paths = Array.from({ length: 30 }, () => `${base}/v1/status/discord_application/app1`);
+    await Promise.all(paths.map((path) => fetch(path)));
+    expect(resolutions).toBeLessThan(3);
+    expect(maxActiveResolutions).toBe(1);
+    expect(fake.calls).toBe(1);
+  });
+
+  it('bounds the combined registry and core wait with a grey result', async () => {
+    const delayedVerifier: Verifier = {
+      ...fake,
+      resolveStatus: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return resultFor('verified');
+      },
+    };
+    const base = await start({
+      verifier: delayedVerifier,
+      resolveAttestation: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return ATTESTATION;
+      },
+      requestTimeoutMs: 50,
+    } as Partial<BadgeServiceDeps>);
+    const response = await get(base, '/v1/status/discord_application/app1');
+    const body = JSON.parse(response.text) as { status: string; failures: string[] };
+    expect(body.status).toBe('unknown');
+    expect(body.failures).toContain('lookup_timeout');
+    expect(response.res.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('renders a neutral no-store badge when source resolution exceeds the request deadline', async () => {
+    const base = await start({
+      resolveAttestation: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return ATTESTATION;
+      },
+      requestTimeoutMs: 30,
+    });
+    const image = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    expect(image.res.status).toBe(200);
+    expect(image.res.headers.get('cache-control')).toBe('no-store');
+    expect(image.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+    expect(image.text).not.toContain('Claim unconfirmed');
+  });
+
+  it('caps simultaneous source resolutions across distinct subjects', async () => {
+    let active = 0;
+    let peak = 0;
+    const base = await start({
+      maxConcurrentLookups: 3,
+      resolveAttestation: async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active--;
+        return ATTESTATION;
+      },
+    });
+    await Promise.all(Array.from({ length: 12 }, (_, id) =>
+      get(base, `/v1/status/discord_application/app${id}`)));
+    expect(peak).toBe(3);
+  });
+
+  it('drops queued source jobs after every caller times out', async () => {
+    let sourceStarts = 0;
+    let markStarted!: () => void;
+    let releaseSource!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const sourceGate = new Promise<void>((resolve) => { releaseSource = resolve; });
+    const base = await start({
+      maxConcurrentLookups: 1,
+      requestTimeoutMs: 150,
+      resolveAttestation: async () => {
+        sourceStarts++;
+        if (sourceStarts === 1) {
+          markStarted();
+          await sourceGate;
+        }
+        return ATTESTATION;
+      },
+    });
+    const requests = Promise.all(Array.from({ length: 3 }, (_, id) =>
+      get(base, `/v1/status/discord_application/app${id}`)));
+    await started;
+    const responses = await requests;
+    expect(responses.map(({ text }) => (JSON.parse(text) as { status: string }).status))
+      .toEqual(['unknown', 'unknown', 'unknown']);
+    expect(sourceStarts).toBe(1);
+    releaseSource();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sourceStarts).toBe(1);
+  });
+
+  it('keeps a queued source job while a later shared caller is waiting', async () => {
+    let applicationStarts = 0;
+    let markBlockerStarted!: () => void;
+    let releaseBlocker!: () => void;
+    const blockerStarted = new Promise<void>((resolve) => { markBlockerStarted = resolve; });
+    const blockerGate = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+    const base = await start({
+      maxConcurrentLookups: 1,
+      requestTimeoutMs: 1000,
+      resolveAttestation: async (subject) => {
+        if (subject.id === 'blocker') {
+          markBlockerStarted();
+          await blockerGate;
+        } else {
+          applicationStarts++;
+        }
+        return ATTESTATION;
+      },
+    });
+    const blocker = get(base, '/v1/status/discord_application/blocker');
+    await blockerStarted;
+    const first = get(base, '/v1/status/discord_application/app1');
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const second = get(base, '/v1/status/discord_application/app1');
+    let timedOut;
+    try {
+      timedOut = await first;
+    } finally {
+      releaseBlocker();
+    }
+    const surviving = await second;
+    await blocker;
+    expect((JSON.parse(timedOut.text) as { status: string }).status).toBe('unknown');
+    expect((JSON.parse(surviving.text) as { status: string }).status).toBe('verified');
+    expect(applicationStarts).toBe(1);
+  });
+
+  it('lets a later caller complete a shared check after an earlier caller times out', async () => {
+    let notifyStarted!: () => void;
+    let finishCore!: () => void;
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const coreGate = new Promise<void>((resolve) => { finishCore = resolve; });
+    const delayedVerifier: Verifier = {
+      ...fake,
+      resolveStatus: async () => {
+        notifyStarted();
+        await coreGate;
+        return resultFor('verified');
+      },
+    };
+    const base = await start({ verifier: delayedVerifier, requestTimeoutMs: 250 });
+    const first = get(base, '/v1/status/discord_application/app1');
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const second = get(base, '/v1/status/discord_application/app1');
+    const early = await first;
+    finishCore();
+    const later = await second;
+    expect((JSON.parse(early.text) as { status: string }).status).toBe('unknown');
+    expect((JSON.parse(later.text) as { status: string }).status).toBe('verified');
+  });
+
+  it('reports a registry failure as unknown without claiming AgentBook is down', async () => {
+    const base = await start({
+      verifier: createVerifier({ reader: { lookupHuman: async () => null } }),
+      resolveAttestation: async () => { throw new Error('registry offline'); },
+    });
+    const status = await get(base, '/v1/status/discord_application/app1');
+    expect((JSON.parse(status.text) as { status: string; failures: string[] }).status).toBe('unknown');
+    expect(status.res.headers.get('cache-control')).toBe('no-store');
+    const health = await get(base, '/health');
+    expect((JSON.parse(health.text) as { agentBookReachable: boolean }).agentBookReachable).toBe(true);
+  });
+
+  it('drops a cached verification when a registry entry disappears', async () => {
+    let current: SignedAttestation | null = ATTESTATION;
+    const base = await start({ resolveAttestation: async () => current });
+    const first = await get(base, '/v1/status/discord_application/app1');
+    expect((JSON.parse(first.text) as { status: string }).status).toBe('verified');
+    current = null;
+    const removed = await get(base, '/v1/status/discord_application/app1');
+    expect((JSON.parse(removed.text) as { status: string }).status).toBe('unknown');
+    expect(removed.res.headers.get('cache-control')).toBe('no-store');
+    expect(fake.calls).toBe(2);
+  });
+
+  it('rechecks when a registry attestation changes at the same URL', async () => {
+    let current: SignedAttestation = ATTESTATION;
+    const base = await start({ resolveAttestation: async () => current });
+    await get(base, '/v1/status/discord_application/app1');
+    current = { ...ATTESTATION, signature: '0x01' };
+    await get(base, '/v1/status/discord_application/app1');
+    expect(fake.calls).toBe(2);
+  });
+
+  it('reduces downstream max-age by time already spent in the server cache', async () => {
+    const base = await start();
+    await get(base, `/badge/address/${ADDR}.svg?theme=dark`, {}, { addressSubject: true });
+    nowRef.current = new Date(T0.getTime() + 200_000);
+    const cached = await get(base, `/badge/address/${ADDR}.svg?theme=dark`, {}, { addressSubject: true });
+    expect(cached.res.headers.get('cache-control')).toContain('max-age=100');
+    expect(cached.res.headers.get('cache-control')).not.toContain('stale-while-revalidate');
+    expect(fake.calls).toBe(1);
+  });
+
   it('verified result serves from cache inside 300s with the original check time, rechecks after', async () => {
     const base = await start();
     const first = await get(base, '/badge/discord_application/app1.svg?theme=dark');
@@ -440,7 +661,8 @@ describe('failure behaviour, abuse posture, and misc routes', () => {
     let renders = 0;
     const badgeBase = await start({ rateLimitMax: 1, onRender: () => renders++ });
     const first = await get(badgeBase, '/badge/discord_application/app1.svg?theme=dark');
-    expect(first.text).toContain(`stroke="${PILL_PALETTES.dark.verified.ring}"`);
+    expect(first.text).toContain('Claim unconfirmed');
+    expect(first.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
     expect(renders).toBe(1);
     const limitedBadge = await get(badgeBase, '/badge/discord_application/app1.svg?theme=dark');
     expect(limitedBadge.res.status).toBe(200);
@@ -497,6 +719,8 @@ describe('failure behaviour, abuse posture, and misc routes', () => {
     expect(text).toContain('/badge/discord_application/example.svg?theme=light');
     expect(text).toContain('/badge/discord_application/example.svg?theme=auto');
     expect(text.toLowerCase()).not.toContain('identity verified');
+    expect(text).toContain('Grey does not\nalways mean a claim failed');
+    expect(text).toContain('A valid operator claim stays grey on a\nDiscord application badge');
   });
 
   it('smoke: every route answers on one booted server', async () => {
@@ -586,7 +810,8 @@ describe('fix pass: composite subject keys (blocker)', () => {
 
     // B's badge is B's state (expired), not A's cached verified.
     const aBadge = await get(base, '/badge/discord_application/x%3Ay.svg?theme=dark');
-    expect(aBadge.text).toContain(`stroke="${PILL_PALETTES.dark.verified.ring}"`);
+    expect(aBadge.text).toContain('Claim unconfirmed');
+    expect(aBadge.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
     const bBadge = await get(base, '/badge/discord_application%3Ax/y.svg?theme=dark');
     expect(bBadge.text).toContain(`stroke="${PILL_PALETTES.dark.expired.ring}"`);
     expect(bBadge.text).not.toContain(PILL_PALETTES.dark.verified.ring);
@@ -630,9 +855,9 @@ describe('fix pass: host poisoning', () => {
     // ETag is base-blind only in that the base is config, never
     // request-derived, so a shared cache cannot be poisoned.
     expect(poisoned.headers.etag).toBe(normal.headers.etag);
-    // The response is publicly cacheable (shared-cache safety is
-    // exactly why the Host must not leak into it).
-    expect(poisoned.headers['cache-control']).toContain('public');
+    // Discord application claims are never cached publicly without
+    // a separate application-control check.
+    expect(poisoned.headers['cache-control']).toBe('no-store');
   });
 
   it('with a configured base, a poisoned Host still yields the configured base', async () => {
@@ -738,6 +963,17 @@ describe('fix pass: registry refresh and validation (SPEC 4.6)', () => {
     discord_application: {
       app1: { payload: { note }, signature: '0x00', signatureType: 'eip191' },
     },
+  });
+
+  it('accepts and validates the canonical entries[] file at startup', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'badge-reg-'));
+    const file = join(dir, 'registry.json');
+    writeFileSync(file, JSON.stringify({ version: 1, entries: [] }));
+    const deps = depsFromEnv({ VERIFY_REGISTRY_FILE: file });
+    expect(await deps.resolveAttestation?.({ type: 'discord_application', id: '123456789012345678' })).toBeNull();
+    writeFileSync(file, JSON.stringify({ version: 1, entries: [{ discord_application_id: 'bad', attestation_url: 'http://example.com/a' }] }));
+    expect(() => depsFromEnv({ VERIFY_REGISTRY_FILE: file })).toThrow(ConfigError);
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('production depsFromEnv wiring refreshes: removing an attestation takes effect without restart', async () => {
@@ -1012,14 +1248,14 @@ describe('fix pass: accessible names and the expired layout', () => {
     const expired = await get(base2, '/badge/discord_application/app1.svg?theme=dark');
     const unverified = await get(base2, '/badge/discord_application/missing.svg?theme=dark');
     const label = (svg: string) => /aria-label="([^"]+)"/.exec(svg)?.[1];
-    expect(label(verified.text)).toContain('verified');
+    expect(label(verified.text)).toBe('Claim unconfirmed');
     expect(label(expired.text)).toContain('expired');
     expect(label(unverified.text)).toContain('not verified');
     expect(label(expired.text)).not.toBe(label(verified.text));
     const iconExpired = await get(base2, '/badge/discord_application/app1.svg?theme=dark&variant=icon');
     expect(label(iconExpired.text)).toContain('expired');
     const iconVerified = await get(base, '/badge/discord_application/app1.svg?theme=dark&variant=icon');
-    expect(label(iconVerified.text)).toContain('verified');
+    expect(label(iconVerified.text)).toBe('Claim unconfirmed');
     expect(label(iconExpired.text)).not.toBe(label(iconVerified.text));
   });
 

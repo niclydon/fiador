@@ -5,6 +5,7 @@ import {
   type SignedAttestation,
   type VerifyCoreOptions,
 } from '@fiador/verify';
+import { createRegistryResolver, validateCanonicalRegistry } from './registry.js';
 import type { BadgeServiceDeps } from './service.js';
 
 // Environment configuration (SPEC 4.8): environment only, values
@@ -251,13 +252,14 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
     }
     deps.publicBaseUrl = env.BADGE_PUBLIC_BASE_URL;
   }
-  if (env.BADGE_TRUST_PROXY !== undefined) {
-    if (env.BADGE_TRUST_PROXY === '1' || env.BADGE_TRUST_PROXY === 'true') deps.trustProxy = true;
-    else if (env.BADGE_TRUST_PROXY === '0' || env.BADGE_TRUST_PROXY === 'false') deps.trustProxy = false;
-    else throw new ConfigError('invalid value for BADGE_TRUST_PROXY: expected 1/true or 0/false');
+  if (env.RATE_LIMIT_TRUSTED_PROXIES) {
+    deps.trustedProxyIps = env.RATE_LIMIT_TRUSTED_PROXIES.split(',').map((ip) => ip.trim()).filter(Boolean);
   }
 
   const registryFile = env.VERIFY_REGISTRY_FILE ?? env.REGISTRY_FILE;
+  const registryUrl = env.VERIFY_REGISTRY_URL ?? env.REGISTRY_URL;
+  if (registryFile && registryUrl) throw new ConfigError('choose either REGISTRY_FILE or REGISTRY_URL');
+  if (registryUrl) deps.resolveAttestation = createRegistryResolver({ url: registryUrl });
   if (registryFile) {
     const varName = env.VERIFY_REGISTRY_FILE !== undefined ? 'VERIFY_REGISTRY_FILE' : 'REGISTRY_FILE';
     const refreshMs = strictInt(env, 'REGISTRY_REFRESH_MS', 1, 3_600_000);
@@ -266,9 +268,31 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
       ...(refreshMs !== undefined ? { refreshMs } : {}),
       ...(maxBytes !== undefined ? { maxBytes } : {}),
     });
-    registry.loadInitial(); // throws ConfigError on any problem: clean startup error
-    deps.registrySource = registry;
-    deps.resolveAttestation = (subject) => registry.resolve(subject);
+    try {
+      registry.loadInitial();
+      deps.registrySource = registry;
+      deps.resolveAttestation = (subject) => registry.resolve(subject);
+    } catch (error) {
+      // The public entries[] registry is separate from the legacy
+      // inline map. Probe it only after the bounded FileRegistry read
+      // rejected that map, and validate it before accepting startup.
+      let document: unknown;
+      try {
+        if (statSync(registryFile).size > (maxBytes ?? 1_048_576)) throw error;
+        const raw = readFileSync(registryFile, 'utf8');
+        if (Buffer.byteLength(raw, 'utf8') > (maxBytes ?? 1_048_576)) throw error;
+        document = JSON.parse(raw) as unknown;
+      } catch {
+        throw error;
+      }
+      if (!isPlainObject(document) || document.version !== 1 || !Array.isArray(document.entries)) throw error;
+      try {
+        validateCanonicalRegistry(document);
+      } catch {
+        throw new ConfigError(`${varName}: invalid canonical registry document`);
+      }
+      deps.resolveAttestation = createRegistryResolver({ file: registryFile });
+    }
   }
 
   const assign = <K extends keyof BadgeServiceDeps>(key: K, value: number | undefined) => {
@@ -283,6 +307,8 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
   assign('maxConcurrentLookups', strictInt(env, 'MAX_CONCURRENT_LOOKUPS', 1, 1_000));
   assign('lookupQueueMax', strictInt(env, 'LOOKUP_QUEUE_MAX', 1, 10_000));
   assign('lookupDeadlineMs', strictInt(env, 'LOOKUP_DEADLINE_MS', 100, 120_000));
+  assign('requestTimeoutMs', strictInt(env, 'BADGE_REQUEST_TIMEOUT_MS', 100, 5_000));
+  if (contract) deps.agentBookContract = contract as EvmAddress;
   return deps;
 }
 
