@@ -1,10 +1,17 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/fiador-banner.webp">
   <source media="(prefers-color-scheme: light)" srcset="assets/fiador-banner.webp">
-  <img alt="Fiador" src="assets/fiador-banner.webp" width="100%">
+  <img alt="" src="assets/fiador-banner.webp" width="100%">
 </picture>
 
 # Fiador — human-backed attestation for Discord bots
+
+Created by Nic Lydon. Copyright 2026 Nic Lydon, licensed under
+Apache-2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)).
+
+This is independent open source. It is not affiliated with or
+endorsed by World, Worldcoin, or Tools for Humanity; "World ID"
+and "AgentKit" name the systems this software interoperates with.
 
 A Discord bot's profile tells you a name and an avatar, but little about
 the person who operates it. Fiador is an open protocol for checking a
@@ -20,6 +27,10 @@ endorses any particular output, or
 controls the bot at this moment. Those limits are part of the
 design, stated everywhere the badge appears, because a trust mark
 that overstates itself is worse than none.
+
+Fiador has no token, will not issue one, and is not launching an asset.
+Verification is never something to buy or speculate on. Any token
+claiming the Fiador name is unaffiliated with this project.
 
 ## How it works
 
@@ -124,13 +135,3 @@ for every arc.
 
 The founding narrative is at
 [docs/narrative/2026-10-25-founding.md](docs/narrative/2026-10-25-founding.md).
-
-## Author
-
-Created by Nic Lydon. Copyright 2026 Nic Lydon, licensed under
-Apache-2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)).
-
-This is an independent project. It is not affiliated with or
-endorsed by World, Worldcoin, or Tools for Humanity; "World ID"
-and "AgentKit" are used descriptively to name the systems this
-software interoperates with.
