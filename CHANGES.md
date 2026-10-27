@@ -1,5 +1,20 @@
 # Changes
 
+## 2026-10-27: W0 verify core lane closed (narrative record)
+
+- The W0 (AgentBook Verify Core) lane that produced this
+  repository's `packages/verify-ts`, `packages/verify-mcp`,
+  `packages/verify-py`, and `badge-service/` is closed: §7.5
+  adversarial review passed on the third review, the merge stack
+  (#42/#35/#38/#43 plus release #44) took main to `fdcf00b`, PR
+  #45 took it to `d842baa`, and `@fiador/verify` 0.3.1 /
+  `@fiador/verify-mcp` 0.2.1 are published with the MCP registry
+  listing live as `io.github.niclydon/verify-mcp`.
+- The full documentary account lives in the world-program
+  repository at `docs/narrative/2026-10-27-w0-verify-core.md`
+  (spec, the review saga, and the publish chain). This entry is
+  the pointer, not the story.
+
 ## 2026-10-27: static privacy and support pages published
 
 - Published the eight-file static release from branch commit
