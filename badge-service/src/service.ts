@@ -176,6 +176,13 @@ class OverloadedError extends Error {
   }
 }
 
+class LookupDeadlineError extends Error {
+  constructor() {
+    super('lookup deadline exceeded');
+    this.name = 'LookupDeadlineError';
+  }
+}
+
 export interface BadgeServiceInternals {
   resultCacheSize(): number;
   renderCacheSize(): number;
@@ -359,7 +366,12 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       cache.clear();
       renderCache.clear();
       lastRender.clear();
+      // A request after refresh must not join work started with the
+      // previous registry, even if its subject fingerprint matches.
+      inFlight.clear();
+      sourceInFlight.clear();
     }
+    const startVersion = registryVersion;
     const key = subjectKey(subjectType, subjectId);
     const nowMs = now().getTime();
     const source = subjectType === 'address'
@@ -385,19 +397,25 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     const pending = inFlight.get(flightKey);
     if (pending) return pending;
     const flight = (async () => {
-      // One deadline covers queue wait + the core call; its signal
-      // is what the core receives, so a queued-then-expired lookup
-      // aborts the RPC instead of running unbounded.
+      // Race the queue and core call against the deadline. A core
+      // that ignores AbortSignal cannot hold the response or seed
+      // the cache with a result that arrives after the deadline.
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), lookupDeadline);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new LookupDeadlineError());
+        }, lookupDeadline);
+      });
       let result: VerifyResult;
       try {
-        result = await callCore(subjectType, subjectId, attestation, sourceFailed, controller.signal);
-      } catch (err) {
-        if (err instanceof OverloadedError) throw err;
-        throw err;
+        result = await Promise.race([
+          callCore(subjectType, subjectId, attestation, sourceFailed, controller.signal),
+          timeout,
+        ]);
       } finally {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
       }
       if (result.evidence.rpcLatencyMs !== undefined) health.lastLookupMs = result.evidence.rpcLatencyMs;
       const lookupFailed =
@@ -414,7 +432,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       if (lookupFailed && entry && entry.result.status === 'verified' && now().getTime() - entry.storedAtMs < staleCeiling) {
         return { result: entry.result, stale: true, storedAtMs: entry.storedAtMs };
       }
-      if (!sourceFailed && ttlFor(result.status) > 0) {
+      if (!sourceFailed && ttlFor(result.status) > 0 && (deps.registrySource?.version ?? 0) === startVersion) {
         cache.set(key, { result, storedAtMs: now().getTime(), sourceFingerprint });
       }
       return { result, stale: false, storedAtMs: nowMs };
@@ -423,7 +441,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     try {
       return await flight;
     } finally {
-      inFlight.delete(flightKey);
+      if (inFlight.get(flightKey) === flight) inFlight.delete(flightKey);
     }
   }
 
@@ -610,6 +628,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
    * original check's TTL. Once that expires, show unchecked art; an
    * old verified image must never survive indefinitely under load. */
   const busyPng = new Map<string, Buffer>();
+  const busySvg = new Map<string, Buffer>();
   function sendLimitedBadge(
     req: IncomingMessage,
     res: ServerResponse,
@@ -635,14 +654,19 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     // Nothing rendered yet for this route: the unchecked badge,
     // built without the rasteriser where possible.
     if (args.format === 'svg') {
-      deps.onRender?.('svg');
-      const svg = renderBadgeSvg({
-        state: 'unverified',
-        theme: args.theme,
-        variant: args.variant,
-        checkedAt: null,
-        now: now(),
-      });
+      const fallbackKey = JSON.stringify([args.variant, args.theme]);
+      let svg = busySvg.get(fallbackKey);
+      if (!svg) {
+        deps.onRender?.('svg');
+        svg = Buffer.from(renderBadgeSvg({
+          state: 'unverified',
+          theme: args.theme,
+          variant: args.variant,
+          checkedAt: null,
+          now: now(),
+        }), 'utf8');
+        busySvg.set(fallbackKey, svg);
+      }
       res.writeHead(200, { 'content-type': 'image/svg+xml', ...headers });
       res.end(head ? undefined : svg);
       return;
@@ -758,7 +782,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
         try {
           resolvedResult = await resolveWithDeadline(parsed.type, parsed.id);
         } catch (err) {
-          if (err instanceof OverloadedError) {
+          if (err instanceof OverloadedError || err instanceof LookupDeadlineError) {
             sendJson(res, 503, { error: 'service busy' }, { 'cache-control': 'no-store' }, head);
             return;
           }
@@ -866,12 +890,12 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
         let resolvedResult: { result: VerifyResult; stale: boolean; storedAtMs: number };
         try {
           resolvedResult = await resolveWithDeadline(parsed.type, parsed.id);
-        } catch (err) {
-          if (err instanceof OverloadedError) {
-            uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
-            return;
-          }
-          throw err;
+        } catch {
+          // A lookup failure, including a thrown core or deadline,
+          // is always an unchecked badge. Rendering errors still
+          // reach the outer fixed-error handler.
+          uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
+          return;
         }
         const { result, stale, storedAtMs } = resolvedResult;
         const claimUnconfirmed = parsed.type === 'discord_application' && result.status === 'verified';

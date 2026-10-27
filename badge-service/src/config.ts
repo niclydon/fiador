@@ -248,12 +248,13 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
 
   const registryFile = env.VERIFY_REGISTRY_FILE ?? env.REGISTRY_FILE;
   const registryUrl = env.VERIFY_REGISTRY_URL ?? env.REGISTRY_URL;
+  // Bad values are startup errors even without a registry configured.
+  const refreshMs = strictInt(env, 'REGISTRY_REFRESH_MS', 1, 3_600_000);
+  const maxBytes = strictInt(env, 'REGISTRY_MAX_BYTES', 1024, 67_108_864);
   if (registryFile && registryUrl) throw new ConfigError('choose either REGISTRY_FILE or REGISTRY_URL');
   if (registryUrl) deps.resolveAttestation = createRegistryResolver({ url: registryUrl });
   if (registryFile) {
     const varName = env.VERIFY_REGISTRY_FILE !== undefined ? 'VERIFY_REGISTRY_FILE' : 'REGISTRY_FILE';
-    const refreshMs = strictInt(env, 'REGISTRY_REFRESH_MS', 1, 3_600_000);
-    const maxBytes = strictInt(env, 'REGISTRY_MAX_BYTES', 1024, 67_108_864);
     const registry = new FileRegistry(registryFile, varName, {
       ...(refreshMs !== undefined ? { refreshMs } : {}),
       ...(maxBytes !== undefined ? { maxBytes } : {}),

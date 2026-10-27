@@ -165,7 +165,8 @@ set zero, negative, or non-integer value for any numeric variable
 is a startup error naming the variable — never a silent
 disablement and never a silent default. Startup failures print
 one sanitised line (variable + problem class, no file content, no
-stack) and exit non-zero.
+stack) and exit non-zero. Registry numeric settings are validated
+even when no registry is configured.
 
 | Variable | Meaning |
 |---|---|
@@ -263,6 +264,9 @@ route then marks `evidence.source: 'cache'` and the response is
 Older than 900s, or no cache: unverified with status `unknown`.
 Serving a quietly-fresh-looking stale verified badge is the one
 failure this service must never have.
+When a local registry refreshes, new requests stop joining old
+source and core work; an old result cannot repopulate the cache
+after the registry version changes.
 
 Rendered badges are cached by the same identity as their `ETag`
 (subject, status, check time, variant, format, theme, configured
@@ -280,8 +284,11 @@ routes it serves the subject's last render when one exists, else
 a reusable unchecked badge — in both cases `no-store`. A global
 concurrency cap plus a bounded queue with a
 per-lookup deadline bounds outbound core lookups (the core
-receives the deadline's `AbortSignal`); saturation returns 503 on
-the JSON route and the unchecked badge on badge routes. HTTP
+receives the deadline's `AbortSignal`, and the service enforces
+the deadline even if the core ignores it). Saturation or an elapsed
+lookup deadline returns 503 on the JSON route and an unchecked
+badge on image routes; a thrown core check also yields an unchecked
+badge. HTTP
 server timeouts are set explicitly. The whole source and core
 response has a five-second deadline.
 
@@ -289,7 +296,8 @@ An over-limit request reuses the last observed badge only until
 that check's original cache deadline. Afterward it gets unchecked
 art with no check time, so a verified image cannot remain visible
 indefinitely because the rate limiter prevents rechecking. PNG
-fallbacks are cached separately by theme and variant.
+fallbacks are cached separately by theme and variant, for both
+SVG and PNG.
 
 ## Tests
 

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createVerifier, hashHumanId, type SignedAttestation, type VerifyResult, type Verifier } from '@fiador/verify';
 import { createBadgeService, type BadgeServiceDeps } from '../src/service.js';
-import { ConfigError, FileRegistry, depsFromEnv, hostFromEnv, portFromEnv } from '../src/config.js';
+import { ConfigError, FileRegistry, depsFromEnv, hostFromEnv, portFromEnv, type RegistrySource } from '../src/config.js';
 import { formatCheckedLabel } from '../src/render.js';
 import { PILL_PALETTES, type BadgeState } from '../src/palettes.js';
 
@@ -1152,6 +1152,10 @@ describe('fix pass: configuration strictness and bind posture', () => {
       { VERIFY_TIMEOUT_MS: '99999999' },
       { CACHE_MAX_ENTRIES: '0' },
       { LOOKUP_QUEUE_MAX: '-2' },
+      { REGISTRY_REFRESH_MS: 'abc' },
+      { REGISTRY_REFRESH_MS: '0' },
+      { REGISTRY_MAX_BYTES: '10' },
+      { REGISTRY_MAX_BYTES: '-1' },
     ]) {
       const name = Object.keys(env)[0]!;
       expect(() => depsFromEnv(env), JSON.stringify(env)).toThrow(new RegExp(name));
@@ -1365,3 +1369,177 @@ describe('fix pass: accessible names and the expired layout', () => {
 function PILL_WIDTHS_FIX(): number {
   return 288; // PILL_WIDTHS.expired, pinned by the palettes module
 }
+
+describe('registry refresh races', () => {
+  it('does not cache a verification completed after its registry entry was revoked', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'badge-reg-race-'));
+    const file = join(dir, 'registry.json');
+    writeFileSync(file, JSON.stringify({ discord_application: { race: ATTESTATION } }));
+    const source = new FileRegistry(file, 'VERIFY_REGISTRY_FILE', {
+      now: () => nowRef.current.getTime(),
+      refreshMs: 300_000,
+      log: () => {},
+    });
+    source.loadInitial();
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let raceCalls = 0;
+    const verifier: Verifier = {
+      verifyAddress: fake.verifyAddress.bind(fake),
+      verifyAttestation: fake.verifyAttestation.bind(fake),
+      async resolveStatus(subject) {
+        if (subject.kind !== 'attested_subject' || subject.subject.id !== 'race') {
+          return fake.resolveStatus(subject);
+        }
+        raceCalls++;
+        const attestation = await subject.resolveAttestation(subject.subject);
+        if (raceCalls === 1) {
+          entered();
+          await gate;
+        }
+        return attestation ? resultFor('verified') : { ...resultFor('unknown'), failures: ['attestation_not_found'] };
+      },
+    };
+    try {
+      const base = await start({ verifier, registrySource: source });
+      const first = fetch(`${base}/v1/status/discord_application/race`);
+      await started;
+      writeFileSync(file, JSON.stringify({ discord_application: {} }));
+      nowRef.current = new Date(T0.getTime() + 300_001);
+      const second = await get(base, '/v1/status/discord_application/race');
+      expect((JSON.parse(second.text) as { failures: string[] }).failures).toContain('attestation_not_found');
+      release();
+      expect(((await (await first).json()) as { status: string }).status).toBe('verified');
+      expect(source.version).toBe(1);
+      expect(servers.at(-1)!.badgeInternals.resultCacheSize()).toBe(0);
+      const third = await get(base, '/v1/status/discord_application/race');
+      expect((JSON.parse(third.text) as { status: string }).status).toBe('unknown');
+      expect(raceCalls).toBe(3);
+    } finally {
+      release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('starts a new source lookup after a version change instead of joining the old flight', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let version = 0;
+    let resolves = 0;
+    const source: RegistrySource = {
+      get version() { return version; },
+      refreshIfDue(nowMs) { if (nowMs > T0.getTime() + 300_000) version = 1; },
+      async resolve() {
+        resolves++;
+        if (resolves === 1) {
+          entered();
+          await gate;
+          return ATTESTATION;
+        }
+        return null;
+      },
+    };
+    const base = await start({ registrySource: source, requestTimeoutMs: 300 });
+    const first = fetch(`${base}/v1/status/discord_application/race`);
+    try {
+      await started;
+      nowRef.current = new Date(T0.getTime() + 300_001);
+      const second = await get(base, '/v1/status/discord_application/race');
+      const body = JSON.parse(second.text) as { failures: string[] };
+      expect(body.failures).toContain('attestation_not_found');
+      expect(resolves).toBe(2);
+    } finally {
+      release();
+      await first;
+    }
+  });
+});
+
+describe('limited renders and lookup failures', () => {
+  it('renders each rate-limited SVG theme and variant only once', async () => {
+    let renders = 0;
+    const base = await start({ rateLimitMax: 0, onRender: () => renders++ });
+    const dark = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    const repeat = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    expect(repeat.text).toBe(dark.text);
+    expect(renders).toBe(1);
+    const light = await get(base, '/badge/discord_application/app1.svg?theme=light');
+    expect(light.text).not.toBe(dark.text);
+    expect(renders).toBe(2);
+    for (const item of [dark, repeat, light]) {
+      expect(item.res.headers.get('cache-control')).toBe('no-store');
+      expect(item.res.headers.get('x-checked-at')).toBeNull();
+    }
+  });
+
+  it('answers 503 at the lookup deadline and discards a signal-ignoring late result', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    const verifier: Verifier = {
+      verifyAddress: fake.verifyAddress.bind(fake),
+      verifyAttestation: fake.verifyAttestation.bind(fake),
+      async resolveStatus() {
+        calls++;
+        if (calls === 1) await gate; // deliberately ignores AbortSignal
+        return resultFor('verified');
+      },
+    };
+    const base = await start({ verifier, lookupDeadlineMs: 100, requestTimeoutMs: 1000 });
+    try {
+      const first = await fetch(`${base}/v1/status/discord_application/app1`);
+      expect(first.status).toBe(503);
+      expect(first.headers.get('cache-control')).toBe('no-store');
+      await first.text();
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const second = await get(base, '/v1/status/discord_application/app1');
+      expect(second.res.status).toBe(200);
+      expect((JSON.parse(second.text) as { status: string }).status).toBe('verified');
+      expect(calls).toBe(2);
+    } finally {
+      release();
+    }
+  });
+
+  it('answers a never-settling core with 503 JSON and a grey badge', async () => {
+    const never: Verifier = {
+      verifyAddress: fake.verifyAddress.bind(fake),
+      verifyAttestation: fake.verifyAttestation.bind(fake),
+      async resolveStatus() { return new Promise<VerifyResult>(() => {}); },
+    };
+    const base = await start({ verifier: never, lookupDeadlineMs: 100, requestTimeoutMs: 1000 });
+    const status = await fetch(`${base}/v1/status/discord_application/app1`);
+    expect(status.status).toBe(503);
+    expect(status.headers.get('cache-control')).toBe('no-store');
+    const badge = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    expect(badge.res.status).toBe(200);
+    expect(badge.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+    expect(badge.res.headers.get('cache-control')).toBe('no-store');
+    expect(badge.res.headers.get('x-checked-at')).toBeNull();
+  });
+
+  it('renders grey SVG and PNG when the core throws while JSON keeps a fixed 500', async () => {
+    const exploding: Verifier = {
+      verifyAddress: fake.verifyAddress.bind(fake),
+      verifyAttestation: fake.verifyAttestation.bind(fake),
+      async resolveStatus() { throw new Error(`boom ${RAW_HUMAN} ${ADDR}`); },
+    };
+    const base = await start({ verifier: exploding });
+    const svg = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    expect(svg.res.status).toBe(200);
+    expect(svg.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+    expect(svg.res.headers.get('cache-control')).toBe('no-store');
+    expect(svg.res.headers.get('x-checked-at')).toBeNull();
+    const png = await getPng(base, '/badge/discord_application/app1.png?theme=dark');
+    expect(png.res.status).toBe(200);
+    expect(png.res.headers.get('content-type')).toBe('image/png');
+    const json = await fetch(`${base}/v1/status/discord_application/app1`);
+    expect(json.status).toBe(500);
+    expect(await json.text()).toBe('{"error":"internal error"}');
+  });
+});
