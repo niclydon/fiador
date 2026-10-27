@@ -5,6 +5,29 @@
 The §7.5 adversarial-review fix pass (companion to
 @fiador/verify 0.3.0; requires `^0.3.0`).
 
+### Fix pass 3 (re-review 2)
+
+- Arrival deadlines are per REQUEST, not per connection
+  (NEW-1): the pass-2 timers armed the headers deadline once
+  per connection and cleared it at the first request event, so
+  on a reused (keep-alive) connection a second request's
+  header phase was bounded by nothing, and its total deadline
+  started only once its headers had fully arrived. The factory
+  now re-arms the headers deadline whenever a socket goes idle
+  after a response, and measures the total deadline from when
+  each request began arriving. Regression probes pin both
+  legs: a header drip on a reused connection dies at the
+  headers deadline, and a slow header phase consumes the same
+  total budget as the body that follows it.
+- The `checks` projection takes the registration stage from
+  the core's recorded fact (D6, companion to @fiador/verify
+  fix pass 3): the core reports whether the step-6 lookup ran
+  and how it resolved, so claim-replay / claim-expired /
+  claim-failure results — which carry no lookup latency — are
+  no longer misreported as `not_checked`, and an expiry
+  crossing with a failed lookup reports registration
+  `unknown` (D5).
+
 ### Fix pass 2 (re-review)
 
 - The body cap is now enforced by the transport alone (B4,
@@ -28,6 +51,9 @@ The §7.5 adversarial-review fix pass (companion to
   (proven by the result's status and lookup latency); date
   codes and a bare expired status never count as signature
   evidence when a lookup-failure code is present.
+  [Corrected in fix pass 3: the stage is proven by the core's
+  recorded registration fact, not by status/latency inference
+  (D6).]
 - Host handling is normalised (M15): `127.1`, `LOCALHOST`,
   `0:0:0:0:0:0:0:1`, IPv4-mapped forms, and friends are
   recognised as loopback for both the DNS-rebinding decision

@@ -17,10 +17,11 @@ import { createVerifyMcpServer, type VerifyMcpDeps } from './server.js';
 // shape on both paths. There is deliberately no hand-rolled
 // pre-check: two cap implementations that can disagree are a
 // finding, not a defence. Arrival time is bounded by the factory's
-// own per-connection timers (see createVerifyHttpServer): a
+// own per-request timers (see createVerifyHttpServer): a
 // headers deadline below a TOTAL request deadline — total meaning
-// measured from the connection, never reset by arriving bytes, so
-// a slow drip cannot hold a request open past it.
+// measured from when the request began arriving, never reset by
+// arriving bytes, so a slow drip cannot hold a request open past
+// it.
 export const MAX_HTTP_BODY_BYTES = 1024 * 1024;
 const HEADERS_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -319,24 +320,41 @@ export function createVerifyHttpServer(deps: VerifyMcpDeps, options: HttpOptions
   // an idle connection, a header drip, or a body drip in this
   // build (only the legacy per-gap inactivity timeout fires, and
   // a per-gap timer is exactly what a drip defeats). So the
-  // bounds are enforced here, per connection: the headers phase
-  // (connection -> request event) gets headersTimeoutMs; the
-  // whole request gets requestTimeoutMs measured from the
-  // connection — a total deadline that arriving bytes never
-  // reset. The built-ins are also assigned, as defence in depth
-  // for runtimes that honour them, with the same values.
+  // bounds are enforced here, PER REQUEST (the per-connection
+  // version was 7.5 re-review 2's NEW-1): the headers timer was
+  // armed once at connect and cleared at the first request
+  // event, so on a reused (keep-alive) connection the second
+  // request's header phase was bounded by nothing, and its
+  // total deadline started only once its headers had fully
+  // arrived — a drip there held the connection indefinitely.
+  // The state machine below re-arms for every request: the
+  // headers deadline covers the phase from when a request may
+  // begin arriving (the connection, or the previous response's
+  // completion) to its request event, and the total deadline is
+  // measured from that same start — a total that arriving bytes
+  // never reset. The built-ins are also assigned, as defence in
+  // depth for runtimes that honour them, with the same values.
   server.headersTimeout = headersTimeoutMs;
   server.requestTimeout = requestTimeoutMs;
-  const sockets = new Map<
-    import('node:net').Socket,
-    { startedAt: number; headerTimer?: NodeJS.Timeout; served?: boolean }
-  >();
-  server.on('connection', (socket) => {
-    const state = { startedAt: Date.now(), headerTimer: undefined as NodeJS.Timeout | undefined, served: false };
+  interface SocketState {
+    startedAt: number; // when the current request began arriving
+    headerTimer?: NodeJS.Timeout;
+    totalTimer?: NodeJS.Timeout;
+    inFlight: number;
+  }
+  const sockets = new Map<import('node:net').Socket, SocketState>();
+  const armHeaders = (socket: import('node:net').Socket, state: SocketState): void => {
+    if (state.headerTimer) clearTimeout(state.headerTimer);
+    state.startedAt = Date.now();
     state.headerTimer = setTimeout(() => socket.destroy(), headersTimeoutMs);
+  };
+  server.on('connection', (socket) => {
+    const state: SocketState = { startedAt: Date.now(), inFlight: 0 };
     sockets.set(socket, state);
+    armHeaders(socket, state);
     socket.once('close', () => {
       if (state.headerTimer) clearTimeout(state.headerTimer);
+      if (state.totalTimer) clearTimeout(state.totalTimer);
       sockets.delete(socket);
     });
   });
@@ -347,14 +365,25 @@ export function createVerifyHttpServer(deps: VerifyMcpDeps, options: HttpOptions
       clearTimeout(state.headerTimer);
       state.headerTimer = undefined;
     }
-    const elapsed = state.served ? 0 : Date.now() - state.startedAt;
-    state.served = true;
-    const remaining = Math.max(0, requestTimeoutMs - elapsed);
-    const totalTimer = setTimeout(() => {
+    state.inFlight += 1;
+    const remaining = Math.max(0, requestTimeoutMs - (Date.now() - state.startedAt));
+    if (state.totalTimer) clearTimeout(state.totalTimer);
+    state.totalTimer = setTimeout(() => {
       req.destroy();
       res.destroy();
     }, remaining);
-    res.once('close', () => clearTimeout(totalTimer));
+    res.once('close', () => {
+      state.inFlight -= 1;
+      if (state.inFlight > 0) return; // a pipelined request still owns the socket
+      state.inFlight = 0;
+      if (state.totalTimer) {
+        clearTimeout(state.totalTimer);
+        state.totalTimer = undefined;
+      }
+      // The socket is idle, waiting for the next request: that
+      // request's header phase gets a fresh deadline (NEW-1).
+      if (!req.socket.destroyed) armHeaders(req.socket, state);
+    });
   });
   return server;
 }

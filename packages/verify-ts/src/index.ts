@@ -14,6 +14,7 @@ export type {
   FailureCode,
   NonceClaimResult,
   PublicVerifyResult,
+  RegistrationLookupFact,
   SignedAttestation,
   SignedMessageResult,
   SignedMessageSignatureType,

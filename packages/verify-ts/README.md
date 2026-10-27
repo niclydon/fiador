@@ -68,16 +68,17 @@ conforming backend — under concurrent double-presentation. Treat
 that conformance test as the executable definition of the
 contract when writing a production store.
 
-Because the claim is taken only at the terminal step, transient
-or not-yet outcomes (a lookup failure, an unregistered wallet, an
-expired document) never burn a nonce: the presentation can
-simply be retried. The contract also offers
-`release(nonce, wallet)` for compositions that claim earlier in
-their pipeline and must free a nonce on an `unknown` or
-`unregistered` outcome. Entries lapse at the attestation's own
-`expiresAt`, and the store checks its own clock at the write
-point, returning `'expired'` rather than recording a stale
-claim.
+Because the claim is taken only at the terminal step, outcomes
+resolved before the final claim (a lookup failure, an
+unregistered wallet, an expired document) never burn a nonce:
+the presentation can simply be retried. The one exception is
+the claim itself: a lost or timed-out claim response is
+`unknown` + `lookup_failed` with the nonce possibly consumed
+(SPEC 3.3) — the write may have committed, and the contract is
+exactly `{ has, claim }`, with no `release()` and no automatic
+retry. Entries lapse at the attestation's own `expiresAt`, and
+the store checks its own clock at the write point, returning
+`'expired'` rather than recording a stale claim.
 
 ## Design notes
 

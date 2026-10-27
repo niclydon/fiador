@@ -188,10 +188,17 @@ export function createVerifyMcpServer(deps: VerifyMcpDeps): McpServer {
           ...(wallet ? { expectedWallet: wallet as EvmAddress } : {}),
         });
         const pub = toPublicVerifyResult(result);
-        const checks = computeChecks(pub, {
-          subject: subject !== undefined,
-          wallet: wallet !== undefined,
-        });
+        // The checks projection takes the registration stage's
+        // fate from the core's internal record (fix pass 3, D6),
+        // never from inference over the public shape.
+        const checks = computeChecks(
+          pub,
+          {
+            subject: subject !== undefined,
+            wallet: wallet !== undefined,
+          },
+          result.registration,
+        );
         return toolResult({ result: pub, checks });
       }),
   );

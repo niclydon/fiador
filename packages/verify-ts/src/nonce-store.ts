@@ -2,8 +2,9 @@ import type { EvmAddress, NonceClaimResult } from './types.js';
 
 // Reference in-memory nonce store (7.5 review B2; re-review fix
 // pass 2). It implements the VerifyAttestationOptions.nonceStore
-// contract — has / claim / release — and ships in the package so
-// the contract has an executable reference, not just prose.
+// contract — exactly { has, claim }, per SPEC 3.3 — and ships in
+// the package so the contract has an executable reference, not
+// just prose.
 //
 // Atomicity: claim() performs its check-and-set with NO await in
 // between. An async function body runs synchronously until its
@@ -25,10 +26,15 @@ import type { EvmAddress, NonceClaimResult } from './types.js';
 // already expired, so a stale verifier cannot make a nonce
 // persist past expiry.
 //
-// Release (N3): the verifier takes claims only for terminal
-// outcomes, so it never calls release itself; the method exists
-// for compositions that claim earlier and must free a nonce when
-// their outcome is unknown or unregistered.
+// Outcome order (SPEC 3.3, fix pass 3 D9): a retained claim is
+// reported ('replay') before the store-clock expiry outcome is
+// considered; the expiry outcome is for a nonce with no retained
+// claim whose attestation has already expired.
+//
+// There is no release(): the verifier takes claims only for
+// terminal outcomes, and SPEC 3.3 forbids freeing a claim after
+// an ambiguous claim outcome. (A release() shipped in fix pass 2
+// and was removed in fix pass 3, D3.)
 export class InMemoryNonceStore {
   private readonly claims = new Map<string, number>(); // key -> expiresAt (ms)
   private readonly clock: () => Date;
@@ -63,16 +69,15 @@ export class InMemoryNonceStore {
     expiresAt: string,
   ): Promise<NonceClaimResult> {
     // No await between the checks above and the write below:
-    // atomic by construction.
-    const expiresAtMs = Date.parse(expiresAt);
-    if (!(expiresAtMs > this.clock().getTime())) return 'expired';
+    // atomic by construction. A retained claim reports 'replay'
+    // first (SPEC 3.3's outcome order, fix pass 3 D9); the
+    // store-clock expiry outcome applies only when no claim is
+    // retained for the key.
     const key = this.key(nonce, wallet);
     if (this.active(key) !== undefined) return 'replay';
+    const expiresAtMs = Date.parse(expiresAt);
+    if (!(expiresAtMs > this.clock().getTime())) return 'expired';
     this.claims.set(key, expiresAtMs);
     return 'claimed';
-  }
-
-  async release(nonce: string, wallet: EvmAddress): Promise<void> {
-    this.claims.delete(this.key(nonce, wallet));
   }
 }
