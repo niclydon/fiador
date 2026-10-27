@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { chmod, copyFile, mkdtemp, mkdir, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,9 +16,10 @@ const WALLET = `0x${'Ab'.repeat(20)}`;
 const OTHER_WALLET = `0x${'Cd'.repeat(20)}`;
 const NONCE = 'ab'.repeat(32);
 const HOUR_MS = 60 * 60 * 1000;
+const TEMP_ROOT = realpathSync(tmpdir());
 
 async function temporaryDatabase(t) {
-  const directory = await mkdtemp(join(tmpdir(), 'fiador-nonce-'));
+  const directory = await mkdtemp(join(TEMP_ROOT, 'fiador-nonce-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   return join(directory, 'nonces.db');
 }
@@ -230,7 +232,15 @@ test('unsafe parent, database, sidecar, and symlink paths fail closed', async (t
   await symlink(directory, parentLink);
   assert.throws(
     () => new SqliteNonceStore(join(parentLink, 'nonces.db')),
-    /owner-only directory/,
+    /must not contain symlinks/,
+  );
+  const nestedDirectory = join(directory, 'nested-private');
+  await mkdir(nestedDirectory, { mode: 0o700 });
+  const ancestorLink = join(directory, 'linked-ancestor');
+  await symlink(directory, ancestorLink);
+  assert.throws(
+    () => new SqliteNonceStore(join(ancestorLink, 'nested-private', 'nonces.db')),
+    /must not contain symlinks/,
   );
 
   const store = new SqliteNonceStore(path);
@@ -255,7 +265,7 @@ test('copying only the main WAL-mode DB omits a committed claim', async (t) => {
   const live = new SqliteNonceStore(path);
   assert.equal(await live.claim(NONCE, WALLET, new Date(Date.now() + HOUR_MS).toISOString()), 'claimed');
   assert.ok((await stat(`${path}-wal`)).size > 0);
-  const backupDirectory = await mkdtemp(join(tmpdir(), 'fiador-stale-copy-'));
+  const backupDirectory = await mkdtemp(join(TEMP_ROOT, 'fiador-stale-copy-'));
   t.after(() => rm(backupDirectory, { recursive: true, force: true }));
   const copiedPath = join(backupDirectory, 'nonces.db');
   await copyFile(path, copiedPath);
@@ -270,7 +280,7 @@ test('a SQLite online snapshot includes a committed WAL claim', async (t) => {
   const path = await temporaryDatabase(t);
   const live = new SqliteNonceStore(path);
   assert.equal(await live.claim(NONCE, WALLET, new Date(Date.now() + HOUR_MS).toISOString()), 'claimed');
-  const backupDirectory = await mkdtemp(join(tmpdir(), 'fiador-online-backup-'));
+  const backupDirectory = await mkdtemp(join(TEMP_ROOT, 'fiador-online-backup-'));
   t.after(() => rm(backupDirectory, { recursive: true, force: true }));
   const snapshotPath = join(backupDirectory, 'snapshot.db');
   const backupConnection = new DatabaseSync(path);

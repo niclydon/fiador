@@ -25,7 +25,9 @@ one-use flow. The path must be absolute so different working directories
 cannot silently create separate stores. The parent directory must already
 be owned by the service user with mode `0700`; the database must be a regular
 owner-owned file with mode `0600`. Existing group-readable files and symlinks
-are rejected. A new database is created with mode `0600` even under umask
+are rejected, including symlinks in the parent path. Use the parent's real,
+canonical path and keep its ancestors under trusted ownership. A new database
+is created with mode `0600` even under umask
 `022`; SQLite's WAL and SHM files inherit that mode. This adapter requires a
 POSIX host so it can check ownership and permissions.
 

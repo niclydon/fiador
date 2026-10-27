@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
-import { closeSync, constants, lstatSync, openSync } from 'node:fs';
-import { dirname, isAbsolute } from 'node:path';
+import { closeSync, constants, lstatSync, openSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import type { EvmAddress, NonceClaimResult, VerifyAttestationOptions } from '@fiador/verify';
 
 type NonceStore = NonNullable<VerifyAttestationOptions['nonceStore']>;
@@ -83,6 +83,9 @@ function checkPrivateFiles(dbPath: string, uid: number): void {
 function preparePrivateFile(dbPath: string): number {
   const uid = ownerUid();
   const parentPath = dirname(dbPath);
+  if (realpathSync(parentPath) !== resolve(parentPath)) {
+    throw new Error(`SQLite parent path must not contain symlinks: ${parentPath}`);
+  }
   const parent = lstatSync(parentPath);
   if (
     !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid ||
