@@ -1,10 +1,17 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/fiador-banner.webp">
   <source media="(prefers-color-scheme: light)" srcset="assets/fiador-banner.webp">
-  <img alt="Fiador" src="assets/fiador-banner.webp" width="100%">
+  <img alt="" src="assets/fiador-banner.webp" width="100%">
 </picture>
 
-# Fiador
+# Fiador — human-backed attestation for Discord bots
+
+Created by Nic Lydon. Copyright 2026 Nic Lydon, licensed under
+Apache-2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)).
+
+This is independent open source. It is not affiliated with or
+endorsed by World, Worldcoin, or Tools for Humanity; "World ID"
+and "AgentKit" name the systems this software interoperates with.
 
 A Discord bot's profile tells you a name and an avatar, but little about
 the person who operates it. Fiador is an open protocol for checking a
@@ -20,6 +27,10 @@ endorses any particular output, or
 controls the bot at this moment. Those limits are part of the
 design, stated everywhere the badge appears, because a trust mark
 that overstates itself is worse than none.
+
+Fiador has no token, will not issue one, and is not launching an asset.
+Verification is never something to buy or speculate on. Any token
+claiming the Fiador name is unaffiliated with this project.
 
 ## How it works
 
@@ -42,8 +53,9 @@ mark has to be able to say "no longer true."
 
 ## Privacy rules
 
-- Attestations publish a hash of the humanId, never the full value.
-  Fiador verifiers read the on-chain value for a check. Their default
+- Attestations publish the signing wallet's full address and a hash of
+  the human identifier, never the raw identifier. Fiador verifiers
+  read the on-chain value for a check. Their default
   public results omit it; trusted local callers can explicitly request
   a raw internal result, which must never be published. AgentBook
   lookup and registration events are public. A disclosed registered
@@ -53,13 +65,16 @@ mark has to be able to say "no longer true."
   Two bots backed by the same human also publish the same hash.
 - An optional operator display name exists for operators who want
   to be named. It is off by default and never required.
-- No live private keys, tokens, or personal data belong in this repo.
-  Test signing keys and identifiers are synthetic.
+- This repository does not contain live private keys or service tokens.
+  Test signing keys and test identifiers are synthetic. The founding
+  public attestation intentionally includes a dedicated wallet address,
+  a human-identifier hash, and an operator display name.
 
 ## Status
 
-Founding stage, October 2026. The protocol specification is
-written ([docs/SPEC.md](docs/SPEC.md)). This repository contains:
+Founding stage; status checked October 27, 2026. The protocol
+specification is written ([docs/SPEC.md](docs/SPEC.md)). This
+repository contains:
 
 - The full protocol spec, including the verification order, the
   discovery model (registry plus install-time claim), and the
@@ -69,18 +84,27 @@ written ([docs/SPEC.md](docs/SPEC.md)). This repository contains:
   served-badge design so the mark can reflect a live check
 - The verify package, self-hosted Discord verifier bot, static verify
   page (`/verify/`), and registry source. The browser page
-  has local tests and a protected preview route check; real browser
-  CORS/RPC behavior remains to be checked. The bot's role automation
-  is disabled pending trusted proof of Discord application control.
+  has local tests and a protected preview route check. A local browser
+  check fetched the public attestation and read World Chain successfully
+  on October 26. The bot's role automation is disabled pending trusted
+  proof of Discord application control.
 - Root Vercel preview packaging for the site, browser page, registry,
   attestation, and `/v/` link previews ([runbook](docs/web-preview.md)).
-  Local route checks and a protected preview smoke pass. Production still
-  serves an older deployment; public promotion and live Discord checks remain.
+  Local route checks and a protected preview smoke pass are recorded.
+  [fiador.org](https://fiador.org) serves the site, public registry,
+  founding attestation, [privacy page](https://fiador.org/privacy/), and
+  [support page](https://fiador.org/support/). The production `/verify/`
+  and `/v/` routes still return 404. A production browser check, Discord
+  unfurl, and application-control witness remain unverified.
 - A tested AgentKit free-trial integration in a private prototype,
   verified end to end against AgentBook with a real Orb-verified
   registration (October 25, 2026).
 
-These sources and local tests do not establish a live production deployment.
+The live privacy and support pages also describe a separate owner-only
+Slack trial. As of October 27, owner enrollment, Slack sign-in, and a
+World ID check have not run live. The available source, local tests,
+and protected previews do not establish a production verifier or
+Discord application control.
 Guild admins upgrading the verifier bot must manually audit existing
 `Human-backed` role holders; stored legacy claims do not prove application
 control, and the bot changes no roles.
@@ -111,13 +135,3 @@ for every arc.
 
 The founding narrative is at
 [docs/narrative/2026-10-25-founding.md](docs/narrative/2026-10-25-founding.md).
-
-## Author
-
-Created by Nic Lydon. Copyright 2026 Nic Lydon, licensed under
-Apache-2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)).
-
-This is an independent project. It is not affiliated with or
-endorsed by World, Worldcoin, or Tools for Humanity; "World ID"
-and "AgentKit" are used descriptively to name the systems this
-software interoperates with.
