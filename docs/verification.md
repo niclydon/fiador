@@ -55,8 +55,9 @@ decision: @worldcoin/agentkit-core 0.2.1.
   the founding entry. A 2026-10-26 read-only comparison found that
   the live entry matches the repository entry on its present fields,
   but omits the repository's `payload_hash` field. The live and repo
-  registries are therefore not byte-identical. Reconcile and recheck
-  this deployment drift with the next production web release.
+  registries are therefore not byte-identical. The October 27 static
+  privacy/support release reused this deployed mirror, so this drift
+  remains to be reconciled and rechecked in a later web release.
 - On the same read-only check, the site root returned 200 while
   `/verify/` and a test `/v/` URL returned 404. §9 step 1 publication
   is complete; the page and preview live tests in steps 2–5a remain.
@@ -103,3 +104,36 @@ decision: @worldcoin/agentkit-core 0.2.1.
   a local build at check time. It does not test the protected Vercel
   preview, the still-missing production `/verify/` and `/v/` routes,
   a Discord unfurl, or application control.
+
+## 2026-10-27 — privacy and support static publication
+
+- On the separate static release branch, the eight-file allowlist and
+  source-byte checks passed three tests. Local HTTP returned 200 for
+  `/`, `/privacy/`, `/support/`, `/registry.json`, and the published
+  attestation; `/verify/`, `/v/example`, and `/api/preview` returned
+  404. Light desktop and dark mobile screenshots of both new pages
+  were checked for clipping. The full-tree secret scan found five
+  known synthetic fixture findings and no changed-path findings;
+  an all-refs scan found fifteen findings in the same fixture classes.
+  A privacy scan found no private identifiers in the changed release
+  files. The signed public attestation remained byte-identical.
+- Before publication, a protected preview returned 200 for the new
+  pages and 404 for the three unshipped routes. Its registry and
+  attestation responses matched the then-live site byte for byte,
+  including `Access-Control-Allow-Origin: *` on both JSON responses.
+  An independent adversarial review found no blocker.
+- After operator approval, Vercel production deployment
+  `dpl_2ZYomdjYFfzdYsMw82SqsPof56sk` reached READY from static
+  branch commit `9b5bc30781333376f8bea1459f03d5069e201858`, with
+  `fiador.org` and `www.fiador.org` attached. Draft PR #26 remained
+  open and was not merged into `main`.
+- Live `/`, `/privacy/`, `/support/`, `/registry.json`, and
+  `/attestations/nova.json` returned 200. The two JSON responses
+  matched the static release branch's public files byte for byte and
+  retained `Access-Control-Allow-Origin: *`; the canonical repo
+  registry mismatch noted above remains. Live `/verify/`,
+  `/v/example`, and `/api/preview` returned 404. The production home
+  page lacked the feedback marker injected in the protected preview.
+- This verifies the static publication and route boundary. It does
+  not verify Slack owner enrollment or sign-in, a completed World ID
+  check, Discord application control, or verifier bot operation.
