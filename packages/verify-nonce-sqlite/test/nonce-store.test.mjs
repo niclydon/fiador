@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { chmod, copyFile, mkdtemp, mkdir, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -33,7 +33,9 @@ function awaitMessage(child, stage) {
         resolve(message);
       }
     };
-    const onExit = (code) => fail(new Error(`worker exited ${code} before ${stage}`));
+    const onExit = (code) => fail(new Error(
+      `worker exited ${code} before ${stage}: ${child.stderrText?.() ?? ''}`,
+    ));
     const onError = (error) => fail(error);
     function cleanup() {
       clearTimeout(timer);
@@ -95,13 +97,19 @@ test('the SQLite clock, not Date.now in the caller, decides expiry', async (t) =
 
 test('two processes that both read has=false have exactly one claim winner', async (t) => {
   const path = await temporaryDatabase(t);
-  new SqliteNonceStore(path).close();
   const future = new Date(Date.now() + HOUR_MS).toISOString();
   const workerFile = fileURLToPath(new URL('./claim-worker.mjs', import.meta.url));
   const args = [path, NONCE, WALLET, future];
-  const children = Array.from({ length: 2 }, () =>
-    fork(workerFile, args, { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }),
-  );
+  const children = Array.from({ length: 2 }, () => {
+    const child = fork(workerFile, args, {
+      execArgv: ['--no-warnings'],
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.stderrText = () => stderr;
+    return child;
+  });
   t.after(() => children.forEach((child) => child.kill()));
   const ready = await Promise.all(children.map((child) => awaitMessage(child, 'ready')));
   assert.deepEqual(ready.map((message) => message.hadClaim), [false, false]);
@@ -189,4 +197,88 @@ test('pruning is explicit and only removes expired rows', async (t) => {
   assert.equal(await store.has(NONCE, WALLET), false);
   db.close();
   store.close();
+});
+
+test('a 022 umask still produces owner-only DB, WAL, and SHM files', async (t) => {
+  const path = await temporaryDatabase(t);
+  const previousUmask = process.umask(0o022);
+  try {
+    const store = new SqliteNonceStore(path);
+    await store.claim(NONCE, WALLET, new Date(Date.now() + HOUR_MS).toISOString());
+    for (const suffix of ['', '-wal', '-shm']) {
+      const file = await stat(`${path}${suffix}`);
+      assert.equal(file.mode & 0o777, 0o600, `${suffix || 'database'} must be private`);
+      assert.equal(file.uid, process.getuid());
+    }
+    store.close();
+  } finally {
+    process.umask(previousUmask);
+  }
+});
+
+test('unsafe parent, database, sidecar, and symlink paths fail closed', async (t) => {
+  const path = await temporaryDatabase(t);
+  const directory = join(path, '..');
+  const publicDirectory = join(directory, 'public');
+  await mkdir(publicDirectory);
+  await chmod(publicDirectory, 0o755);
+  assert.throws(
+    () => new SqliteNonceStore(join(publicDirectory, 'nonces.db')),
+    /owner-only directory/,
+  );
+  const parentLink = join(directory, 'linked-parent');
+  await symlink(directory, parentLink);
+  assert.throws(
+    () => new SqliteNonceStore(join(parentLink, 'nonces.db')),
+    /owner-only directory/,
+  );
+
+  const store = new SqliteNonceStore(path);
+  await store.claim(NONCE, WALLET, new Date(Date.now() + HOUR_MS).toISOString());
+  await chmod(`${path}-wal`, 0o644);
+  assert.throws(() => new SqliteNonceStore(path), /owner-only file/);
+  await chmod(`${path}-wal`, 0o600);
+  store.close();
+
+  await chmod(path, 0o644);
+  assert.throws(() => new SqliteNonceStore(path), /owner-only file/);
+  await chmod(path, 0o600);
+  const fileLink = join(directory, 'linked.db');
+  await symlink(path, fileLink);
+  assert.throws(() => new SqliteNonceStore(fileLink), /owner-only file/);
+});
+
+test('copying only the main WAL-mode DB omits a committed claim', async (t) => {
+  const path = await temporaryDatabase(t);
+  // Closing the setup connection checkpoints the schema into the main DB.
+  new SqliteNonceStore(path).close();
+  const live = new SqliteNonceStore(path);
+  assert.equal(await live.claim(NONCE, WALLET, new Date(Date.now() + HOUR_MS).toISOString()), 'claimed');
+  assert.ok((await stat(`${path}-wal`)).size > 0);
+  const backupDirectory = await mkdtemp(join(tmpdir(), 'fiador-stale-copy-'));
+  t.after(() => rm(backupDirectory, { recursive: true, force: true }));
+  const copiedPath = join(backupDirectory, 'nonces.db');
+  await copyFile(path, copiedPath);
+  const copied = new SqliteNonceStore(copiedPath);
+  assert.equal(await copied.has(NONCE, WALLET), false);
+  assert.equal(await live.has(NONCE, WALLET), true);
+  copied.close();
+  live.close();
+});
+
+test('a SQLite online snapshot includes a committed WAL claim', async (t) => {
+  const path = await temporaryDatabase(t);
+  const live = new SqliteNonceStore(path);
+  assert.equal(await live.claim(NONCE, WALLET, new Date(Date.now() + HOUR_MS).toISOString()), 'claimed');
+  const backupDirectory = await mkdtemp(join(tmpdir(), 'fiador-online-backup-'));
+  t.after(() => rm(backupDirectory, { recursive: true, force: true }));
+  const snapshotPath = join(backupDirectory, 'snapshot.db');
+  const backupConnection = new DatabaseSync(path);
+  backupConnection.prepare('VACUUM INTO ?').run(snapshotPath);
+  backupConnection.close();
+  await chmod(snapshotPath, 0o600);
+  const snapshot = new SqliteNonceStore(snapshotPath);
+  assert.equal(await snapshot.has(NONCE, WALLET), true);
+  snapshot.close();
+  live.close();
 });

@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
-import { isAbsolute } from 'node:path';
+import { closeSync, constants, lstatSync, openSync } from 'node:fs';
+import { dirname, isAbsolute } from 'node:path';
 import type { EvmAddress, NonceClaimResult, VerifyAttestationOptions } from '@fiador/verify';
 
 type NonceStore = NonNullable<VerifyAttestationOptions['nonceStore']>;
@@ -19,6 +20,98 @@ CREATE TABLE IF NOT EXISTS nonce_claims (
   PRIMARY KEY (wallet, nonce)
 ) WITHOUT ROWID;
 `;
+const SETUP_WAIT = new Int32Array(new SharedArrayBuffer(4));
+
+function enableWal(db: DatabaseSync): void {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      const current = db.prepare('PRAGMA journal_mode').get() as
+        | { journal_mode: string }
+        | undefined;
+      if (current?.journal_mode?.toLowerCase() === 'wal') return;
+      const changed = db.prepare('PRAGMA journal_mode = WAL').get() as
+        | { journal_mode: string }
+        | undefined;
+      if (changed?.journal_mode?.toLowerCase() !== 'wal') {
+        throw new Error('SQLite WAL mode is required');
+      }
+      return;
+    } catch (error) {
+      // Switching a brand-new file into WAL can return SQLITE_BUSY before
+      // busy_timeout applies when another process is doing the same setup.
+      // This only waits for idempotent initialization, never retries a claim.
+      if ((error as { errcode?: unknown }).errcode !== 5 || Date.now() >= deadline) {
+        throw error;
+      }
+      Atomics.wait(SETUP_WAIT, 0, 0, 25);
+    }
+  }
+}
+
+function ownerUid(): number {
+  const uid = process.getuid?.();
+  if (uid === undefined) {
+    throw new Error('private SQLite file checks require a POSIX host');
+  }
+  return uid;
+}
+
+function privateFileIfPresent(path: string, uid: number): boolean {
+  let file: ReturnType<typeof lstatSync>;
+  try {
+    file = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+  if (
+    !file.isFile() || file.isSymbolicLink() || file.uid !== uid ||
+    (file.mode & 0o600) !== 0o600 || (file.mode & 0o077) !== 0
+  ) {
+    throw new Error(`SQLite file must be a regular owner-only file: ${path}`);
+  }
+  return true;
+}
+
+function checkPrivateFiles(dbPath: string, uid: number): void {
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    privateFileIfPresent(`${dbPath}${suffix}`, uid);
+  }
+}
+
+function preparePrivateFile(dbPath: string): number {
+  const uid = ownerUid();
+  const parentPath = dirname(dbPath);
+  const parent = lstatSync(parentPath);
+  if (
+    !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid ||
+    (parent.mode & 0o700) !== 0o700 || (parent.mode & 0o077) !== 0
+  ) {
+    throw new Error(`SQLite parent must be an owner-only directory: ${parentPath}`);
+  }
+  checkPrivateFiles(dbPath, uid);
+  if (!privateFileIfPresent(dbPath, uid)) {
+    try {
+      // SQLite otherwise creates 0644 files under a common umask of 022.
+      // Its WAL and SHM files inherit this pre-created file's 0600 mode.
+      const fd = openSync(
+        dbPath,
+        constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
+        0o600,
+      );
+      closeSync(fd);
+    } catch (error) {
+      // Another trusted process may have won the first-open race. It must
+      // have created the same private regular file before we use it.
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    if (!privateFileIfPresent(dbPath, uid)) {
+      throw new Error('SQLite file was not created');
+    }
+  }
+  return uid;
+}
 
 function key(nonce: string, wallet: EvmAddress): [string, string] {
   if (typeof wallet !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(wallet)) {
@@ -53,14 +146,24 @@ export class SqliteNonceStore implements NonceStore {
     if (typeof dbPath !== 'string' || !isAbsolute(dbPath)) {
       throw new TypeError('dbPath must be an absolute path to a local SQLite file');
     }
+    const uid = preparePrivateFile(dbPath);
     const db = new DatabaseSync(dbPath);
     try {
       db.exec('PRAGMA busy_timeout = 10000');
-      db.exec('PRAGMA journal_mode = WAL');
+      enableWal(db);
       db.exec('PRAGMA synchronous = FULL');
+      const sync = db.prepare('PRAGMA synchronous').get() as
+        | { synchronous: number }
+        | undefined;
+      if (sync?.synchronous !== 2) {
+        throw new Error('SQLite FULL synchronous mode is required');
+      }
       db.exec(SCHEMA);
+      // Reject old unsafe sidecars as well as any newly created under a
+      // SQLite build that does not inherit the database's 0600 mode.
+      checkPrivateFiles(dbPath, uid);
     } catch (error) {
-      db.close();
+      try { db.close(); } catch { /* preserve the setup error */ }
       throw error;
     }
     this.db = db;
