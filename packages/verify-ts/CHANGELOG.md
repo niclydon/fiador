@@ -11,7 +11,8 @@ Breaking:
 
 - The nonce store has a read-only, strongly consistent `has(nonce, wallet)` check for
   replay precedence and an atomic
-  `claim(nonce, wallet, expiresAt) -> Promise<'claimed' | 'replay' | 'expired'>`
+  `claim(nonce, wallet, expiresAt) -> Promise<NonceClaimResult>`, where
+  the exported `NonceClaimResult` is `'claimed' | 'replay' | 'expired'`,
   after registration succeeds. The store must use its own clock at
   the atomic write and retain a claim only until `expiresAt` (B2).
   This prevents expired, unregistered, or unchecked attestations

@@ -5,6 +5,8 @@
 
 export type EvmAddress = `0x${string}`;
 
+export type NonceClaimResult = 'claimed' | 'replay' | 'expired';
+
 export type VerificationStatus =
   | 'verified' // checked live: registration (and attestation, if any) valid
   | 'unregistered' // checked live: no AgentBook entry for the address
@@ -131,7 +133,7 @@ export interface VerifyAttestationOptions {
       nonce: string,
       wallet: EvmAddress,
       expiresAt: string,
-    ): Promise<'claimed' | 'replay' | 'expired'>;
+    ): Promise<NonceClaimResult>;
   };
   checkRegistration?: boolean; // default true: also run the AgentBook lookup
   signal?: AbortSignal;

@@ -11,6 +11,7 @@ export type {
   CheckEvidence,
   EvmAddress,
   FailureCode,
+  NonceClaimResult,
   PublicVerifyResult,
   SignedAttestation,
   StatusSubject,
