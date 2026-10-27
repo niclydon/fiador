@@ -73,6 +73,17 @@ async function connectInMemory(deps: VerifyMcpDeps) {
 }
 
 describe('verify MCP tools', () => {
+  it('reports the package version in the handshake server info', async () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { version: string };
+    const client = await connectInMemory(makeDeps());
+    expect(client.getServerVersion()).toEqual({
+      name: 'verify-mcp',
+      version: pkg.version,
+    });
+  });
+
   it('lists three tools with a resolver configured, two without', async () => {
     const withResolver = await connectInMemory(makeDeps());
     const names = (await withResolver.listTools()).tools.map((t) => t.name).sort();
