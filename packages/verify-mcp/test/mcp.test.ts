@@ -1159,6 +1159,22 @@ describe('fix pass 2: checks mapping probes (M5)', () => {
     expect(checks.registration).toBe('not_checked');
   });
 
+  it('a replay does not prove an uncertain ERC-1271 signature passed', () => {
+    for (const lookupCode of ['lookup_failed', 'lookup_timeout'] as const) {
+      const checks = computeChecks(
+        pub({ status: 'invalid', failures: [lookupCode, 'replay_detected'] }),
+        { subject: true, wallet: false },
+      );
+      expect(checks.signature).toBe('not_checked');
+      expect(checks.binding.subject).toBe('pass');
+      expect(checks.registration).toBe('not_checked');
+    }
+    const knownGoodReplay = computeChecks(
+      pub({ status: 'invalid', failures: ['replay_detected'] }), noAssert,
+    );
+    expect(knownGoodReplay.signature).toBe('pass');
+  });
+
   it('an eip191 attestation whose registration lookup failed: registration unknown, ran stages reported', () => {
     const checks = computeChecks(
       pub({

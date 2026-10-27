@@ -77,33 +77,31 @@ items below; all are fixed here, each with regression tests.
   reader resolves — `undefined`, a number, a malformed string —
   is `unknown` + `lookup_failed`. Previously any non-null value
   was hashed into a `verified` result. The live reader now
-  renders the on-chain uint256 as a full 32-byte hex value.
+  renders the on-chain uint256 as a full 32-byte lowercase hex value;
+  mixed-case reader values normalize before hashing.
 - The package ships a reference `InMemoryNonceStore` (B2) whose
   claim is atomic by construction (check-and-set with no await
   between), lapsing entries at `expiresAt` and checking its own
   clock at the write point. A conformance test runs concurrent
   double-presentation against it and against an awaiting store
-  double. The store contract also gains an optional
-  `release(nonce, wallet)` (N3): this verifier claims only at
-  the terminal step, so its no-burn guarantee is structural —
-  expired, unregistered, and uncertain outcomes never reach the
-  claim — and release serves compositions that claim earlier.
-  [Corrected in fix pass 3: `release()` is removed (D3); the
-  contract is exactly `{ has, claim }`.]
+  double. The no-burn guarantee (N3) is structural: the verifier
+  claims only after uncertain, expired, and unregistered outcomes
+  have returned. A lost final claim response remains possibly
+  consumed and is never released automatically.
 - The replay step now also runs on the signature-unknown path
   (M1): the read-only `has()` consumes nothing, so a claimed
   nonce is reported as a replay rather than masked by the
-  signature stage's network failure.
+  signature stage's network failure. When both occur, the result
+  retains the signature's `lookup_failed` or `lookup_timeout`
+  code alongside `replay_detected`, so consumers do not infer a
+  successful signature check.
 - Collaborator containment completed (N2): the deadline race
   normalises non-promise collaborator returns instead of
   throwing a `TypeError`; `has()` and `claim()` run under the
   same deadline race as lookups (a hanging store is
-  `lookup_timeout`, a non-boolean `has()` or an out-of-union
+  `lookup_failed`, a non-boolean `has()` or an out-of-union
   claim is `lookup_failed`, fail closed); the injected `now()`
   is guarded, falling back to the system clock.
-  [Corrected in fix pass 3: store timeouts — `has()` and
-  `claim()` alike — map to `lookup_failed` per SPEC 3.3
-  (D1/D2).]
 - Validation caps and Unicode hygiene: ERC-1271 signatures are
   capped at 8 KB in shape validation (M4), and `extra` keys
   carrying lone surrogates are `malformed_attestation` (NF-2).

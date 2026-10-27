@@ -8,11 +8,11 @@ import type { PublicVerifyResult, RegistrationLookupFact } from '@fiador/verify'
 // registration).
 //
 // SPEC 11.2's mapping, restored exactly (7.5 re-review M5):
-// - signature: fail iff signature_mismatch (or a malformed
-//   document); pass when the pipeline demonstrably reached and
-//   cleared the signature step; not_checked when the shape step
-//   failed — and when a lookup failure makes it impossible to prove
-//   the signature was ever evaluated.
+// - signature: fail iff signature_mismatch; pass when the pipeline
+//   demonstrably cleared the signature step; not_checked when shape
+//   failed or a lookup failure makes signature success unproven.
+//   A read-only replay check after
+//   an uncertain ERC-1271 result proves replay, not signature success.
 // - expiry: expired/not_yet_valid/lifetime_invalid iff the matching
 //   code is present; valid whenever the shape step passed and no
 //   date code is present (the core evaluates dates on every
@@ -72,7 +72,7 @@ export function computeChecks(
   const pastSignature =
     result.status === 'verified' ||
     result.status === 'unregistered' ||
-    failures.has('replay_detected') ||
+    (failures.has('replay_detected') && !lookupFailed) ||
     notRegistered;
   const pastSignatureViaDates =
     !lookupFailed &&

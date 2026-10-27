@@ -337,7 +337,9 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
         const value: unknown = outcome.value;
         if (value === null) return { state: 'unregistered', latencyMs: latency() };
         if (typeof value === 'string' && HUMAN_ID_SHAPE.test(value)) {
-          return { state: 'registered', humanId: value, latencyMs: latency() };
+          // The chain returns a uint256. Hex letter case is only a
+          // presentation choice and must not split one human hash.
+          return { state: 'registered', humanId: value.toLowerCase(), latencyMs: latency() };
         }
         return { state: 'unknown', code: 'lookup_failed', latencyMs: latency() };
       }
@@ -485,8 +487,12 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       // stage's network failure. It runs even when a binding or
       // date failure coexists (fix pass 3, NF-D): returning early
       // for the invalid class skipped the read and masked the
-      // replay. A store failure here changes nothing — the
+      // replay. A store failure here changes nothing - the
       // signature outcome already determines the result below.
+      // When the replay fires, the uncertain signature code is
+      // preserved alongside it (merge decision, Oct 27, 2026):
+      // consumers must not infer the signature passed, and the
+      // collection rule gathers every applicable code.
       if (opts.nonceStore) {
         const store = opts.nonceStore;
         const has = await raceDeadline(
@@ -495,7 +501,9 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
           opts.signal,
         );
         if (has.kind === 'value' && has.value === true) {
-          return finish('invalid', { failures: [...failures, 'replay_detected'] });
+          return finish('invalid', {
+            failures: [...failures, signature.code, 'replay_detected'],
+          });
         }
       }
       const invalidClass = failures.some((f) => f !== 'expired');

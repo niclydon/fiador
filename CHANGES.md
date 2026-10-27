@@ -16,6 +16,46 @@
   `docs/narrative/2026-10-27-static-privacy-support-release.md` and
   `docs/verification.md` for the release boundary and smoke results.
 
+## 2026-10-26: dynamic badge service (W0 SPEC section 4)
+
+- badge-service/: a top-level, keyless app over the public exports of
+  @fiador/verify. It serves SVG and PNG badges, public JSON status,
+  health, and an explainer. Its Discord application badge stays
+  neutral even when an operator wallet check passes, because that
+  check does not prove control of the named application.
+- The canonical `entries[]` registry is read from a file or fetched
+  over guarded HTTPS. Registry and attestation sources are refreshed
+  within 300 seconds, with shared concurrent fetches and cancellation
+  of queued source work after all callers time out. The full request
+  has a five-second deadline; failures produce neutral, uncached art.
+  A local registry is reread and validated at each refresh so an
+  unchanged healthy file remains fresh past 24 hours; failed reloads
+  still expire the last good entries after 24 hours. Refreshes also
+  separate old in-flight work from new requests and keep old results
+  out of the current cache and badge render path. Canonical HTTPS
+  registry refreshes now separate source generations at the 300-second
+  boundary, so a pending pre-refresh check cannot report a newly
+  revoked application as verified. A registry fetch started in an old
+  generation cannot block a new fetch or overwrite its cached result.
+- An over-limit request reuses observed artwork only until that
+  check's original cache deadline. It checks for a due source refresh
+  before reusing artwork, so revoked claims turn neutral even under
+  sustained rate limiting. PNG fallbacks are separate for
+  each theme and variant; limited SVG fallbacks are reused too.
+  Service deadlines, including a core that ignores cancellation,
+  return 503 JSON or an untimed grey badge; a core-produced `unknown`
+  still returns 200. A throwing core cannot turn a badge into a 500.
+  Badge ETags change at UTC midnight when the visible check date
+  changes, and downstream badge cache lifetimes end by that boundary.
+  Address status omits a badge URL rather than linking to
+  an unverifiable truncated address. Badge base URLs
+  reject credentials, queries, and fragments. The badge registry and
+  address response differ from the MCP server's current contract;
+  sections 4.2 and 11 parity remains later work.
+- The integrated badge-service suite has 91 route, source, and
+  security tests. Badge checks are configured in CI on Node 22 and 24.
+  Nothing was deployed; no public badge instance is claimed.
+
 ## 2026-10-26: verifier bot safety and maintenance
 
 - The bot checks and logs operator claims without creating a new

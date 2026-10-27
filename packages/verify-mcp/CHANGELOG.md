@@ -34,26 +34,25 @@ The §7.5 adversarial-review fix pass (companion to
   superseding the note below): the hand-rolled declared-length
   pre-check is removed, so declared and chunked oversize bodies
   alike are refused with the SDK's own 413 JSON-RPC shape.
-  Arrival time is bounded by the factory's own per-connection
+  Arrival time is bounded by the factory's own per-request
   timers — a headers deadline (10 s) below a TOTAL request
-  deadline (30 s, measured from the connection and never reset
-  by arriving bytes). Probing the pinned Node showed its
+  deadline (30 s, measured from the connection or previous
+  response and never reset by arriving bytes). The header
+  deadline rearms for each request on a keep-alive connection.
+  Probing the pinned Node showed its
   built-in headersTimeout/requestTimeout properties do not
   terminate an idle connection or a drip in this build, so the
   factory enforces both bounds itself (and also assigns the
   built-ins, as defence in depth). Probes pin the behaviour:
   2 MiB chunked → SDK-shaped 413; a 1-byte/250 ms body drip
-  terminated at the total deadline; a header drip terminated
-  at the headers deadline.
+  terminated at the total deadline; first-request and second-request
+  header drips terminated at the headers deadline.
 - The `checks` projection restores SPEC 11.2's mapping exactly
   (M5): registration is `unknown` when the lookup ran and failed
   and `not_checked` only when the pipeline failed before it
   (proven by the result's status and lookup latency); date
-  codes and a bare expired status never count as signature
-  evidence when a lookup-failure code is present.
-  [Corrected in fix pass 3: the stage is proven by the core's
-  recorded registration fact, not by status/latency inference
-  (D6).]
+  codes, a bare expired status, and a read-only replay never count
+  as signature evidence when a lookup-failure code is present.
 - Host handling is normalised (M15): `127.1`, `LOCALHOST`,
   `0:0:0:0:0:0:0:1`, IPv4-mapped forms, and friends are
   recognised as loopback for both the DNS-rebinding decision

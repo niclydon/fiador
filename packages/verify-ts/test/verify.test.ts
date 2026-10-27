@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   canonicalAttestationMessage,
   createVerifier,
@@ -1199,7 +1199,14 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
     ethCallResult: string,
     check: (rpcUrl: string, ethCalls: () => number, rpcCalls: () => number) => Promise<void>,
     chainId = '0x1e0',
-    ethCallBehavior: { status?: number; delayMs?: number; chainDelayMs?: number; revert?: boolean } = {},
+    ethCallBehavior: {
+      status?: number;
+      delayMs?: number;
+      chainDelayMs?: number;
+      onChainReply?: () => void;
+      onEthCall?: (reply: () => void) => void;
+      revert?: boolean;
+    } = {},
   ) {
     let ethCalls = 0;
     let rpcCalls = 0;
@@ -1211,6 +1218,7 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
         rpcCalls += 1;
         if (parsed.method === 'eth_call') ethCalls += 1;
         const reply = () => {
+          if (parsed.method === 'eth_chainId') ethCallBehavior.onChainReply?.();
           if (parsed.method === 'eth_call' && ethCallBehavior.status !== undefined) {
             res.statusCode = ethCallBehavior.status;
             res.end('RPC unavailable');
@@ -1238,6 +1246,10 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
         const delay = parsed.method === 'eth_call'
           ? ethCallBehavior.delayMs
           : ethCallBehavior.chainDelayMs;
+        if (parsed.method === 'eth_call' && ethCallBehavior.onEthCall) {
+          ethCallBehavior.onEthCall(reply);
+          return;
+        }
         if (delay !== undefined) {
           setTimeout(reply, delay);
         } else {
@@ -1548,22 +1560,51 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
   });
 
   it('ERC-1271: chain identity and contract call share one deadline', async () => {
-    await with1271Rpc(
-      `0x1626ba7e${'00'.repeat(28)}`,
-      async (rpcUrl, ethCalls) => {
-        const result = await noLookupVerifier({ rpcUrl, timeoutMs: 500 }).verifySignedMessage({
-          message: SM.message,
-          signature: `0x${'11'.repeat(65)}`,
-          signatureType: 'erc1271',
-          expectedAddress: CONTRACT,
-        });
-        expect(ethCalls()).toBe(1);
-        expect(result.verified).toBe(false);
-        expect(result.failures).toEqual(['lookup_timeout']);
-      },
-      '0x1e0',
-      { chainDelayMs: 300, delayMs: 300 },
-    );
+    const initialTime = performance.now();
+    let elapsedMs = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => initialTime + elapsedMs);
+    let signalEthCall!: () => void;
+    const ethCallSeen = new Promise<void>((resolve) => { signalEthCall = resolve; });
+    let releaseEthCall: (() => void) | undefined;
+    try {
+      await with1271Rpc(
+        `0x1626ba7e${'00'.repeat(28)}`,
+        async (rpcUrl, ethCalls) => {
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+          try {
+            const pending = noLookupVerifier({ rpcUrl, timeoutMs: 10_000 }).verifySignedMessage({
+              message: SM.message,
+              signature: `0x${'11'.repeat(65)}`,
+              signatureType: 'erc1271',
+              expectedAddress: CONTRACT,
+            });
+            await ethCallSeen;
+            expect(ethCalls()).toBe(1);
+            await vi.advanceTimersByTimeAsync(2_001);
+            // A reset 10-second deadline would still be active and accept
+            // this magic response; the shared 2-second remainder has elapsed.
+            releaseEthCall?.();
+            releaseEthCall = undefined;
+            const result = await pending;
+            expect(result.verified).toBe(false);
+            expect(result.failures).toEqual(['lookup_timeout']);
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+        '0x1e0',
+        {
+          onChainReply: () => { elapsedMs = 8_000; },
+          onEthCall: (reply) => {
+            releaseEthCall = reply;
+            signalEthCall();
+          },
+        },
+      );
+    } finally {
+      releaseEthCall?.();
+      clock.mockRestore();
+    }
   });
 
   it('ERC-1271: wrong-chain RPC -> lookup_failed (check unexecutable, not a mismatch)', async () => {
@@ -1635,10 +1676,14 @@ describe('fix pass 2: lookup fails closed on garbage reader values (N1)', () => 
   const garbageReaders: Array<[string, unknown]> = [
     ['undefined', undefined],
     ['a number', 42],
+    ['a boolean', true],
     ['a non-hex string', 'not-a-human-id'],
     ['short hex', '0x1234'],
     ['63-hex-char string', `0x${'a'.repeat(63)}`],
+    ['65-hex-char string', `0x${'a'.repeat(65)}`],
+    ['canonical shape plus newline', `0x${'a'.repeat(64)}\n`],
     ['an object', { human: 1 }],
+    ['raw bytes', new Uint8Array(32)],
   ];
   for (const [label, value] of garbageReaders) {
     it(`reader resolving ${label} -> unknown + lookup_failed, never verified or unregistered`, async () => {
@@ -1662,6 +1707,16 @@ describe('fix pass 2: lookup fails closed on garbage reader values (N1)', () => 
     expect(result.status).toBe('unknown');
     expect(result.failures).toEqual(['lookup_failed']);
     expect(result.humanHash).toBeNull();
+  });
+
+  it('upper and lower hex spellings of the same humanId yield one hash', async () => {
+    const upper = HUMAN_1.toUpperCase().replace('0X', '0x');
+    const upperReader: AgentBookReader = { source: 'fixture', lookupHuman: async () => upper };
+    const lower = await verifier({ includeRawHumanId: true }).verifyAddress(A);
+    const mixed = await verifier({ reader: upperReader, includeRawHumanId: true }).verifyAddress(A);
+    expect(mixed.status).toBe('verified');
+    expect(mixed.humanHash).toBe(lower.humanHash);
+    expect(mixed.humanId).toBe(HUMAN_1.toLowerCase());
   });
 });
 
@@ -1908,8 +1963,33 @@ describe('fix pass 2: replay step on the signature-unknown path (M1)', () => {
       });
       const result = await v.verifyAttestation(att, { nonceStore: store });
       expect(result.status).toBe('invalid');
-      expect(result.failures).toContain('replay_detected');
+      expect(result.failures).toEqual(['expired', 'lookup_failed', 'replay_detected']);
       expect(hasCalls).toBe(1);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('valid eip1271 + wrong chain: replay keeps the uncertain signature code', async () => {
+    const { server } = startStubRpc(() => '0x1');
+    const rpcUrl = await listen(server);
+    try {
+      const store = {
+        async has() { return true; },
+        async claim() { throw new Error('replay must not claim'); },
+      };
+      const att = clone(vectors.attestations.valid) as SignedAttestation;
+      att.payload.agentWalletAddress = CONTRACT_WALLET;
+      att.signatureType = 'eip1271';
+      att.signature = `0x${'11'.repeat(65)}`;
+      const v = createVerifier({
+        reader: createStaticReader({ [CONTRACT_WALLET]: HUMAN_1 }, 'live'),
+        rpcUrl,
+        now: () => NOW,
+      });
+      const result = await v.verifyAttestation(att, { nonceStore: store });
+      expect(result.status).toBe('invalid');
+      expect(result.failures).toEqual(['lookup_failed', 'replay_detected']);
     } finally {
       server.close();
     }
@@ -2134,7 +2214,7 @@ describe('fix pass 3: clock containment, replay reads, expectations (NF-C/NF-D/D
       });
       expect(hasCalls).toBe(1);
       expect(result.status).toBe('invalid');
-      expect(result.failures).toEqual(['subject_mismatch', 'expired', 'replay_detected']);
+      expect(result.failures).toEqual(['subject_mismatch', 'expired', 'lookup_failed', 'replay_detected']);
     } finally {
       server.close();
     }
