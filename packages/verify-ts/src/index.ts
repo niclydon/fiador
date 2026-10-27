@@ -14,11 +14,14 @@ export type {
   NonceClaimResult,
   PublicVerifyResult,
   SignedAttestation,
+  SignedMessageResult,
+  SignedMessageSignatureType,
   StatusSubject,
   VerificationStatus,
   VerifyAttestationOptions,
   VerifyCoreOptions,
   VerifyResult,
+  VerifySignedMessageInput,
   Verifier,
 } from './types.js';
 

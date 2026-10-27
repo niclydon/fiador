@@ -2,6 +2,7 @@ import {
   BaseError,
   ContractFunctionRevertedError,
   ContractFunctionZeroDataError,
+  TimeoutError as ViemTimeoutError,
   createPublicClient,
   getAddress,
   hashMessage,
@@ -19,11 +20,13 @@ import type {
   EvmAddress,
   FailureCode,
   SignedAttestation,
+  SignedMessageResult,
   StatusSubject,
   VerificationStatus,
   VerifyAttestationOptions,
   VerifyCoreOptions,
   VerifyResult,
+  VerifySignedMessageInput,
   Verifier,
 } from './types.js';
 
@@ -107,6 +110,24 @@ type SignatureOutcome =
   | { kind: 'mismatch' }
   | { kind: 'unknown'; code: 'lookup_failed' | 'lookup_timeout' };
 
+function isErc1271Rejection(error: unknown): boolean {
+  return (
+    error instanceof BaseError &&
+    error.walk(
+      (cause) =>
+        cause instanceof ContractFunctionRevertedError ||
+        cause instanceof ContractFunctionZeroDataError,
+    ) !== null
+  );
+}
+
+function isRpcTimeout(error: unknown): boolean {
+  return (
+    error instanceof BaseError &&
+    error.walk((cause) => cause instanceof ViemTimeoutError) !== null
+  );
+}
+
 function readDisclosure(input: unknown): 'hash' | 'none' | undefined {
   if (typeof input === 'object' && input !== null) {
     const payload = (input as { payload?: unknown }).payload;
@@ -140,7 +161,7 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
 
   const publicClient = createPublicClient({
     chain: worldchain,
-    transport: http(options.rpcUrl),
+    transport: http(options.rpcUrl, { retryCount: 0, timeout: timeoutMs }),
   });
 
   // ERC-1271 validation for a smart-wallet signer. Both RPC calls run
@@ -162,6 +183,9 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     // answering for another chain), not an authentication of the RPC.
     const chain = await raceDeadline(() => publicClient.getChainId(), timeoutMs, signal);
     if (chain.kind === 'timeout') return { kind: 'unknown', code: 'lookup_timeout' };
+    if (chain.kind === 'failed' && isRpcTimeout(chain.error)) {
+      return { kind: 'unknown', code: 'lookup_timeout' };
+    }
     if (chain.kind !== 'value') return { kind: 'unknown', code: 'lookup_failed' };
     if (chain.value !== worldchain.id) return { kind: 'unknown', code: 'lookup_failed' };
     const read = await raceDeadline(
@@ -178,20 +202,22 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     if (read.kind === 'timeout') return { kind: 'unknown', code: 'lookup_timeout' };
     if (read.kind === 'aborted') return { kind: 'unknown', code: 'lookup_failed' };
     if (read.kind === 'failed') {
-      const definitiveReject =
-        read.error instanceof BaseError &&
-        read.error.walk(
-          (cause) =>
-            cause instanceof ContractFunctionRevertedError ||
-            cause instanceof ContractFunctionZeroDataError,
-        ) !== null;
-      return definitiveReject
-        ? { kind: 'mismatch' }
-        : { kind: 'unknown', code: 'lookup_failed' };
+      if (isErc1271Rejection(read.error)) return { kind: 'mismatch' };
+      return { kind: 'unknown', code: isRpcTimeout(read.error) ? 'lookup_timeout' : 'lookup_failed' };
     }
     return read.value.toLowerCase() === ERC1271_MAGIC
       ? { kind: 'match' }
       : { kind: 'mismatch' };
+  }
+
+  // Shared EIP-191 recovery for attestations and arbitrary signed
+  // messages. No RPC or AgentBook lookup runs on this path.
+  async function recoverSigner(message: string, signature: string): Promise<EvmAddress | null> {
+    try {
+      return await recoverMessageAddress({ message, signature: signature as Hex });
+    } catch {
+      return null;
+    }
   }
 
   // The declared signatureType selects the ONE verification path (7.5
@@ -209,15 +235,8 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     if (attestation.signatureType === 'eip1271') {
       return erc1271Check(wallet, message, attestation.signature, signal);
     }
-    try {
-      const recovered = await recoverMessageAddress({
-        message,
-        signature: attestation.signature as Hex,
-      });
-      return recovered === wallet ? { kind: 'match' } : { kind: 'mismatch' };
-    } catch {
-      return { kind: 'mismatch' };
-    }
+    const recovered = await recoverSigner(message, attestation.signature);
+    return recovered === wallet ? { kind: 'match' } : { kind: 'mismatch' };
   }
 
   function evidence(latencyMs?: number): CheckEvidence {
@@ -535,5 +554,64 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     });
   }
 
-  return { verifyAddress, verifyAttestation, resolveStatus };
+  // D5 (SPEC 3.6 amendment): verify one arbitrary caller-canonicalised
+  // message without AgentBook, attestation, expiry, or replay semantics.
+  // The caller declares the signature path; there is no EOA-to-contract
+  // fallback and no human identifier in the result.
+  async function verifySignedMessage(input: VerifySignedMessageInput): Promise<SignedMessageResult> {
+    const fail = (
+      failures: FailureCode[],
+      address: EvmAddress | null = null,
+    ): SignedMessageResult => ({ verified: false, address, failures });
+
+    if (typeof input !== 'object' || input === null) {
+      return fail(['signature_mismatch']);
+    }
+    const { message, signature, signatureType, expectedAddress } = input;
+
+    let expected: EvmAddress | undefined;
+    if (expectedAddress !== undefined) {
+      if (typeof expectedAddress !== 'string' || !isAddress(expectedAddress)) {
+        return fail(['malformed_address']);
+      }
+      try {
+        expected = getAddress(expectedAddress);
+      } catch {
+        return fail(['malformed_address']);
+      }
+    }
+
+    if (signatureType === 'eoa') {
+      const recovered =
+        typeof message === 'string' && typeof signature === 'string'
+          ? await recoverSigner(message, signature)
+          : null;
+      if (recovered === null) return fail(['signature_mismatch']);
+      if (expected !== undefined && recovered !== expected) {
+        return fail(['subject_mismatch'], recovered);
+      }
+      return { verified: true, address: recovered, failures: [] };
+    }
+
+    if (signatureType === 'erc1271') {
+      // No recovery is possible for a contract signer: a named contract
+      // is required, and malformed bytes must fail before any RPC call.
+      if (expected === undefined) return fail(['signature_mismatch']);
+      if (
+        typeof message !== 'string' ||
+        typeof signature !== 'string' ||
+        !/^0x(?:[0-9a-fA-F]{2})*$/.test(signature)
+      ) {
+        return fail(['signature_mismatch'], expected);
+      }
+      const outcome = await erc1271Check(expected, message, signature);
+      if (outcome.kind === 'unknown') return fail([outcome.code], expected);
+      if (outcome.kind === 'mismatch') return fail(['signature_mismatch'], expected);
+      return { verified: true, address: expected, failures: [] };
+    }
+
+    return fail(['signature_mismatch']);
+  }
+
+  return { verifyAddress, verifyAttestation, resolveStatus, verifySignedMessage };
 }

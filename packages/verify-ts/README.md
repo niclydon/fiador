@@ -53,8 +53,9 @@ raw value.
 
 - No private keys, ever. Verification is public-input only:
   addresses, signatures, contract reads.
-- All network access goes through an injectable `AgentBookReader`,
-  so tests run offline against fixtures (`fixtures/vectors.json`,
+- AgentBook reads go through an injectable `AgentBookReader`;
+  ERC-1271 checks use the configured World Chain RPC. Tests run
+  offline against fixtures (`fixtures/vectors.json`,
   generated deterministically by `scripts/gen-fixtures.ts`; every
   fixture is synthetic). The fixture keys are public-by-construction:
   each is the keccak256 of a seed string committed in the generator,

@@ -115,6 +115,31 @@ export interface VerifyCoreOptions {
   // It never affects the public shape.
 }
 
+// D5 (SPEC 3.6 amendment, Oct 26, 2026): the caller declares which
+// signature path applies. A contract address checked through the EOA
+// path fails; the verifier never silently switches paths.
+export type SignedMessageSignatureType = 'eoa' | 'erc1271';
+
+export interface VerifySignedMessageInput {
+  message: string; // the exact caller-canonicalised message that was signed
+  signature: string; // even-length 0x hex bytes; EOA path uses EIP-191
+  signatureType: SignedMessageSignatureType;
+  expectedAddress?: string; // optional claimed signer; when given, the
+  // recovered or contract signer must equal it
+}
+
+export interface SignedMessageResult {
+  // Deliberately NOT a VerifyResult: this check is signature-only.
+  // It performs no AgentBook lookup and carries no human identifier
+  // in either direction (SPEC 3.6 amendment).
+  verified: boolean; // true only when the signature is valid for the
+  // signer and, when expectedAddress was given, the signer equals it
+  address: EvmAddress | null; // checksummed signer when one was
+  // determined (recovered EOA, or the named ERC-1271 contract);
+  // null when no signer could be determined
+  failures: FailureCode[]; // empty iff verified is true
+}
+
 export interface VerifyAttestationOptions {
   expectedSubject?: { type: string; id: string };
   expectedWallet?: EvmAddress;
@@ -164,4 +189,7 @@ export interface Verifier {
     subject: StatusSubject,
     opts?: { signal?: AbortSignal },
   ): Promise<VerifyResult>;
+  verifySignedMessage(
+    input: VerifySignedMessageInput,
+  ): Promise<SignedMessageResult>;
 }

@@ -122,6 +122,16 @@ export async function buildVectors() {
     }),
   );
 
+  // D5 (verifySignedMessage): an arbitrary caller-canonicalised
+  // message, signed by operatorA. Tampered variants are derived in
+  // the tests, not stored.
+  const signedMessageText = 'fiador verifySignedMessage synthetic vector v1';
+  const signedMessage = {
+    message: signedMessageText,
+    signature: await operatorA.signMessage({ message: signedMessageText }),
+    signer: operatorA.address,
+  };
+
   return {
     note: 'SYNTHETIC FIXTURES ONLY. Generated deterministically by scripts/gen-fixtures.ts. The fixture keys are public-by-construction: each private key is the keccak256 of a committed, labelled seed string in that file, so anyone can re-derive them. The fixture addresses are therefore BURNED — never fund them, never register them in AgentBook, never use them in a demo. No real wallet, humanId, or key material appears in this file.',
     fixedNow: FIXED_NOW_ISO,
@@ -148,6 +158,9 @@ export async function buildVectors() {
       extraProtoKey,
       extraIntegerKeys,
       extraAstralKeys,
+    },
+    signedMessages: {
+      operatorA: signedMessage,
     },
   };
 }

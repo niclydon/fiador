@@ -224,5 +224,12 @@
       "signature": "0xd56f4dc15f05cac555ecfc9cff008b277d512548a519c21e2461663161d292cb6fe9d7ea72158b7c50b30113c27ed64bd03125bc8b1ea4739d711292252e37061c",
       "signatureType": "eip191"
     }
+  },
+  "signedMessages": {
+    "operatorA": {
+      "message": "fiador verifySignedMessage synthetic vector v1",
+      "signature": "0x2a0447b61e30951b6df3abe22c64d860cf24ffefd4cbbbfa2fb2557b0f235760254a93325c7ced239abcff9f3bb8284345fd91753f8a256281968de7a024a1dc1c",
+      "signer": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3"
+    }
   }
 }

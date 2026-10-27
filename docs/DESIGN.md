@@ -79,7 +79,7 @@ these checks by wallet role and dated status, without address or
 human-hash fragments (§10).
 Fiador's own records keep the raw humanId private; AgentBook's
 underlying registration is public on-chain (§3.3). The signed
-public attestation necessarily contains the dedicated program
+public attestation necessarily contains the dedicated demo signing
 wallet's full address; public narrative evidence uses a label
 instead of repeating its address or hash fragments.
 
@@ -331,8 +331,8 @@ the attestation to say so. Semantics:
 - The signer CLI omits it unless the operator explicitly opts
   in (a flag, never a prompt that nudges), and the walkthrough
   presents it as optional in those words.
-- Nic's own fleet opts in: his bots already operate publicly
-  as his, so Nova's attestation (§9 step 1) carries
+- Nic opts in for the founding Nova attestation (§9 step 1),
+  which carries
   `payload.operatorDisplayName: "Nic Lydon"`. That is one operator's
   election under this rule, recorded so the test fixtures and
   the demo read consistently — it sets no expectation for any
@@ -498,7 +498,7 @@ of this section is the checklist's map.
   | Bot log channel | Check or audit lines quoting private identifiers | Lines carry status and only identifiers needed for the admin audit; no raw humanId or full wallet (§5.3) |
   | Badge + verify page | Identifier in a URL, query, or rendered field | Routes key on application ID only (§6.3); page inputs are wallet / app / URL; results render `humanHash` truncated; the value is never a URL component anywhere |
   | Screenshots | Evidence shots of a surface showing the value | Public surfaces have no full value to show by construction; §9/§10 screenshots are of those surfaces |
-  | Verification evidence | `docs/verification.md` quoting a live lookup | Public narrative entries use a non-identifying label and dated status, without wallet or human-hash fragments for the dedicated program wallet. The signed attestation still carries the wallet address required by the protocol (§9). |
+  | Verification evidence | `docs/verification.md` quoting a live lookup | Public narrative entries use a role label and dated status, without wallet or human-hash fragments for the dedicated demo signing wallet. The signed attestation still carries the wallet address required by the protocol (§9). |
   | CI output | A failing test printing a live result | Package results contain no raw value to print (default mode, §4.3); live-chain tests run behind a flag with the same outputs |
   | Git history | A value committed early, deleted later | §10's scan runs over full history, and its humanId pattern check is part of that pass, not only the tree |
   | Outward messages | A post or showcase quoting a check | §10's outward-post gate (Nic approves exact text) plus the rule itself, which binds messages as much as files |
@@ -1614,11 +1614,11 @@ Preconditions (state at design time, re-check at test time):
       `docs/verification.md`; a registration state is a fact with
       a date, not an assumption.
 - [ ] A dedicated demo wallet for the public artefacts (portfolio
-      rule: demos run on throwaway or dedicated wallets; the
-      fleet's operational keys are never demo keys). Election
-      recorded Oct 25, 2026: the dedicated World Program wallet
-      (created Oct 25, held separately from the playground /
-      fleet wallet) is the signing wallet for all public demos,
+      rule: demos run on throwaway or dedicated wallets;
+      operational keys are never demo keys). Election
+      recorded Oct 25, 2026: the dedicated demo signing wallet
+      (created Oct 25, held separately from the playground wallet
+      and operational keys) is the signing wallet for all public demos,
       the founding attestation, and registry listings. Its
       AgentBook registration is DONE: Oct 26, 2026, ~01:03 ET
       (Nic's World App approval tap during the home session;
@@ -1631,7 +1631,7 @@ Preconditions (state at design time, re-check at test time):
 Steps:
 
 1. Publish Nova's attestation — COMPLETE, Oct 26, 2026.
-   - The founding payload was signed with the dedicated program
+   - The founding payload was signed with the dedicated demo signing
      wallet, published at a public HTTPS URL, and indexed in the
      registry. It carries `payload.operatorDisplayName: "Nic Lydon"`
      under Nic's opt-in in §3.1.1. The signing, publication, and
@@ -1651,7 +1651,7 @@ Steps:
      confirm the core returns `verified` while the page renders
      `Claim unconfirmed` with neutral artwork, then screenshot it
      for `docs/verification.md`
-     (crop or obscure dedicated program wallet and human-hash
+     (crop or obscure dedicated demo signing wallet and human-hash
      fragments in any public screenshot per §10), in both
      light and dark mode (§6.0): system-preference default, the
      toggle, and persistence each exercised once.
@@ -1825,7 +1825,7 @@ repo's `docs/narrative/` launch entry:
       a content hash, or a labelled synthetic sentinel, per the
       leak-path audit in §3.3); public prose and screenshots use
       labels rather than wallet or human-hash fragments for the
-      dedicated program wallet (the signed attestation retains
+      dedicated demo signing wallet (the signed attestation retains
       its protocol-required full wallet address);
       no Nexus data, no
       calendar / comms / health content; no homelab hostnames,
@@ -1895,7 +1895,7 @@ Before any outward post (dev.to, Discord showcase, social):
 - [ ] Nic approves the exact text (portfolio gate; no standing
       rule replaces this yet).
 - [ ] Post links the repo, uses labels only for the dedicated
-      program wallet with no address or human-hash fragments,
+      demo signing wallet with no address or human-hash fragments,
       and makes no claim beyond §1.
 - [ ] Descriptor rule (§7): the post's first use of Fiador
       carries "human-backed attestation for Discord bots"; the
@@ -1981,9 +1981,9 @@ not rows above because the table is only for what is still open:
   default is name-free and no operator is ever required to name
   themselves; the name is self-asserted under the operator's
   signature and verifiers display it only when present.
-  Specified in §3.1.1. Nic's own fleet opts in — Nova's
-  attestation carries `payload.operatorDisplayName: "Nic Lydon"` —
-  because his bots already operate publicly as his.
+  Specified in §3.1.1. Nic opts in for Nova's founding
+  attestation, which carries `payload.operatorDisplayName: "Nic Lydon"`;
+  he already operates Nova publicly under his name.
 - Deployment model. Self-host only for v1, plus the static
   verify page (Nic, Oct 25, 2026, via the coordinator). No
   project-run hosted verifier bot (and no hosted badge
