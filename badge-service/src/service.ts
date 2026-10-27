@@ -10,6 +10,12 @@
 // renders from the returned status only. It never sets
 // includeRawHumanId, and the internal VerifyResult is never
 // serialised on any route: every wire body crosses the projection.
+//
+// Every keyed structure in this service (result cache,
+// single-flight map, registry, ETags, render cache) keys a subject
+// by the JSON encoding of its [type, id] pair (config.ts
+// subjectKey). Separator concatenation is not a key: distinct
+// subjects must never share an entry anywhere.
 
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -20,6 +26,7 @@ import {
   type VerifyResult,
   type Verifier,
 } from '@fiador/verify';
+import { canonicalSubject, subjectKey, type RegistrySource } from './config.js';
 import { explainerHtml } from './explainer.js';
 import { stateForStatus, type BadgeVariant, type ThemeName } from './palettes.js';
 import { renderBadgePng, renderBadgeSvg, type ThemeSelection } from './render.js';
@@ -30,17 +37,43 @@ export interface BadgeServiceDeps {
    * configuration; see config.ts). Absent, every attested subject
    * resolves as not found. */
   resolveAttestation?: (subject: { type: string; id: string }) => Promise<SignedAttestation | null>;
-  /** Absolute base for badge URLs in the JSON route. Absent, the
-   * base is derived from the request (Host / X-Forwarded-Proto). */
+  /** Refreshing registry source (config.ts FileRegistry). When
+   * present it is the resolver, and it is refreshed on its cadence
+   * as requests arrive (SPEC 4.6). */
+  registrySource?: RegistrySource;
+  /** Absolute public base URL for badge URLs in the JSON route,
+   * from configuration ONLY. Request headers (Host,
+   * X-Forwarded-Proto) are never used to build URLs: a poisoned
+   * Host must not be able to mint badge URLs the service then
+   * blesses with public cache headers. Absent, badge URLs are
+   * path-relative (no scheme, no host). */
   publicBaseUrl?: string;
   now?: () => Date;
+  /** Trust X-Forwarded-For for rate-limit keying. Default false:
+   * the limiter keys on the socket address. Enable ONLY when the
+   * service sits behind a trusted proxy that sets the header —
+   * otherwise the header is client-controlled and the limiter is
+   * decorative. (Mirrored in the README.) */
+  trustProxy?: boolean;
   /** SPEC 4.6 proposals, as configuration (not code constants). */
   cacheTtlVerifiedMs?: number; // verified + expired, default 300_000
   cacheTtlNegativeMs?: number; // unregistered + invalid, default 60_000
   staleOnErrorMs?: number; // stale verified ceiling, default 900_000
-  rateLimitMax?: number; // per IP per window, default 120
+  /** Result-cache bound (entries). An LRU at this cap holds every
+   * cached outcome, negatives included; default 1000. */
+  cacheMaxEntries?: number;
+  /** Rendered-badge cache bound (entries); default 500. */
+  renderCacheMaxEntries?: number;
+  rateLimitMax?: number; // per key per window, default 120
   rateLimitWindowMs?: number; // default 60_000
   maxConcurrentLookups?: number; // outbound core-call cap, default 10
+  lookupQueueMax?: number; // queued lookups awaiting a slot, default 100
+  lookupDeadlineMs?: number; // per-lookup queue+call deadline, default 10_000
+  requestTimeoutMs?: number; // HTTP request timeout, default 30_000
+  headersTimeoutMs?: number; // HTTP headers timeout, default 15_000
+  /** Test seam: invoked once per actual badge render (SVG build or
+   * PNG rasterisation), so tests can prove cost is shed. */
+  onRender?: (kind: 'svg' | 'png') => void;
 }
 
 interface CacheEntry {
@@ -48,7 +81,15 @@ interface CacheEntry {
   storedAtMs: number;
 }
 
+interface RenderEntry {
+  body: Buffer;
+  etag: string;
+  resolvedTheme: ThemeName | undefined;
+}
+
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const MAX_TYPE_LENGTH = 64; // aligned with the core's subject limits
+const MAX_ID_LENGTH = 256;
 
 export function badgeUrls(base: string, subjectType: string, subjectId: string) {
   const path = `${base.replace(/\/$/, '')}/badge/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`;
@@ -75,7 +116,49 @@ export function cacheControlFor(status: VerificationStatus): string {
   }
 }
 
-export function createBadgeService(deps: BadgeServiceDeps): Server {
+/** Bounded LRU: a plain Map in insertion order, refreshed on read,
+ * evicting the oldest entry past the cap. */
+class LruCache<V> {
+  private map = new Map<string, V>();
+  constructor(private readonly maxEntries: number) {}
+  get(key: string): V | undefined {
+    const value = this.map.get(key);
+    if (value !== undefined) {
+      this.map.delete(key);
+      this.map.set(key, value);
+    }
+    return value;
+  }
+  set(key: string, value: V): void {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, value);
+    while (this.map.size > this.maxEntries) {
+      const oldest = this.map.keys().next().value;
+      if (oldest === undefined) break;
+      this.map.delete(oldest);
+    }
+  }
+  get size(): number {
+    return this.map.size;
+  }
+  clear(): void {
+    this.map.clear();
+  }
+}
+
+class OverloadedError extends Error {
+  constructor() {
+    super('lookup capacity exceeded');
+    this.name = 'OverloadedError';
+  }
+}
+
+export interface BadgeServiceInternals {
+  resultCacheSize(): number;
+  renderCacheSize(): number;
+}
+
+export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInternals: BadgeServiceInternals } {
   const now = deps.now ?? (() => new Date());
   const ttlVerified = deps.cacheTtlVerifiedMs ?? 300_000;
   const ttlNegative = deps.cacheTtlNegativeMs ?? 60_000;
@@ -83,25 +166,67 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
   const rateMax = deps.rateLimitMax ?? 120;
   const rateWindow = deps.rateLimitWindowMs ?? 60_000;
   const maxConcurrent = deps.maxConcurrentLookups ?? 10;
+  const queueMax = deps.lookupQueueMax ?? 100;
+  const lookupDeadline = deps.lookupDeadlineMs ?? 10_000;
 
-  const cache = new Map<string, CacheEntry>();
+  const cache = new LruCache<CacheEntry>(deps.cacheMaxEntries ?? 1000);
+  const renderCache = new LruCache<RenderEntry>(deps.renderCacheMaxEntries ?? 500);
+  /** Last render per route shape, for shedding rate-limited load:
+   * a limited request serves this instead of rasterising. */
+  const lastRender = new LruCache<RenderEntry>(deps.renderCacheMaxEntries ?? 500);
   const inFlight = new Map<string, Promise<{ result: VerifyResult; stale: boolean }>>();
   const rateWindows = new Map<string, number[]>();
-  let activeLookups = 0;
-  const lookupQueue: Array<() => void> = [];
   const health = { agentBookReachable: true, lastLookupMs: null as number | null };
 
-  function acquireLookup(): Promise<void> {
-    if (activeLookups < maxConcurrent) {
-      activeLookups++;
-      return Promise.resolve();
-    }
-    return new Promise((resolve) => lookupQueue.push(resolve));
+  let activeLookups = 0;
+  interface Queued {
+    grant: () => void;
+    fail: (err: Error) => void;
+    settled: boolean;
+  }
+  const lookupQueue: Queued[] = [];
+
+  function acquireLookup(signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new OverloadedError());
+        return;
+      }
+      if (activeLookups < maxConcurrent) {
+        activeLookups++;
+        resolve();
+        return;
+      }
+      if (lookupQueue.length >= queueMax) {
+        reject(new OverloadedError());
+        return;
+      }
+      const entry: Queued = {
+        settled: false,
+        grant: () => {
+          if (entry.settled) return;
+          entry.settled = true;
+          activeLookups++;
+          resolve();
+        },
+        fail: (err) => {
+          if (entry.settled) return;
+          entry.settled = true;
+          reject(err);
+        },
+      };
+      signal.addEventListener('abort', () => entry.fail(new OverloadedError()), { once: true });
+      lookupQueue.push(entry);
+    });
   }
   function releaseLookup(): void {
-    const next = lookupQueue.shift();
-    if (next) next();
-    else activeLookups--;
+    activeLookups--;
+    while (lookupQueue.length > 0) {
+      const next = lookupQueue.shift()!;
+      if (next.settled) continue;
+      next.grant();
+      break;
+    }
   }
 
   function ttlFor(status: VerificationStatus): number {
@@ -110,28 +235,51 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
     return 0; // unknown is never cached (SPEC 4.6: a failure retries next request)
   }
 
-  async function callCore(subjectType: string, subjectId: string): Promise<VerifyResult> {
-    await acquireLookup();
+  async function callCore(subjectType: string, subjectId: string, signal: AbortSignal): Promise<VerifyResult> {
+    await acquireLookup(signal);
     try {
-      if (subjectType === 'address') {
-        return await deps.verifier.resolveStatus({ kind: 'address', address: subjectId });
+      if (canonicalSubject(subjectType, subjectId)[0] === 'address') {
+        return await deps.verifier.resolveStatus(
+          { kind: 'address', address: subjectId },
+          { signal },
+        );
       }
-      const resolver = deps.resolveAttestation ?? (async () => null);
-      return await deps.verifier.resolveStatus({
-        kind: 'attested_subject',
-        subject: { type: subjectType, id: subjectId },
-        resolveAttestation: resolver,
-      });
+      const resolver: NonNullable<BadgeServiceDeps['resolveAttestation']> =
+        deps.registrySource?.resolve.bind(deps.registrySource) ??
+        deps.resolveAttestation ??
+        (async () => null);
+      return await deps.verifier.resolveStatus(
+        {
+          kind: 'attested_subject',
+          subject: { type: subjectType, id: subjectId },
+          resolveAttestation: resolver,
+        },
+        { signal },
+      );
     } finally {
       releaseLookup();
     }
   }
 
+  let lastRegistryVersion = deps.registrySource?.version ?? 0;
+
   async function resolveResult(
     subjectType: string,
     subjectId: string,
   ): Promise<{ result: VerifyResult; stale: boolean }> {
-    const key = subjectType === 'address' ? `address:${subjectId.toLowerCase()}` : `${subjectType}:${subjectId}`;
+    deps.registrySource?.refreshIfDue(now().getTime());
+    const registryVersion = deps.registrySource?.version ?? 0;
+    if (registryVersion !== lastRegistryVersion) {
+      // The registry content changed under us (SPEC 4.6 refresh):
+      // results and renders cached against the old registry are
+      // dropped, so a removed or replaced attestation takes
+      // effect now, not at cache expiry.
+      lastRegistryVersion = registryVersion;
+      cache.clear();
+      renderCache.clear();
+      lastRender.clear();
+    }
+    const key = subjectKey(subjectType, subjectId);
     const nowMs = now().getTime();
     const entry = cache.get(key);
     if (entry && nowMs - entry.storedAtMs < ttlFor(entry.result.status)) {
@@ -140,7 +288,20 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
     const pending = inFlight.get(key);
     if (pending) return pending;
     const flight = (async () => {
-      const result = await callCore(subjectType, subjectId);
+      // One deadline covers queue wait + the core call; its signal
+      // is what the core receives, so a queued-then-expired lookup
+      // aborts the RPC instead of running unbounded.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), lookupDeadline);
+      let result: VerifyResult;
+      try {
+        result = await callCore(subjectType, subjectId, controller.signal);
+      } catch (err) {
+        if (err instanceof OverloadedError) throw err;
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
       if (result.evidence.rpcLatencyMs !== undefined) health.lastLookupMs = result.evidence.rpcLatencyMs;
       const lookupFailed =
         result.status === 'unknown' &&
@@ -156,7 +317,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
       if (lookupFailed && entry && entry.result.status === 'verified' && now().getTime() - entry.storedAtMs < staleCeiling) {
         return { result: entry.result, stale: true };
       }
-      if (result.status !== 'unknown') {
+      if (ttlFor(result.status) > 0) {
         cache.set(key, { result, storedAtMs: now().getTime() });
       }
       return { result, stale: false };
@@ -169,90 +330,248 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
     }
   }
 
-  function rateLimited(ip: string): boolean {
+  function rateKey(req: IncomingMessage): string {
+    if (deps.trustProxy) {
+      const fwd = req.headers['x-forwarded-for'];
+      const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim();
+      if (first) return first;
+    }
+    return req.socket.remoteAddress ?? 'unknown';
+  }
+
+  function rateLimited(key: string): boolean {
     const nowMs = now().getTime();
-    const hits = (rateWindows.get(ip) ?? []).filter((t) => nowMs - t < rateWindow);
+    const hits = (rateWindows.get(key) ?? []).filter((t) => nowMs - t < rateWindow);
     hits.push(nowMs);
-    rateWindows.set(ip, hits);
+    if (hits.length === 0) rateWindows.delete(key);
+    else rateWindows.set(key, hits);
+    if (rateWindows.size > 10_000) {
+      for (const [k, v] of rateWindows) {
+        if (v.every((t) => nowMs - t >= rateWindow)) rateWindows.delete(k);
+      }
+    }
     return hits.length > rateMax;
   }
 
-  function etagFor(parts: string[]): string {
-    return `"${createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 32)}"`;
+  function etagFor(parts: unknown[]): string {
+    return `"${createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32)}"`;
   }
 
-  function baseFrom(req: IncomingMessage): string {
-    if (deps.publicBaseUrl) return deps.publicBaseUrl;
-    const proto = (req.headers['x-forwarded-proto'] as string | undefined) ?? 'http';
-    const host = req.headers.host;
-    return host ? `${proto}://${host}` : '';
+  function ifNoneMatchHits(req: IncomingMessage, etag: string): boolean {
+    const header = req.headers['if-none-match'];
+    if (!header) return false;
+    return header
+      .split(',')
+      .map((t) => t.trim())
+      .some((t) => t === '*' || t === etag || t === `W/${etag}`);
   }
 
-  function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
-    res.writeHead(status, { 'content-type': 'application/json', ...headers });
-    res.end(JSON.stringify(body));
+  /** The effective badge base: configuration only, never request
+   * headers. Empty string yields path-relative URLs. */
+  function effectiveBase(): string {
+    return deps.publicBaseUrl ?? '';
   }
 
-  function sendBadge(
+  function sendJson(
     res: ServerResponse,
-    args: {
-      status: VerificationStatus;
-      stale: boolean;
-      themeParam: string | null;
-      variant: BadgeVariant;
-      format: 'svg' | 'png';
-      clientHint: string | undefined;
-      checkedAt: string;
-      subjectKey: string;
-      forceNoStore?: boolean;
-    },
+    status: number,
+    body: unknown,
+    headers: Record<string, string> = {},
+    head = false,
   ): void {
+    const text = typeof body === 'string' ? body : JSON.stringify(body);
+    res.writeHead(status, { 'content-type': 'application/json', ...headers });
+    res.end(head ? undefined : text);
+  }
+
+  interface BadgeArgs {
+    status: VerificationStatus;
+    stale: boolean;
+    theme: ThemeSelection;
+    variant: BadgeVariant;
+    format: 'svg' | 'png';
+    clientHint: string | undefined;
+    /** ISO check time from the core, or null when no check ran:
+     * the badge then shows no check time and no X-Checked-At is
+     * emitted (SPEC 4.4 evidence rule). */
+    checkedAt: string | null;
+    subjectKeyValue: string;
+    forceNoStore?: boolean;
+  }
+
+  /** Returns true when a response was sent. Honours the render
+   * cache and If-None-Match BEFORE any rendering happens, so a
+   * conditional or repeated request never pays rasterisation. */
+  function sendBadge(req: IncomingMessage, res: ServerResponse, args: BadgeArgs, head: boolean): void {
     const state = stateForStatus(args.status);
-    const theme: ThemeSelection =
-      args.themeParam === 'dark' || args.themeParam === 'light' ? args.themeParam : 'auto';
-    const headers: Record<string, string> = {
-      'cache-control': args.forceNoStore || args.stale ? 'no-store' : cacheControlFor(args.status),
-      'x-checked-at': args.checkedAt,
-      'accept-ch': 'Sec-CH-Prefers-Color-Scheme',
-    };
-    if (args.format === 'svg') {
-      headers['etag'] = etagFor([args.subjectKey, args.status, args.checkedAt, args.variant, theme]);
-      const svg = renderBadgeSvg({ state, theme, variant: args.variant, checkedAt: args.checkedAt, now: now() });
-      res.writeHead(200, { 'content-type': 'image/svg+xml', ...headers });
-      res.end(svg);
-      return;
-    }
-    // PNG: auto resolves server-side from the client hint, falling
-    // back to dark, and reports the resolution (SPEC 4.2).
-    const resolved: ThemeName =
-      theme !== 'auto' ? theme : args.clientHint === 'light' ? 'light' : 'dark';
-    headers['x-badge-theme'] = resolved;
-    if (theme === 'auto') headers['vary'] = 'Sec-CH-Prefers-Color-Scheme';
-    headers['etag'] = etagFor([
-      args.subjectKey,
+    const base = effectiveBase();
+    // For the auto PNG the resolved theme is part of the render
+    // identity; for everything else the requested theme is.
+    const resolved: ThemeName | undefined =
+      args.format === 'png'
+        ? args.theme !== 'auto'
+          ? args.theme
+          : args.clientHint === 'light'
+            ? 'light'
+            : 'dark'
+        : undefined;
+    const themeKey =
+      args.format === 'png' && args.theme === 'auto' ? `auto:${resolved}` : args.theme;
+    const etag = etagFor([
+      args.subjectKeyValue,
       args.status,
       args.checkedAt,
       args.variant,
-      theme === 'auto' ? `auto:${resolved}` : theme,
+      args.format,
+      themeKey,
+      base,
     ]);
-    const png = renderBadgePng({ state, theme: resolved, variant: args.variant, checkedAt: args.checkedAt, now: now() });
-    res.writeHead(200, { 'content-type': 'image/png', ...headers });
-    res.end(png);
+    const headers: Record<string, string> = {
+      'cache-control': args.forceNoStore || args.stale ? 'no-store' : cacheControlFor(args.status),
+      etag,
+      'accept-ch': 'Sec-CH-Prefers-Color-Scheme',
+    };
+    if (args.checkedAt !== null) headers['x-checked-at'] = args.checkedAt;
+    if (args.format === 'png') {
+      headers['content-type'] = 'image/png';
+      headers['x-badge-theme'] = resolved!;
+      if (args.theme === 'auto') headers['vary'] = 'Sec-CH-Prefers-Color-Scheme';
+    } else {
+      headers['content-type'] = 'image/svg+xml';
+    }
+
+    const renderKey = etag; // the ETag IS the render identity
+    const routeKey = JSON.stringify([args.subjectKeyValue, args.variant, args.format, themeKey]);
+
+    if (ifNoneMatchHits(req, etag)) {
+      // A conditional hit is answered from the ETag alone: no
+      // render, and the cached render (if any) stays authoritative.
+      res.writeHead(304, headers);
+      res.end();
+      return;
+    }
+    const cached = renderCache.get(renderKey);
+    if (cached) {
+      res.writeHead(200, headers);
+      res.end(head ? undefined : cached.body);
+      return;
+    }
+    // Render exactly once per unique badge state; the render cache
+    // and the per-route last-render both learn it.
+    deps.onRender?.(args.format);
+    const body =
+      args.format === 'svg'
+        ? Buffer.from(
+            renderBadgeSvg({ state, theme: args.theme, variant: args.variant, checkedAt: args.checkedAt, now: now() }),
+            'utf8',
+          )
+        : renderBadgePng({ state, theme: resolved!, variant: args.variant, checkedAt: args.checkedAt, now: now() });
+    const entry: RenderEntry = { body, etag, resolvedTheme: resolved };
+    renderCache.set(renderKey, entry);
+    lastRender.set(routeKey, entry);
+    res.writeHead(200, headers);
+    res.end(head ? undefined : body);
+  }
+
+  /** A rate-limited badge request must never rasterise: serve the
+   * subject's last render for this route shape when one exists,
+   * else a cheap static template (an SVG string built once; for
+   * PNG, the one cached unchecked raster). */
+  let busyPng: Buffer | null = null;
+  function sendLimitedBadge(
+    req: IncomingMessage,
+    res: ServerResponse,
+    args: Omit<BadgeArgs, 'status' | 'checkedAt' | 'stale'>,
+    head: boolean,
+  ): void {
+    const themeKey =
+      args.format === 'png' && args.theme === 'auto'
+        ? `auto:${args.clientHint === 'light' ? 'light' : 'dark'}`
+        : args.theme;
+    const routeKey = JSON.stringify([args.subjectKeyValue, args.variant, args.format, themeKey]);
+    const last = lastRender.get(routeKey);
+    const headers: Record<string, string> = { 'cache-control': 'no-store' };
+    if (last) {
+      headers['content-type'] = args.format === 'png' ? 'image/png' : 'image/svg+xml';
+      if (args.format === 'png') headers['x-badge-theme'] = last.resolvedTheme ?? 'dark';
+      res.writeHead(200, headers);
+      res.end(head ? undefined : last.body);
+      return;
+    }
+    // Nothing rendered yet for this route: the unchecked badge,
+    // built without the rasteriser where possible.
+    if (args.format === 'svg') {
+      deps.onRender?.('svg');
+      const svg = renderBadgeSvg({
+        state: 'unverified',
+        theme: args.theme,
+        variant: args.variant,
+        checkedAt: null,
+        now: now(),
+      });
+      res.writeHead(200, { 'content-type': 'image/svg+xml', ...headers });
+      res.end(head ? undefined : svg);
+      return;
+    }
+    if (!busyPng) {
+      deps.onRender?.('png');
+      busyPng = renderBadgePng({
+        state: 'unverified',
+        theme: args.clientHint === 'light' ? 'light' : 'dark',
+        variant: args.variant,
+        checkedAt: null,
+        now: now(),
+      });
+    }
+    headers['content-type'] = 'image/png';
+    headers['x-badge-theme'] = args.clientHint === 'light' ? 'light' : 'dark';
+    res.writeHead(200, headers);
+    res.end(head ? undefined : busyPng);
+  }
+
+  function uncheckedBadge(
+    req: IncomingMessage,
+    res: ServerResponse,
+    args: Omit<BadgeArgs, 'status' | 'checkedAt' | 'stale'>,
+    head: boolean,
+  ): void {
+    sendBadge(req, res, { ...args, status: 'invalid', checkedAt: null, stale: false, forceNoStore: true }, head);
+  }
+
+  type ParsedSubject =
+    | { ok: true; type: string; id: string }
+    | { ok: false; reason: 'malformed-encoding' | 'too-long' | 'empty' | 'malformed-address' };
+
+  function validateSubject(type: string, id: string): ParsedSubject {
+    if (type.length === 0 || id.length === 0) return { ok: false, reason: 'empty' };
+    if (type.length > MAX_TYPE_LENGTH || id.length > MAX_ID_LENGTH) return { ok: false, reason: 'too-long' };
+    if (canonicalSubject(type, id)[0] === 'address' && !ADDRESS_RE.test(id)) {
+      return { ok: false, reason: 'malformed-address' };
+    }
+    return { ok: true, type, id };
+  }
+
+  function decodeSegment(raw: string): string | null {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return null; // malformed percent-encoding (SPEC 4.7 treatment, never a 500)
+    }
   }
 
   const server = createServer(async (req, res) => {
+    const head = req.method === 'HEAD';
     try {
       const url = new URL(req.url ?? '/', 'http://badge.local');
       const path = url.pathname;
-      const ip = req.socket.remoteAddress ?? 'unknown';
 
-      if (req.method !== 'GET') {
-        sendJson(res, 404, { error: 'not found' });
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        sendJson(res, 405, { error: 'method not allowed' }, { allow: 'GET, HEAD', 'cache-control': 'no-store' });
         return;
       }
       if (path === '/') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-        res.end(explainerHtml());
+        res.end(head ? undefined : explainerHtml());
         return;
       }
       if (path === '/health') {
@@ -260,92 +579,198 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
           ok: true,
           agentBookReachable: health.agentBookReachable,
           lastLookupMs: health.lastLookupMs,
-        });
+        }, {}, head);
         return;
       }
 
-      const statusMatch = /^\/v1\/status\/([^/]+)\/([^/]+)$/.exec(path);
-      const badgeMatch = /^\/badge\/([^/]+)\/([^/]+)\.(svg|png)$/.exec(path);
-      const legacyMatch = /^\/badge\/([^/]+)\.(svg|png)$/.exec(path);
+      const isStatusPath = path === '/v1/status' || path.startsWith('/v1/status/');
+      const isBadgePath = path === '/badge' || path.startsWith('/badge/');
 
-      if (statusMatch) {
-        const subjectType = decodeURIComponent(statusMatch[1]!);
-        const subjectId = decodeURIComponent(statusMatch[2]!);
-        if (rateLimited(ip)) {
-          sendJson(res, 429, { error: 'rate limit exceeded' }, { 'cache-control': 'no-store' });
+      if (isStatusPath) {
+        const segments = path.split('/').slice(3); // after /v1/status
+        if (segments.length !== 2) {
+          sendJson(res, 400, { error: 'malformed subject' }, { 'cache-control': 'no-store' }, head);
           return;
         }
-        // SPEC 4.2 step 1: a malformed address is a 400 on the JSON route.
-        if (subjectType === 'address' && !ADDRESS_RE.test(subjectId)) {
-          sendJson(res, 400, { error: 'malformed address subject' }, { 'cache-control': 'no-store' });
+        const type = decodeSegment(segments[0]!);
+        const id = decodeSegment(segments[1]!);
+        if (type === null || id === null) {
+          sendJson(res, 400, { error: 'malformed subject encoding' }, { 'cache-control': 'no-store' }, head);
           return;
         }
-        const { result, stale } = await resolveResult(subjectType, subjectId);
+        if (rateLimited(rateKey(req))) {
+          sendJson(res, 429, { error: 'rate limit exceeded' }, { 'cache-control': 'no-store' }, head);
+          return;
+        }
+        const parsed = validateSubject(type, id);
+        if (!parsed.ok) {
+          sendJson(
+            res,
+            400,
+            { error: parsed.reason === 'malformed-address' ? 'malformed address subject' : 'malformed subject' },
+            { 'cache-control': 'no-store' },
+            head,
+          );
+          return;
+        }
+        let resolvedResult: { result: VerifyResult; stale: boolean };
+        try {
+          resolvedResult = await resolveResult(parsed.type, parsed.id);
+        } catch (err) {
+          if (err instanceof OverloadedError) {
+            sendJson(res, 503, { error: 'service busy' }, { 'cache-control': 'no-store' }, head);
+            return;
+          }
+          throw err;
+        }
+        const { result, stale } = resolvedResult;
         const pub = toPublicVerifyResult(result);
         if (stale) pub.evidence = { ...pub.evidence, source: 'cache' };
+        // Address-subject disclosure rule (spec reconciliation):
+        // the queried address appears ONCE in this body, as the
+        // explicit subject echo below. Every other field carries
+        // the truncated form only — including the badge URLs, which
+        // are therefore built from the truncated address for
+        // address subjects (a full wallet address in a URL is a
+        // log/history leak, SPEC 4.9).
+        const [canonType] = canonicalSubject(parsed.type, parsed.id);
+        const urlSubjectId = canonType === 'address' ? (pub.addressTruncated ?? '') : parsed.id;
         const body = {
-          subject: { type: subjectType, id: subjectId },
+          subject: { type: parsed.type, id: parsed.id },
           status: pub.status,
           addressTruncated: pub.addressTruncated,
           humanHash: pub.humanHash,
           failures: pub.failures,
           evidence: pub.evidence,
           checkedAt: pub.evidence.checkedAt,
-          badge: badgeUrls(baseFrom(req), subjectType, subjectId),
+          badge: badgeUrls(effectiveBase(), parsed.type, urlSubjectId),
         };
-        sendJson(res, 200, body, {
+        const text = JSON.stringify(body);
+        const etag = etagFor(['status-json', text]);
+        const headers: Record<string, string> = {
           'cache-control': stale ? 'no-store' : cacheControlFor(result.status),
-          etag: etagFor([`${subjectType}:${subjectId}`, result.status, pub.evidence.checkedAt, 'json']),
+          etag,
           'x-checked-at': pub.evidence.checkedAt,
-        });
+        };
+        if (ifNoneMatchHits(req, etag)) {
+          res.writeHead(304, headers);
+          res.end();
+          return;
+        }
+        sendJson(res, 200, text, headers, head);
         return;
       }
 
-      if (badgeMatch || legacyMatch) {
-        const subjectType = badgeMatch ? decodeURIComponent(badgeMatch[1]!) : 'discord_application';
-        const subjectId = badgeMatch ? decodeURIComponent(badgeMatch[2]!) : decodeURIComponent(legacyMatch![1]!);
-        const format = (badgeMatch ? badgeMatch[3]! : legacyMatch![2]!) as 'svg' | 'png';
-        const themeParam = url.searchParams.get('theme');
-        const variant: BadgeVariant = url.searchParams.get('variant') === 'icon' ? 'icon' : 'pill';
-        const checkedNow = now().toISOString();
-        if (rateLimited(ip)) {
-          // An embed never breaks a page layout because of limiting:
-          // the unverified badge, no-store (SPEC 4.7).
-          sendBadge(res, {
-            status: 'unknown', stale: false, themeParam, variant, format,
-            clientHint: req.headers['sec-ch-prefers-color-scheme'] as string | undefined,
-            checkedAt: checkedNow, subjectKey: `${subjectType}:${subjectId}`, forceNoStore: true,
-          });
+      if (isBadgePath) {
+        const themeRaw = url.searchParams.get('theme');
+        const variantRaw = url.searchParams.get('variant');
+        if (themeRaw !== null && themeRaw !== 'auto' && themeRaw !== 'dark' && themeRaw !== 'light') {
+          sendJson(res, 400, { error: 'invalid theme' }, { 'cache-control': 'no-store' }, head);
           return;
         }
-        // Malformed subject: an <img> cannot usefully show a 400, so
-        // the badge routes render unverified with no-store (SPEC 4.2).
-        if (subjectType === 'address' && !ADDRESS_RE.test(subjectId)) {
-          sendBadge(res, {
-            status: 'invalid', stale: false, themeParam, variant, format,
-            clientHint: req.headers['sec-ch-prefers-color-scheme'] as string | undefined,
-            checkedAt: checkedNow, subjectKey: `${subjectType}:${subjectId}`, forceNoStore: true,
-          });
+        if (variantRaw !== null && variantRaw !== 'pill' && variantRaw !== 'icon') {
+          sendJson(res, 400, { error: 'invalid variant' }, { 'cache-control': 'no-store' }, head);
           return;
         }
-        const { result, stale } = await resolveResult(subjectType, subjectId);
-        sendBadge(res, {
-          status: result.status, stale, themeParam, variant, format,
-          clientHint: req.headers['sec-ch-prefers-color-scheme'] as string | undefined,
-          checkedAt: result.evidence.checkedAt, subjectKey: `${subjectType}:${subjectId}`,
-        });
+        const theme = (themeRaw ?? 'auto') as ThemeSelection;
+        const variant = (variantRaw ?? 'pill') as BadgeVariant;
+        const clientHint = req.headers['sec-ch-prefers-color-scheme'] as string | undefined;
+
+        // Lenient segment parse: near-misses (empty ID, uppercase
+        // extension, trailing slash, bad percent-encoding) get the
+        // SPEC 4.2/4.7 badge treatment — a grey no-store badge —
+        // never a 500 and never another subject's result.
+        const trimmed = path.replace(/\/$/, '');
+        const segments = trimmed.split('/').slice(2); // after /badge
+        let type: string | null = null;
+        let id: string | null = null;
+        let format: 'svg' | 'png' = 'svg';
+        let wellFormed = false;
+        const lastSeg = segments[segments.length - 1] ?? '';
+        const extMatch = /\.([A-Za-z]+)$/.exec(lastSeg);
+        // Near-misses are grey, not silently repaired: an uppercase
+        // extension or a trailing slash does not serve the real
+        // badge (the format guess only picks the grey badge's type).
+        const nearMiss = trimmed !== path || (extMatch !== null && extMatch[1] !== 'svg' && extMatch[1] !== 'png');
+        if (extMatch && extMatch[1]!.toLowerCase() === 'png') format = 'png';
+        if (!nearMiss && extMatch && (extMatch[1] === 'svg' || extMatch[1] === 'png')) {
+          format = extMatch[1] as 'svg' | 'png';
+          const stem = lastSeg.slice(0, lastSeg.length - extMatch[0].length);
+          if (segments.length === 1) {
+            // Legacy alias: /badge/<id>.<ext> is discord_application.
+            type = 'discord_application';
+            id = decodeSegment(stem);
+            wellFormed = id !== null && id.length > 0;
+          } else if (segments.length === 2) {
+            type = decodeSegment(segments[0]!);
+            id = decodeSegment(stem);
+            wellFormed = type !== null && id !== null;
+          }
+        }
+        const greyKey = subjectKey(type ?? '?', id ?? '?');
+        if (!wellFormed || type === null || id === null) {
+          uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: greyKey }, head);
+          return;
+        }
+        const key = subjectKey(type, id);
+        if (rateLimited(rateKey(req))) {
+          sendLimitedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
+          return;
+        }
+        const parsed = validateSubject(type, id);
+        if (!parsed.ok) {
+          uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
+          return;
+        }
+        let resolvedResult: { result: VerifyResult; stale: boolean };
+        try {
+          resolvedResult = await resolveResult(parsed.type, parsed.id);
+        } catch (err) {
+          if (err instanceof OverloadedError) {
+            uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
+            return;
+          }
+          throw err;
+        }
+        const { result, stale } = resolvedResult;
+        sendBadge(
+          req,
+          res,
+          {
+            status: result.status,
+            stale,
+            theme,
+            variant,
+            format,
+            clientHint,
+            checkedAt: result.evidence.checkedAt,
+            subjectKeyValue: key,
+          },
+          head,
+        );
         return;
       }
 
-      sendJson(res, 404, { error: 'not found' });
+      sendJson(res, 404, { error: 'not found' }, {}, head);
     } catch {
       // Internal fault only (SPEC 4.7): a dead RPC is a grey badge,
       // never a 500; a 500 here means rendering itself failed. The
-      // body carries no internals.
+      // body carries no internals, and no subject-derived data.
       if (!res.headersSent) sendJson(res, 500, { error: 'internal error' });
       else res.end();
     }
   });
 
-  return server;
+  // Explicit server timeouts: a slow-loris or a hung peer must not
+  // hold sockets forever (defaults are configuration, SPEC 4.8).
+  server.requestTimeout = deps.requestTimeoutMs ?? 30_000;
+  server.headersTimeout = deps.headersTimeoutMs ?? 15_000;
+  server.keepAliveTimeout = 5_000;
+
+  const service = server as Server & { badgeInternals: BadgeServiceInternals };
+  service.badgeInternals = {
+    resultCacheSize: () => cache.size,
+    renderCacheSize: () => renderCache.size,
+  };
+  return service;
 }

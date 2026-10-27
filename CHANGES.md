@@ -1,5 +1,40 @@
 # Changes
 
+## 2026-10-27: badge service adversarial-review fix pass (PR #30)
+
+- The first adversarial review ruled the badge service NOT
+  SHIPPABLE; this pass closes its blocker, highs, majors, and
+  minors on the same branch. Blocker: every keyed structure
+  (result cache, single-flight, registry, ETags, render cache)
+  now keys a subject by the JSON encoding of its [type, id] pair
+  — the old `${type}:${id}` concatenation conflated distinct
+  subjects and served one subject another"s verified result.
+  The registry file shape changed to match (type -> id ->
+  attestation; see badge-service/README.md).
+- Highs: badge URLs are built only from the configured public
+  base (path-relative when unset; request Host/X-Forwarded-Proto
+  never used) and ETags incorporate that base; rendered badges
+  are cached and If-None-Match answers 304 before any
+  rasterisation, and rate-limited requests never rasterise; the
+  result cache is a bounded LRU (default 1000 entries, negatives
+  included).
+- Majors: no fabricated check times on 429/400/unchecked paths;
+  registry refresh on the SPEC 4.6 300 s cadence with validation,
+  sanitised startup errors, last-good retention, and a 24 h
+  ceiling; loopback default bind with BADGE_HOST override;
+  bounded lookup queue with a per-lookup deadline whose
+  AbortSignal reaches the core; strict numeric config (M16);
+  malformed percent-encoding gets the SPEC 4.7 treatment.
+- Spec reconciliation: an address subject"s full address appears
+  exactly once in the /v1/status body (the subject echo); badge
+  URLs and every other field carry the truncated form only.
+- Minors: state-distinguishing accessible names, HEAD/405
+  semantics, invalid theme/variant -> 400, near-miss routes grey,
+  normalised address-type matching, core-aligned length caps,
+  registry size bound, and the expired-tag layout collision.
+- Suite: 54 tests in badge-service (was 27), all green; root
+  build/typecheck/test green. Nothing deployed.
+
 ## 2026-10-26: dynamic badge service (W0 SPEC section 4)
 
 - badge-service/: the served badge from W0 SPEC section 4, as a

@@ -69,7 +69,12 @@ function paintAttrs(
   return pairs.map(([slot, kind]) => `${kind}="${palette[slot]}"`).join(' ');
 }
 
-function pillInner(p: PillPalette, state: BadgeState, checkedLabel: string, mode: 'attrs' | 'classes'): string {
+function pillInner(
+  p: PillPalette,
+  state: BadgeState,
+  checkedLabel: string | null,
+  mode: 'attrs' | 'classes',
+): string {
   const width = PILL_WIDTHS[state];
   const pal = p as unknown as Record<string, string>;
   const parts: string[] = [];
@@ -84,13 +89,20 @@ function pillInner(p: PillPalette, state: BadgeState, checkedLabel: string, mode
     `<text x="30" y="18" font-family="${FONT}" font-size="12.5" letter-spacing="0.2" ${paintAttrs(pal, [['label', 'fill']], mode)}>${escapeXml(p.labelText)}</text>`,
   );
   if (state === 'expired') {
+    // The "expired" tag sits immediately after the label text on the
+    // left; the check time is right-aligned. (Review fix: the tag
+    // previously anchored at width-104 from the right, directly
+    // under the right-aligned check label, and the two overprinted
+    // whenever the label carried a date.)
     parts.push(
-      `<text x="${width - 104}" y="18" text-anchor="end" font-size="8.5" ${paintAttrs(pal, [['muted', 'fill']], mode)} font-family="${FONT}">expired</text>`,
+      `<text x="74" y="18" font-size="8.5" ${paintAttrs(pal, [['muted', 'fill']], mode)} font-family="${FONT}">expired</text>`,
     );
   }
-  parts.push(
-    `<text x="${width - 10}" y="18" text-anchor="end" font-size="8.5" ${paintAttrs(pal, [['muted', 'fill']], mode)} font-family="${FONT}">${escapeXml(checkedLabel)}</text>`,
-  );
+  if (checkedLabel !== null) {
+    parts.push(
+      `<text x="${width - 10}" y="18" text-anchor="end" font-size="8.5" ${paintAttrs(pal, [['muted', 'fill']], mode)} font-family="${FONT}">${escapeXml(checkedLabel)}</text>`,
+    );
+  }
   return parts.join('');
 }
 
@@ -114,44 +126,65 @@ function autoStyle(slotsFor: (t: ThemeName) => Slots): string {
   return `<style>${rule(light)}@media (prefers-color-scheme: dark){${rule(dark)}}</style>`;
 }
 
+/** Accessible names distinguish the states (review fix): a screen
+ * reader must not announce an expired or unverified badge the same
+ * way as a verified one, on either variant. */
+const ARIA_LABELS: Record<BadgeVariant, Record<BadgeState, string>> = {
+  pill: {
+    verified: 'fiador badge: human-backed, verified',
+    expired: 'fiador badge: verification expired',
+    unverified: 'fiador badge: not verified',
+  },
+  icon: {
+    verified: 'fiador agent mark: verified',
+    expired: 'fiador agent mark: verification expired',
+    unverified: 'fiador agent mark: not verified',
+  },
+};
+
 export function renderBadgeSvg(args: {
   state: BadgeState;
   theme: ThemeSelection;
   variant: BadgeVariant;
-  checkedAt: string;
+  /** ISO time of the check that produced this badge, or null when
+   * no check ran (rate-limited / malformed responses): the badge
+   * then carries no check time anywhere — no visible label, no
+   * data attribute, no title claim (SPEC 4.4: the time is evidence
+   * from the core, never fabricated by the service). */
+  checkedAt: string | null;
   now: Date;
 }): string {
   const { state, theme, variant, checkedAt, now } = args;
-  const checkedLabel = formatCheckedLabel(checkedAt, now);
-  const title = `fiador badge: ${state}, checked ${checkedAt}`;
+  const checkedLabel = checkedAt === null ? null : formatCheckedLabel(checkedAt, now);
+  const title = checkedAt === null ? `fiador badge: ${state}` : `fiador badge: ${state}, checked ${checkedAt}`;
+  const checkedAttr = checkedAt === null ? '' : ` data-checked-at="${escapeXml(checkedAt)}"`;
+  const aria = ARIA_LABELS[variant][state];
   if (variant === 'icon') {
-    const aria = 'fiador agent mark';
     if (theme === 'auto') {
       const style = autoStyle((t) => {
         const p = ICON_PALETTES[t][state];
         return { ...p, label: p.ring, muted: p.ring };
       });
       return (
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${ICON_SIZE}" height="${ICON_SIZE}" viewBox="0 0 64 64" role="img" aria-label="${aria}" data-checked-at="${escapeXml(checkedAt)}">` +
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${ICON_SIZE}" height="${ICON_SIZE}" viewBox="0 0 64 64" role="img" aria-label="${aria}"${checkedAttr}>` +
         `<title>${escapeXml(title)}</title>${style}${iconInner(ICON_PALETTES.light[state], 'classes')}</svg>`
       );
     }
     return (
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${ICON_SIZE}" height="${ICON_SIZE}" viewBox="0 0 64 64" role="img" aria-label="${aria}" data-checked-at="${escapeXml(checkedAt)}">` +
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${ICON_SIZE}" height="${ICON_SIZE}" viewBox="0 0 64 64" role="img" aria-label="${aria}"${checkedAttr}>` +
       `<title>${escapeXml(title)}</title>${iconInner(ICON_PALETTES[theme][state], 'attrs')}</svg>`
     );
   }
   const width = PILL_WIDTHS[state];
-  const aria = state === 'unverified' ? 'not verified' : 'fiador';
   if (theme === 'auto') {
     const style = autoStyle((t) => PILL_PALETTES[t][state]);
     return (
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${PILL_HEIGHT}" viewBox="0 0 ${width} 28" role="img" aria-label="${aria}" data-checked-at="${escapeXml(checkedAt)}">` +
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${PILL_HEIGHT}" viewBox="0 0 ${width} 28" role="img" aria-label="${aria}"${checkedAttr}>` +
       `<title>${escapeXml(title)}</title>${style}${pillInner(PILL_PALETTES.light[state], state, checkedLabel, 'classes')}</svg>`
     );
   }
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${PILL_HEIGHT}" viewBox="0 0 ${width} 28" role="img" aria-label="${aria}" data-checked-at="${escapeXml(checkedAt)}">` +
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${PILL_HEIGHT}" viewBox="0 0 ${width} 28" role="img" aria-label="${aria}"${checkedAttr}>` +
     `<title>${escapeXml(title)}</title>${pillInner(PILL_PALETTES[theme][state], state, checkedLabel, 'attrs')}</svg>`
   );
 }
@@ -167,7 +200,7 @@ export function renderBadgePng(args: {
   state: BadgeState;
   theme: ThemeName;
   variant: BadgeVariant;
-  checkedAt: string;
+  checkedAt: string | null;
   now: Date;
 }): Buffer {
   const svg = renderBadgeSvg({ ...args, theme: args.theme });
