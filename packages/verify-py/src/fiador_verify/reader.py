@@ -155,7 +155,10 @@ class LiveReader:
         value = int(result, 16)
         if value == 0:
             return None
-        return hex(value)  # minimal lowercase hex, mirroring viem toHex
+        # AgentBook returns a uint256. Keep its full 32-byte shape so
+        # the core can reject malformed reader values without rejecting
+        # a legitimate small identifier.
+        return f"0x{value:064x}"
 
 
 class StaticReader:

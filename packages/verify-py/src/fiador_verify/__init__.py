@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from .canonical import canonical_attestation_message
 from .hashes import hash_human_id, truncate_address
+from .nonce_store import InMemoryNonceStore
 from .projection import to_public_verify_result
 from .types import (
     VERIFICATION_STATUSES,
@@ -45,6 +46,7 @@ __all__ = [
     "AgentBookReader",
     "NonceStore",
     "NonceClaimResult",
+    "InMemoryNonceStore",
     "AttestationPayloadV1",
     "SignedAttestation",
     "Subject",

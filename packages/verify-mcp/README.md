@@ -70,7 +70,7 @@ explicitly-set invalid value is a startup error naming the
 variable, never a silent default (`VERIFY_TIMEOUT_MS` must be
 an integer in [100, 60000]; `VERIFY_MCP_PORT` / `--port` an
 integer in [1, 65535]; the badge base URL must be http(s), and
-its query and fragment are stripped). Startup error messages
+its credentials, query, and fragment are stripped). Startup error messages
 name the variable and the problem class only — never the
 configured value or a file's content.
 

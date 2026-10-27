@@ -5,6 +5,7 @@ export { canonicalAttestationMessage } from './canonical.js';
 export { hashHumanId, truncateAddress } from './hash.js';
 export { toPublicVerifyResult } from './projection.js';
 export { createVerifier } from './verifier.js';
+export { InMemoryNonceStore } from './nonce-store.js';
 export type {
   AgentBookReader,
   AttestationPayloadV1,
