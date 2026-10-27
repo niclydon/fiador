@@ -159,6 +159,17 @@ export interface VerifyAttestationOptions {
       wallet: EvmAddress,
       expiresAt: string,
     ): Promise<NonceClaimResult>;
+    // Release a claim (7.5 re-review N3). This verifier takes its
+    // claim only at the terminal step — after every transient or
+    // not-yet outcome (lookup failure, unregistered, expiry) has
+    // already returned — so claims it takes never need releasing:
+    // the no-burn guarantee is structural. release() is part of
+    // the contract for stores shared with compositions that claim
+    // earlier in their pipeline, where an unknown or unregistered
+    // outcome MUST free the nonce; the reference InMemoryNonceStore
+    // implements it. Optional so a store serving only this
+    // verifier need not provide it.
+    release?(nonce: string, wallet: EvmAddress): Promise<void>;
   };
   checkRegistration?: boolean; // default true: also run the AgentBook lookup
   signal?: AbortSignal;

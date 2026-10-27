@@ -33,6 +33,10 @@ import type {
 const ZERO_ADDRESS: EvmAddress = '0x0000000000000000000000000000000000000000';
 const ERC1271_MAGIC: string = '0x1626ba7e';
 const MAX_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000;
+// The canonical humanId shape (SPEC 3.1/3.5): 0x-prefixed 32-byte
+// hex. Anything a reader resolves that is not null and not this
+// shape is garbage, not a registration (7.5 re-review N1).
+const HUMAN_ID_SHAPE = /^0x[0-9a-fA-F]{64}$/;
 
 const ERC1271_ABI = [
   {
@@ -58,16 +62,20 @@ type RaceOutcome<T> =
 // guarded region (7.5 review M12): a collaborator that throws
 // synchronously — before returning its promise — is a 'failed'
 // outcome, never an exception escaping a function whose contract is
-// "returns a result". A late rejection after the deadline wins is
-// swallowed so it never surfaces as an unhandled rejection.
+// "returns a result". A collaborator that returns a plain value
+// instead of a promise is normalised by Promise.resolve (7.5
+// re-review N2): the value is the outcome, never a TypeError from
+// calling .catch on a non-promise. A late rejection after the
+// deadline wins is swallowed so it never surfaces as an unhandled
+// rejection.
 async function raceDeadline<T>(
-  start: () => Promise<T>,
+  start: () => Promise<T> | T,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<RaceOutcome<T>> {
   let call: Promise<T>;
   try {
-    call = start();
+    call = Promise.resolve(start());
   } catch (error) {
     return { kind: 'failed', error };
   }
@@ -159,6 +167,20 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
   const clockSkewMs = options.clockSkewMs ?? 60_000;
   const includeRawHumanId = options.includeRawHumanId ?? false;
 
+  // The injected clock is a collaborator like any other (7.5
+  // re-review N2): a throwing now(), or one returning a non-Date
+  // or an invalid Date, must not escape a verify call. Fall back
+  // to the system clock for that call.
+  function safeNow(): Date {
+    try {
+      const value = now();
+      if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+    } catch {
+      // fall through to the system clock
+    }
+    return new Date();
+  }
+
   const publicClient = createPublicClient({
     chain: worldchain,
     transport: http(options.rpcUrl, { retryCount: 0, timeout: timeoutMs }),
@@ -244,7 +266,7 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
 
   function evidence(latencyMs?: number): CheckEvidence {
     return {
-      checkedAt: now().toISOString(),
+      checkedAt: safeNow().toISOString(),
       source: reader.source ?? 'live',
       agentBook: { network: 'eip155:480', contract },
       ...(latencyMs !== undefined ? { rpcLatencyMs: latencyMs } : {}),
@@ -281,10 +303,20 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     const latency = () => Date.now() - start;
     const outcome = await raceDeadline(() => reader.lookupHuman(address), timeoutMs, signal);
     switch (outcome.kind) {
-      case 'value':
-        return outcome.value === null
-          ? { state: 'unregistered', latencyMs: latency() }
-          : { state: 'registered', humanId: outcome.value, latencyMs: latency() };
+      case 'value': {
+        // Fail closed on the VALUE (7.5 re-review N1): null is the
+        // one unregistered signal; a string in the canonical
+        // humanId shape is a registration; ANYTHING else a reader
+        // resolves — undefined, a number, a malformed string — is
+        // a lookup failure. A non-null garbage value must never be
+        // hashed into a 'verified' result.
+        const value: unknown = outcome.value;
+        if (value === null) return { state: 'unregistered', latencyMs: latency() };
+        if (typeof value === 'string' && HUMAN_ID_SHAPE.test(value)) {
+          return { state: 'registered', humanId: value, latencyMs: latency() };
+        }
+        return { state: 'unknown', code: 'lookup_failed', latencyMs: latency() };
+      }
       case 'timeout':
         return { state: 'unknown', code: 'lookup_timeout', latencyMs: latency() };
       default:
@@ -394,7 +426,7 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     // alone, and per SPEC 3.3 precedence they outrank 'unknown' — a
     // network failure at the signature step must not pre-empt an
     // expiry or discard a binding failure (7.5 review B1).
-    const nowMs = now().getTime();
+    const nowMs = safeNow().getTime();
     const issuedMs = Date.parse(payload.issuedAt);
     const expiresMs = Date.parse(payload.expiresAt);
     const lifetimeInvalid = expiresMs <= issuedMs || expiresMs - issuedMs > MAX_LIFETIME_MS;
@@ -413,6 +445,24 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       const invalidClass = failures.some((f) => f !== 'expired');
       if (invalidClass) {
         return finish('invalid', { failures: [...failures, signature.code] });
+      }
+      // The replay step (SPEC 3.3 step 5) still runs on this path
+      // (7.5 re-review M1): the read-only has() consumes nothing,
+      // so a nonce claimed by an earlier verified presentation is
+      // reported as a replay rather than masked by the signature
+      // stage's network failure. A store failure here changes
+      // nothing — the signature outcome already determines the
+      // result below.
+      if (opts.nonceStore) {
+        const store = opts.nonceStore;
+        const has = await raceDeadline(
+          () => store.has(payload.nonce, wallet),
+          timeoutMs,
+          opts.signal,
+        );
+        if (has.kind === 'value' && has.value === true) {
+          return finish('invalid', { failures: [...failures, 'replay_detected'] });
+        }
       }
       if (expired) {
         return finish('expired', { failures: [...failures, signature.code] });
@@ -433,15 +483,26 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     // before expiry and registration, without consuming a fresh nonce.
     // The final atomic claim below still decides concurrent attempts.
     if (opts.nonceStore) {
-      try {
-        if (await opts.nonceStore.has(payload.nonce, wallet)) {
-          return finish('invalid', { failures: [...failures, 'replay_detected'] });
-        }
-      } catch {
+      // The store is a collaborator under the same deadline race
+      // as every other (7.5 re-review N2): a hanging has() is a
+      // timeout, a throwing/aborting one is a failure, and a
+      // non-boolean resolution is a contract violation — all fail
+      // closed, none escape or hang the verification.
+      const store = opts.nonceStore;
+      const has = await raceDeadline(
+        () => store.has(payload.nonce, wallet),
+        timeoutMs,
+        opts.signal,
+      );
+      if (has.kind === 'value' && has.value === true) {
+        return finish('invalid', { failures: [...failures, 'replay_detected'] });
+      }
+      if (has.kind !== 'value' || typeof has.value !== 'boolean') {
+        const code = has.kind === 'timeout' ? 'lookup_timeout' : 'lookup_failed';
         if (expired) {
-          return finish('expired', { failures: [...failures, 'lookup_failed'] });
+          return finish('expired', { failures: [...failures, code] });
         }
-        return finish('unknown', { failures: ['lookup_failed'] });
+        return finish('unknown', { failures: [code] });
       }
     }
 
@@ -457,7 +518,7 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     const outcome = opts.checkRegistration === false
       ? undefined
       : await lookup(wallet, opts.signal);
-    if (expiresMs <= now().getTime()) {
+    if (expiresMs <= safeNow().getTime()) {
       return finish('expired', { failures: ['expired'] });
     }
     if (outcome?.state === 'unknown') {
@@ -470,25 +531,33 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       });
     }
     if (opts.nonceStore) {
-      try {
-        // claim's own expiry check closes the race between our clock
-        // check and its atomic write. A stale verifier must not make a
-        // nonce persist past expiry.
-        const claim = await opts.nonceStore.claim(payload.nonce, wallet, payload.expiresAt);
-        if (claim === 'replay') {
-          return finish('invalid', { failures: ['replay_detected'] });
-        }
-        if (claim === 'expired') {
-          return finish('expired', { failures: ['expired'] });
-        }
-        if (claim !== 'claimed') {
-          return finish('unknown', { failures: ['lookup_failed'] });
-        }
-      } catch {
+      // claim's own expiry check closes the race between our clock
+      // check and its atomic write. A stale verifier must not make a
+      // nonce persist past expiry. The claim itself runs under the
+      // deadline race (7.5 re-review N2): a hanging store is
+      // lookup_timeout, a throwing one is lookup_failed, and any
+      // resolution outside the NonceClaimResult union is a contract
+      // violation treated as lookup_failed — fail closed.
+      const store = opts.nonceStore;
+      const claim = await raceDeadline(
+        () => store.claim(payload.nonce, wallet, payload.expiresAt),
+        timeoutMs,
+        opts.signal,
+      );
+      if (claim.kind === 'timeout') {
+        return finish('unknown', { failures: ['lookup_timeout'] });
+      }
+      if (claim.kind === 'value' && claim.value === 'replay') {
+        return finish('invalid', { failures: ['replay_detected'] });
+      }
+      if (claim.kind === 'value' && claim.value === 'expired') {
+        return finish('expired', { failures: ['expired'] });
+      }
+      if (claim.kind !== 'value' || claim.value !== 'claimed') {
         return finish('unknown', { failures: ['lookup_failed'] });
       }
     }
-    if (expiresMs <= now().getTime()) {
+    if (expiresMs <= safeNow().getTime()) {
       return finish('expired', { failures: ['expired'] });
     }
     return finish('verified', {

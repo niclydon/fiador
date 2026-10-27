@@ -49,6 +49,36 @@ revealing who it is. An attestation can narrow this further with
 `humanIdDisclosure: 'none'`. There is no setting that publishes the
 raw value.
 
+## Nonce stores (replay protection)
+
+`verifyAttestation` accepts a `nonceStore` to enforce one-time
+presentation of an attestation. The contract is a read-only
+`has(nonce, wallet)` replay check plus an atomic
+`claim(nonce, wallet, expiresAt)` taken only after registration
+succeeds. The claim must be ATOMIC — exactly one of any number of
+concurrent claims for a key may observe `'claimed'`. In a real
+backend that means a single conditional write (an
+`INSERT ... ON CONFLICT DO NOTHING`, a `SET NX`, a conditional
+update whose affected-row count is the answer); a check-then-set
+across two round-trips is a race, not a claim. The package ships
+`InMemoryNonceStore`, whose claim is atomic by construction (its
+check-and-set runs in one synchronous pass), and the test suite
+exercises it — alongside an async store double modelling a
+conforming backend — under concurrent double-presentation. Treat
+that conformance test as the executable definition of the
+contract when writing a production store.
+
+Because the claim is taken only at the terminal step, transient
+or not-yet outcomes (a lookup failure, an unregistered wallet, an
+expired document) never burn a nonce: the presentation can
+simply be retried. The contract also offers
+`release(nonce, wallet)` for compositions that claim earlier in
+their pipeline and must free a nonce on an `unknown` or
+`unregistered` outcome. Entries lapse at the attestation's own
+`expiresAt`, and the store checks its own clock at the write
+point, returning `'expired'` rather than recording a stale
+claim.
+
 ## Design notes
 
 - No private keys, ever. Verification is public-input only:
