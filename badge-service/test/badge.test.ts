@@ -337,6 +337,102 @@ describe('JSON status route', () => {
 });
 
 describe('cache behaviour (SPEC 4.6 proposals)', () => {
+  it('shares source resolution before verification for concurrent badge requests', async () => {
+    let resolutions = 0;
+    const base = await start({
+      resolveAttestation: async () => {
+        resolutions++;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return ATTESTATION;
+      },
+    });
+    const paths = Array.from({ length: 30 }, () => `${base}/v1/status/discord_application/app1`);
+    await Promise.all(paths.map((path) => fetch(path)));
+    expect(resolutions).toBe(1);
+    expect(fake.calls).toBe(1);
+  });
+
+  it('bounds the combined registry and core wait with a grey result', async () => {
+    const delayedVerifier: Verifier = {
+      ...fake,
+      resolveStatus: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return resultFor('verified');
+      },
+    };
+    const base = await start({
+      verifier: delayedVerifier,
+      resolveAttestation: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return ATTESTATION;
+      },
+      requestTimeoutMs: 50,
+    } as Partial<BadgeServiceDeps>);
+    const response = await get(base, '/v1/status/discord_application/app1');
+    const body = JSON.parse(response.text) as { status: string; failures: string[] };
+    expect(body.status).toBe('unknown');
+    expect(body.failures).toContain('lookup_timeout');
+    expect(response.res.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('renders a neutral no-store badge when source resolution exceeds the request deadline', async () => {
+    const base = await start({
+      resolveAttestation: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return ATTESTATION;
+      },
+      requestTimeoutMs: 30,
+    });
+    const image = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    expect(image.res.status).toBe(200);
+    expect(image.res.headers.get('cache-control')).toBe('no-store');
+    expect(image.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+    expect(image.text).not.toContain('Claim unconfirmed');
+  });
+
+  it('caps simultaneous source resolutions across distinct subjects', async () => {
+    let active = 0;
+    let peak = 0;
+    const base = await start({
+      maxConcurrentLookups: 3,
+      resolveAttestation: async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active--;
+        return ATTESTATION;
+      },
+    });
+    await Promise.all(Array.from({ length: 12 }, (_, id) =>
+      get(base, `/v1/status/discord_application/app${id}`)));
+    expect(peak).toBe(3);
+  });
+
+  it('lets a later caller complete a shared check after an earlier caller times out', async () => {
+    let notifyStarted!: () => void;
+    let finishCore!: () => void;
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const coreGate = new Promise<void>((resolve) => { finishCore = resolve; });
+    const delayedVerifier: Verifier = {
+      ...fake,
+      resolveStatus: async () => {
+        notifyStarted();
+        await coreGate;
+        return resultFor('verified');
+      },
+    };
+    const base = await start({ verifier: delayedVerifier, requestTimeoutMs: 250 });
+    const first = get(base, '/v1/status/discord_application/app1');
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const second = get(base, '/v1/status/discord_application/app1');
+    const early = await first;
+    finishCore();
+    const later = await second;
+    expect((JSON.parse(early.text) as { status: string }).status).toBe('unknown');
+    expect((JSON.parse(later.text) as { status: string }).status).toBe('verified');
+  });
+
   it('reports a registry failure as unknown without claiming AgentBook is down', async () => {
     const base = await start({
       verifier: createVerifier({ reader: { lookupHuman: async () => null } }),
@@ -497,6 +593,8 @@ describe('failure behaviour, abuse posture, and misc routes', () => {
     expect(text).toContain('/badge/discord_application/example.svg?theme=light');
     expect(text).toContain('/badge/discord_application/example.svg?theme=auto');
     expect(text.toLowerCase()).not.toContain('identity verified');
+    expect(text).toContain('Grey does not\nalways mean a claim failed');
+    expect(text).toContain('A valid operator claim stays grey on a\nDiscord application badge');
   });
 
   it('smoke: every route answers on one booted server', async () => {

@@ -45,7 +45,45 @@ afterEach(async () => {
 });
 
 describe('canonical registry source', () => {
+  it('shares concurrent fetches and refreshes the registry after 300 seconds', async () => {
+    let nowMs = 0;
+    let current = document([entry]);
+    const fetchJson = vi.fn(async (url: string) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return url === REGISTRY_URL ? current : ATTESTATION;
+    });
+    const resolve = createRegistryResolver({ url: REGISTRY_URL, fetchJson, now: () => nowMs });
+    const subject = { type: 'discord_application', id: APPLICATION_ID };
+    const results = await Promise.all(Array.from({ length: 30 }, () => resolve(subject)));
+    expect(results.every((value) => value === ATTESTATION)).toBe(true);
+    expect(fetchJson.mock.calls.map(([url]) => url)).toEqual([REGISTRY_URL, ATTESTATION_URL]);
+    await resolve(subject);
+    expect(fetchJson).toHaveBeenCalledTimes(2);
+    nowMs = 300_001;
+    current = document([]);
+    expect(await resolve(subject)).toBeNull();
+    expect(fetchJson.mock.calls.map(([url]) => url)).toEqual([REGISTRY_URL, ATTESTATION_URL, REGISTRY_URL]);
+  });
+
+  it('refreshes an attestation at the same URL after its own 300-second window', async () => {
+    let nowMs = 0;
+    let currentAttestation = ATTESTATION;
+    const fetchJson = vi.fn(async (url: string) =>
+      url === REGISTRY_URL ? document([entry]) : currentAttestation);
+    const resolve = createRegistryResolver({ url: REGISTRY_URL, fetchJson, now: () => nowMs });
+    const subject = { type: 'discord_application', id: APPLICATION_ID };
+    expect(await resolve(subject)).toBe(ATTESTATION);
+    currentAttestation = { ...ATTESTATION, signature: '0x01' };
+    expect(await resolve(subject)).toBe(ATTESTATION);
+    nowMs = 300_000;
+    expect(await resolve(subject)).toBe(currentAttestation);
+    expect(fetchJson.mock.calls.map(([url]) => url)).toEqual([
+      REGISTRY_URL, ATTESTATION_URL, REGISTRY_URL, ATTESTATION_URL,
+    ]);
+  });
+
   it('reads entries[] and observes removal and revocation without a restart', async () => {
+    let nowMs = 0;
     const dir = await mkdtemp(join(tmpdir(), 'fiador-badge-registry-'));
     dirs.push(dir);
     const file = join(dir, 'registry.json');
@@ -53,13 +91,16 @@ describe('canonical registry source', () => {
       expect(url).toBe(ATTESTATION_URL);
       return ATTESTATION;
     });
-    const resolve = createRegistryResolver({ file, fetchJson });
+    const resolve = createRegistryResolver({ file, fetchJson, now: () => nowMs });
     const subject = { type: 'discord_application', id: APPLICATION_ID };
     await writeFile(file, JSON.stringify(document([entry])));
     expect(await resolve(subject)).toEqual(ATTESTATION);
     await writeFile(file, JSON.stringify(document([])));
+    expect(await resolve(subject)).toEqual(ATTESTATION); // source window remains valid
+    nowMs = 300_001;
     expect(await resolve(subject)).toBeNull();
     await writeFile(file, JSON.stringify(document([{ ...entry, status: 'revoked' }])));
+    nowMs = 600_002;
     expect(await resolve(subject)).toBeNull();
     expect(fetchJson).toHaveBeenCalledTimes(1);
   });

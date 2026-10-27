@@ -148,6 +148,7 @@ as fallbacks.
 | `CACHE_TTL_VERIFIED_MS`, `CACHE_TTL_NEGATIVE_MS`, `STALE_ON_ERROR_MS` | cache overrides |
 | `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS` | rate limit overrides |
 | `RATE_LIMIT_TRUSTED_PROXIES` | comma-separated exact IPs of reverse proxies that append `X-Forwarded-For`; unset means forwarded headers are ignored |
+| `BADGE_REQUEST_TIMEOUT_MS` | combined source and verification deadline, capped at 5000 ms |
 
 No secret is required to run this service at all. It holds no
 signing keys and can never create one: it verifies signatures, it
@@ -157,7 +158,9 @@ in-memory cache; a restart costs one re-check per subject.
 ## Registry shape
 
 The canonical source is the public `registry.json` format, read
-from `REGISTRY_FILE` or fetched from `REGISTRY_URL` on each request.
+from `REGISTRY_FILE` or fetched from `REGISTRY_URL`. The registry
+and each attestation URL are cached for at most 300 seconds; a
+refresh checks for changed, removed, or revoked entries.
 An entry supplies an HTTPS attestation URL:
 
 ```json
@@ -205,18 +208,25 @@ quietly-fresh-looking stale verified badge is the one failure
 this service must never have.
 
 Discord application responses use `no-store` at the HTTP layer.
-The registry entry and attestation are refreshed for each request
-before consulting the server's result cache; changing or removing
-either invalidates the cached result. Address responses may be
+Each request compares the current source snapshot with the result
+cache. Concurrent requests share one source fetch, and a changed
+or removed entry invalidates the cached result at the next source
+refresh, within 300 seconds. Outbound source work and core checks
+share a concurrency limit. Address responses may be
 cached downstream for only the unused portion of their server TTL,
 so the two layers cannot add up to more than five minutes. The
 `stale-while-revalidate` extension is omitted for the same reason.
+
+The combined source and verification work has a five-second
+response deadline. A request that exceeds it returns `unknown`
+with `lookup_timeout` in JSON, or a grey `no-store` badge. A timed
+out caller does not cancel a shared check needed by another caller.
 
 Abuse posture: per-IP rate limit (default 120 req/min) on the
 badge and status routes; over-limit returns 429 on the JSON route
 and the unverified badge with `no-store` on badge routes, so an
 embed never breaks a page layout because of limiting. A global
-concurrency cap bounds outbound core lookups.
+concurrency cap bounds outbound source fetches and core lookups.
 Behind a reverse proxy, configure `RATE_LIMIT_TRUSTED_PROXIES` with
 the proxy's exact source IP. The service then uses the rightmost
 address that proxy appended to `X-Forwarded-For`; it ignores

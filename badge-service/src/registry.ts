@@ -9,6 +9,7 @@ export interface RegistrySource {
   file?: string;
   url?: string;
   fetchJson?: FetchJson;
+  now?: () => number;
 }
 
 interface RegistryEntry {
@@ -44,26 +45,73 @@ function canonicalEntries(value: unknown): RegistryEntry[] | null {
   });
 }
 
-/** Resolve against the current file or URL on every request. The
- * service's result cache is keyed by the returned attestation, so
- * registry removal or attestation replacement cannot reuse it. */
+const SOURCE_TTL_MS = 300_000;
+
+/** Registry and attestation data share one bounded 300-second source
+ * window. Single flights prevent a burst of badge requests from
+ * multiplying registry and attestation fetches. */
 export function createRegistryResolver(source: RegistrySource): (subject: Subject) => Promise<SignedAttestation | null> {
   if (source.file && source.url) throw new Error('Choose either REGISTRY_FILE or REGISTRY_URL.');
   const fetchJson = source.fetchJson ?? guardedFetchJson;
+  const now = source.now ?? Date.now;
+  type RegistrySnapshot = { document: Record<string, unknown>; entries: RegistryEntry[] | null };
+  let registryCache: { value: RegistrySnapshot; loadedAtMs: number } | undefined;
+  let registryFlight: Promise<RegistrySnapshot> | undefined;
+  const attestationCache = new Map<string, { value: SignedAttestation; loadedAtMs: number }>();
+  const attestationFlights = new Map<string, Promise<SignedAttestation>>();
+
+  async function loadRegistry(): Promise<RegistrySnapshot> {
+    if (registryCache && now() - registryCache.loadedAtMs < SOURCE_TTL_MS) return registryCache.value;
+    if (registryFlight) return registryFlight;
+    const flight = (async () => {
+      const document = source.file
+        ? JSON.parse(await readFile(source.file, 'utf8')) as unknown
+        : await fetchJson(source.url!);
+      const entries = canonicalEntries(document);
+      if (!record(document)) throw new Error('Invalid registry document.');
+      const snapshot = { document, entries };
+      registryCache = { value: snapshot, loadedAtMs: now() };
+      for (const [url, cached] of attestationCache) {
+        if (now() - cached.loadedAtMs >= SOURCE_TTL_MS) attestationCache.delete(url);
+      }
+      return snapshot;
+    })();
+    registryFlight = flight;
+    try {
+      return await flight;
+    } finally {
+      if (registryFlight === flight) registryFlight = undefined;
+    }
+  }
+
+  async function loadAttestation(url: string): Promise<SignedAttestation> {
+    const cached = attestationCache.get(url);
+    if (cached && now() - cached.loadedAtMs < SOURCE_TTL_MS) return cached.value;
+    const pending = attestationFlights.get(url);
+    if (pending) return pending;
+    const flight = (async () => {
+      const value = await fetchJson(url) as SignedAttestation;
+      attestationCache.set(url, { value, loadedAtMs: now() });
+      return value;
+    })();
+    attestationFlights.set(url, flight);
+    try {
+      return await flight;
+    } finally {
+      if (attestationFlights.get(url) === flight) attestationFlights.delete(url);
+    }
+  }
+
   return async (subject) => {
     if (subject.type !== 'discord_application' || (!source.file && !source.url)) return null;
-    const registry = source.file
-      ? JSON.parse(await readFile(source.file, 'utf8')) as unknown
-      : await fetchJson(source.url!);
-    const entries = canonicalEntries(registry);
+    const { document: registry, entries } = await loadRegistry();
     if (entries) {
       const entry = entries.find((candidate) => candidate.discord_application_id === subject.id);
       if (!entry || entry.status === 'revoked') return null;
-      return await fetchJson(entry.attestation_url) as SignedAttestation;
+      return await loadAttestation(entry.attestation_url);
     }
     // Compatibility with self-hosted inline maps used by the first
     // badge-service draft. The canonical public registry uses entries[].
-    if (!record(registry)) throw new Error('Invalid registry document.');
     return (registry[`${subject.type}:${subject.id}`] ?? null) as SignedAttestation | null;
   };
 }

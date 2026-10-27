@@ -16,6 +16,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { isIP } from 'node:net';
 import {
   toPublicVerifyResult,
+  truncateAddress,
+  type EvmAddress,
   type SignedAttestation,
   type VerificationStatus,
   type VerifyResult,
@@ -44,6 +46,8 @@ export interface BadgeServiceDeps {
   /** Exact IPs of reverse proxies that append X-Forwarded-For. */
   trustedProxyIps?: readonly string[];
   maxConcurrentLookups?: number; // outbound core-call cap, default 10
+  requestTimeoutMs?: number; // total source + core deadline, capped at 5000
+  agentBookContract?: EvmAddress; // timeout evidence, matching the verifier's contract
 }
 
 interface CacheEntry {
@@ -53,6 +57,8 @@ interface CacheEntry {
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const ZERO_ADDRESS: EvmAddress = '0x0000000000000000000000000000000000000000';
+const AGENTBOOK_CONTRACT: EvmAddress = '0xA23aB2712eA7BBa896930544C7d6636a96b944dA';
 
 export function badgeUrls(base: string, subjectType: string, subjectId: string) {
   const path = `${base.replace(/\/$/, '')}/badge/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`;
@@ -91,9 +97,13 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
   const rateMax = deps.rateLimitMax ?? 120;
   const rateWindow = deps.rateLimitWindowMs ?? 60_000;
   const maxConcurrent = deps.maxConcurrentLookups ?? 10;
+  const requestedTimeoutMs = deps.requestTimeoutMs ?? 5000;
+  const requestTimeoutMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+    ? Math.min(requestedTimeoutMs, 5000) : 5000;
 
   const cache = new Map<string, CacheEntry>();
   const inFlight = new Map<string, Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }>>();
+  const sourceInFlight = new Map<string, Promise<{ attestation: SignedAttestation | null; failed: boolean }>>();
   const rateWindows = new Map<string, number[]>();
   let activeLookups = 0;
   const lookupQueue: Array<() => void> = [];
@@ -119,10 +129,16 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
   }
 
   async function callCore(subjectType: string, subjectId: string, attestation: SignedAttestation | null, sourceFailed: boolean): Promise<VerifyResult> {
+    // The flight can serve more than one caller. Its cancellation must
+    // not belong to the first caller, whose response deadline may
+    // expire while another caller still has time left.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
     await acquireLookup();
     try {
+      if (controller.signal.aborted) throw new Error('core lookup deadline exceeded');
       if (subjectType === 'address') {
-        return await deps.verifier.resolveStatus({ kind: 'address', address: subjectId });
+        return await deps.verifier.resolveStatus({ kind: 'address', address: subjectId }, { signal: controller.signal });
       }
       return await deps.verifier.resolveStatus({
         kind: 'attested_subject',
@@ -131,27 +147,47 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
           if (sourceFailed) throw new Error('attestation source unavailable');
           return attestation;
         },
-      });
+      }, { signal: controller.signal });
     } finally {
+      clearTimeout(timer);
       releaseLookup();
+    }
+  }
+
+  async function resolveSource(key: string, subjectType: string, subjectId: string): Promise<{ attestation: SignedAttestation | null; failed: boolean }> {
+    const pending = sourceInFlight.get(key);
+    if (pending) return pending;
+    const flight = (async () => {
+      await acquireLookup();
+      try {
+        const attestation = await (deps.resolveAttestation ?? (async () => null))({ type: subjectType, id: subjectId });
+        return { attestation, failed: false };
+      } catch {
+        return { attestation: null, failed: true };
+      } finally {
+        releaseLookup();
+      }
+    })();
+    sourceInFlight.set(key, flight);
+    try {
+      return await flight;
+    } finally {
+      if (sourceInFlight.get(key) === flight) sourceInFlight.delete(key);
     }
   }
 
   async function resolveResult(
     subjectType: string,
     subjectId: string,
+    signal: AbortSignal,
   ): Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }> {
     const key = subjectType === 'address' ? `address:${subjectId.toLowerCase()}` : `${subjectType}:${subjectId}`;
     const nowMs = now().getTime();
-    let attestation: SignedAttestation | null = null;
-    let sourceFailed = false;
-    if (subjectType !== 'address') {
-      try {
-        attestation = await (deps.resolveAttestation ?? (async () => null))({ type: subjectType, id: subjectId });
-      } catch {
-        sourceFailed = true;
-      }
-    }
+    const source = subjectType === 'address'
+      ? { attestation: null, failed: false }
+      : await resolveSource(key, subjectType, subjectId);
+    if (signal.aborted) throw new Error('request deadline exceeded');
+    const { attestation, failed: sourceFailed } = source;
     // Read the source before using the result cache. A removed or
     // replaced registry entry must not inherit the old verified result.
     const sourceFingerprint = subjectType === 'address'
@@ -196,6 +232,38 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
       return await flight;
     } finally {
       inFlight.delete(flightKey);
+    }
+  }
+
+  function timeoutResult(subjectType: string, subjectId: string): VerifyResult {
+    const address = subjectType === 'address' ? subjectId as EvmAddress : ZERO_ADDRESS;
+    return {
+      status: 'unknown',
+      address,
+      addressTruncated: truncateAddress(address),
+      humanHash: null,
+      failures: ['lookup_timeout'],
+      evidence: {
+        checkedAt: now().toISOString(),
+        source: 'live',
+        agentBook: { network: 'eip155:480', contract: deps.agentBookContract ?? AGENTBOOK_CONTRACT },
+      },
+    };
+  }
+
+  async function resolveWithDeadline(subjectType: string, subjectId: string): Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve({ result: timeoutResult(subjectType, subjectId), stale: false, storedAtMs: now().getTime() });
+      }, requestTimeoutMs);
+    });
+    try {
+      return await Promise.race([resolveResult(subjectType, subjectId, controller.signal), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -323,7 +391,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
           sendJson(res, 400, { error: 'malformed address subject' }, { 'cache-control': 'no-store' });
           return;
         }
-        const { result, stale, storedAtMs } = await resolveResult(subjectType, subjectId);
+        const { result, stale, storedAtMs } = await resolveWithDeadline(subjectType, subjectId);
         const pub = toPublicVerifyResult(result);
         if (stale) pub.evidence = { ...pub.evidence, source: 'cache' };
         const body = {
@@ -372,7 +440,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server {
           });
           return;
         }
-        const { result, stale, storedAtMs } = await resolveResult(subjectType, subjectId);
+        const { result, stale, storedAtMs } = await resolveWithDeadline(subjectType, subjectId);
         const claimUnconfirmed = subjectType === 'discord_application' && result.status === 'verified';
         sendBadge(res, {
           status: claimUnconfirmed ? 'unknown' : result.status, stale, themeParam, variant, format,

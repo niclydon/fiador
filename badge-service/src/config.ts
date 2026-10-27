@@ -30,6 +30,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
   }
 
   const deps: BadgeServiceDeps = { verifier: createVerifier(coreOptions) };
+  if (contract) deps.agentBookContract = contract as EvmAddress;
   if (env.BADGE_PUBLIC_BASE_URL) deps.publicBaseUrl = env.BADGE_PUBLIC_BASE_URL;
 
   const registryFile = env.VERIFY_REGISTRY_FILE ?? env.REGISTRY_FILE;
@@ -52,6 +53,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
   assign('staleOnErrorMs', num(env.STALE_ON_ERROR_MS));
   assign('rateLimitMax', num(env.RATE_LIMIT_MAX));
   assign('rateLimitWindowMs', num(env.RATE_LIMIT_WINDOW_MS));
+  assign('requestTimeoutMs', num(env.BADGE_REQUEST_TIMEOUT_MS));
   if (env.RATE_LIMIT_TRUSTED_PROXIES) {
     deps.trustedProxyIps = env.RATE_LIMIT_TRUSTED_PROXIES.split(',').map((ip) => ip.trim()).filter(Boolean);
   }
