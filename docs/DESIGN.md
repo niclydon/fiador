@@ -1118,7 +1118,7 @@ tested, not a command available from `main`.
   5 s timeout; 64 KiB body cap; JSON content type required; no
   credentials in URL.
 - `/attest` and `/verify-agent` share an in-memory limit of five
-  attempts per user per guild per ten minutes on current `main`;
+  attempts per user per guild per ten minutes in the current bot;
   the shared budget and reset are covered by local tests.
   Neither the registry fetch nor the World Chain RPC lookup is
   cached at the bot boundary, so repeated checks can still
@@ -1127,14 +1127,13 @@ tested, not a command available from `main`.
   remain open before broad guild use (§10).
 - Token hygiene: token from env, never logged, startup log prints
   the bot's own user ID and guild count only. Intents requested:
-  Guilds + GuildMembers, with no Message Content intent. Current
-  `main` reads no messages. The draft witness fetches one exact
-  message by ID using the verifier's own token; it does not scan
-  chat or request the target bot token.
+  Guilds + GuildMembers, with no Message Content intent. The limited
+  witness fetches one exact message by ID using the verifier's own token;
+  it does not scan chat or request the target bot token.
 - Least privilege documented for self-hosters: the invite URL
   they generate for their own instance (adding their bot
   application to their guild) does not request Manage Roles for
-  the current check-and-log bot. The draft witness needs the
+  the current check-and-log bot. The limited witness needs the
   verifier's Manage Guild permission to read integrations, plus
   View Channel and Read Message History for one message. It does
   not need the target bot token. There is no project-issued
@@ -1162,7 +1161,7 @@ tested, not a command available from `main`.
 - Future role automation requires an independently reviewed way
   to prove that the signing wallet has operator authority over
   the exact Discord application and bot user without disclosing
-  the target bot token to Fiador. The draft bot-response witness
+  the target bot token to Fiador. The limited bot-response witness
   does not meet that condition. Any future policy for granting,
   revoking, expiry, or lookup outages needs its own decision and
   live verification before role writes are enabled.
@@ -1698,9 +1697,9 @@ Steps:
      (6 h default, or a shortened test interval recorded as such)
      and record the `check_log` rows for the interval in
      `docs/verification.md`.
-   - If draft PR #16 lands, separately run its wallet-signature
-     and bot-response witness with the dedicated verifier in a
-     private test channel. Record the exact message check and
+   - Separately run the wallet-signature and bot-response witness
+     with the dedicated verifier in a private test channel. Record
+     the exact message check and
      confirm the witness changes no binding, public bot verdict,
      or role. A local fixture pass alone does not close this live
      test or the future application-control gate (§5.5).
@@ -2095,8 +2094,8 @@ dispute.
 5. Verifier bot (§5) with guarded claim checks, legacy-binding
    rechecks, audit warnings, and no role writes; badge service
    (§6.3, W0 spec §4) alongside it. The limited bot-response
-   witness in draft PR #16 is a separate test step, not an
-   application-control gate or authorization for role automation.
+   witness is a separate test step, not an application-control gate
+   or authorization for role automation.
 5a. Link preview endpoint (§6.4) on the badge-service
    operational family: id resolution against the registry,
    crawl-time verification through the package, dynamic OG

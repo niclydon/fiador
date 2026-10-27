@@ -5,7 +5,8 @@
 // executed directly (npm start). Token hygiene (DESIGN §5.4): the token
 // comes from the environment, is never logged, and the startup log
 // prints only the bot's own user ID and guild count. Intents are Guilds
-// + GuildMembers: no message-content intent; this bot reads no messages.
+// + GuildMembers: no message-content intent. For an explicit challenge it
+// fetches exactly one mentioned message by ID through Discord REST.
 
 import { pathToFileURL } from 'node:url';
 import {
@@ -25,15 +26,18 @@ import {
   handleAttest,
   handleFiadorSetup,
   handleFiadorStatus,
+  handleFiadorControlStart,
+  handleFiadorControlComplete,
   handleVerifyAgent,
   AttemptRateLimiter,
   type CommandContext,
   type CommandDeps,
   type ReplyPayload,
 } from './commands.js';
+import { AppControlService, createWalletSignatureVerifier } from './appControl.js';
 import { loadConfig } from './config.js';
 import type { DiscordAdapter } from './discordAdapter.js';
-import { scheduleGuildSync, startCheckLogPruning } from './maintenance.js';
+import { scheduleGuildSync, startCheckLogPruning, startControlChallengePruning } from './maintenance.js';
 import { RoleSyncEngine, warnLegacyRoleAudit } from './roles.js';
 import { SqliteStore, type Store } from './store.js';
 import { VerifyService, type VerifierLike } from './verifyService.js';
@@ -52,11 +56,27 @@ export class DiscordJsAdapter implements DiscordAdapter {
       await (channel as TextChannel).send(line).catch(() => undefined);
     }
   }
+
+  verifierBotUserId(): string | null { return this.client.user?.id ?? null; }
+
+  async getGuildIntegrations(guildId: string): Promise<unknown> {
+    return this.client.rest.get(Routes.guildIntegrations(guildId));
+  }
+
+  async getChannelGuildId(channelId: string): Promise<string | null> {
+    const channel = await this.client.rest.get(Routes.channel(channelId)) as { guild_id?: unknown };
+    return typeof channel.guild_id === 'string' ? channel.guild_id : null;
+  }
+
+  async getChannelMessage(channelId: string, messageId: string): Promise<unknown> {
+    return this.client.rest.get(Routes.channelMessage(channelId, messageId));
+  }
 }
 
 export function toContext(interaction: ChatInputCommandInteraction): CommandContext {
   return {
     guildId: interaction.guildId ?? '',
+    channelId: interaction.channelId,
     userId: interaction.user.id,
     hasManageGuild:
       interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false,
@@ -77,10 +97,16 @@ async function dispatch(interaction: ChatInputCommandInteraction, deps: CommandD
   let reply: ReplyPayload;
   if (interaction.commandName === 'fiador') {
     const sub = interaction.options.getSubcommand();
-    reply =
-      sub === 'setup'
+    if (sub === 'control-start' || sub === 'control-complete') {
+      await interaction.deferReply({ ephemeral: true });
+      reply = sub === 'control-start'
+        ? await handleFiadorControlStart(toContext(interaction), deps)
+        : await handleFiadorControlComplete(toContext(interaction), deps);
+    } else {
+      reply = sub === 'setup'
         ? await handleFiadorSetup(toContext(interaction), deps)
         : await handleFiadorStatus(toContext(interaction), deps);
+    }
   } else if (interaction.commandName === 'verify-agent') {
     reply = await handleVerifyAgent(toContext(interaction), deps);
   } else if (interaction.commandName === 'attest') {
@@ -88,17 +114,19 @@ async function dispatch(interaction: ChatInputCommandInteraction, deps: CommandD
   } else {
     return;
   }
-  await interaction.reply({
+  const response = {
     content: reply.content,
     embeds: reply.embeds,
-    ephemeral: reply.ephemeral,
-  });
+  };
+  if (interaction.deferred) await interaction.editReply(response);
+  else await interaction.reply({ ...response, ephemeral: reply.ephemeral });
 }
 
 export async function main(env: Record<string, string | undefined> = process.env): Promise<void> {
   const config = loadConfig(env);
   const store = new SqliteStore(config.dbPath);
   startCheckLogPruning(store);
+  startControlChallengePruning(store);
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
   });
@@ -111,6 +139,10 @@ export async function main(env: Record<string, string | undefined> = process.env
     store,
     defaultRegistryUrl: config.registryUrl,
   });
+  const appControl = new AppControlService({
+    service, store, adapter,
+    verifyWalletSignature: createWalletSignatureVerifier(config.rpcUrl),
+  });
   const engine = new RoleSyncEngine({ store, service, adapter });
   const deps: CommandDeps = {
     service,
@@ -119,6 +151,7 @@ export async function main(env: Record<string, string | undefined> = process.env
     sync: engine,
     rateLimiter: new AttemptRateLimiter(),
     defaultSyncIntervalMinutes: config.syncIntervalMinutes,
+    appControl,
   };
 
   const rest = new REST().setToken(config.token);
@@ -136,6 +169,8 @@ export async function main(env: Record<string, string | undefined> = process.env
         await interaction
           .reply({ content: 'Something went wrong running that command.', ephemeral: true })
           .catch(() => undefined);
+      } else if (interaction.deferred && !interaction.replied) {
+        await interaction.editReply('Something went wrong running that command.').catch(() => undefined);
       }
     });
   });

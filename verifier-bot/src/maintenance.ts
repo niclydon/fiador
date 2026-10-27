@@ -1,6 +1,7 @@
 import type { Store } from './store.js';
 
 const CHECK_LOG_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+const CONTROL_CHALLENGE_RETENTION_MS = 24 * 60 * 60 * 1000;
 const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const GUILD_DISCOVERY_MS = 30 * 1000;
 const MAX_CONCURRENT_GUILD_SYNCS = 4;
@@ -18,6 +19,25 @@ export function startCheckLogPruning(store: Store): NodeJS.Timeout {
       pruneExpiredChecks(store);
     } catch (error) {
       console.error(`fiador: check log pruning failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, PRUNE_INTERVAL_MS);
+  timer.unref();
+  return timer;
+}
+
+/** Remove expired witness rows after 24 hours, without affecting live challenges. */
+export function pruneExpiredControlChallenges(store: Store, nowMs = Date.now()): number {
+  return store.pruneControlChallenges(new Date(nowMs - CONTROL_CHALLENGE_RETENTION_MS).toISOString());
+}
+
+/** Prune witness rows at startup and daily, independent of guild syncs. */
+export function startControlChallengePruning(store: Store): NodeJS.Timeout {
+  pruneExpiredControlChallenges(store);
+  const timer = setInterval(() => {
+    try {
+      pruneExpiredControlChallenges(store);
+    } catch (error) {
+      console.error(`fiador: witness pruning failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, PRUNE_INTERVAL_MS);
   timer.unref();

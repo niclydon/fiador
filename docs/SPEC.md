@@ -100,14 +100,14 @@ reliable custom attestation URL. Two mechanisms are in scope:
   is controlled by the signer.
 - verifier-bot/: a reference Discord bot any guild can self-host (or
   a hosted instance can be considered later). Slash commands:
-  `/fiador status` and `/fiador setup`, `/verify-agent`
-  (application ID), and `/attest` (presented claim). The bot
+  `/fiador status`, `/fiador setup`, `/fiador control-start`,
+  `/fiador control-complete`, `/verify-agent` (application ID),
+  and `/attest` (presented claim). The bot
   checks and logs claims. It rechecks legacy bindings on a timer
   but makes no role changes for any status, including a passing
   claim, expiry, or registration failure. Admins audit existing
-  role holders manually. Draft PR #16 adds a limited wallet and
-  bot-response witness; it still proves no operator authority
-  and changes no role.
+  role holders manually. A limited wallet and bot-response witness
+  records a response but proves no operator authority and changes no role.
 - verify-page/: a static page that does the whole check client-side
   (signature recovery plus a World Chain RPC read) so a human can
   verify with no server of ours in the loop
@@ -202,8 +202,8 @@ community seat trial:
    Nova's operator claim but creates no binding or role grant;
    legacy binding rechecks log expiry without a role revocation.
    Observe one sync interval and the startup role-audit warning.
-   If draft PR #16 lands, separately test its limited witness
-   and confirm it changes no binding or role. Record live evidence
+   Separately test its limited witness and confirm it changes no
+   binding or role. Record live evidence
    before describing the guild test as complete.
 4. Only then: pitch the community guild's admins an adoption
    decision, with the working demo in Nic's guild as the evidence.

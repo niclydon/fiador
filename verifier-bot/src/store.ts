@@ -36,6 +36,23 @@ export interface Binding {
   botUserId: string | null;
 }
 
+/** A one-use observation request, not proof that a wallet controls an app. */
+export interface ControlChallenge {
+  nonce: string;
+  guildId: string;
+  channelId: string;
+  verifierBotUserId: string;
+  applicationId: string;
+  botUserId: string;
+  wallet: `0x${string}`;
+  payloadHash: string;
+  attestationUrl: string;
+  issuedAt: string;
+  expiresAt: string;
+  consumedAt: string | null;
+  messageId: string | null;
+}
+
 export interface CheckLogEntry {
   id?: number;
   guildId: string;
@@ -56,6 +73,12 @@ export interface Store {
   listBindings(guildId: string): Binding[];
   upsertBinding(binding: Binding): void;
   removeBinding(guildId: string, applicationId: string): void;
+  saveControlChallenge(challenge: ControlChallenge): void;
+  getControlChallenge(nonce: string): ControlChallenge | null;
+  /** Atomically consume one still-live challenge. Returns false on replay/expiry. */
+  consumeControlChallenge(nonce: string, consumedAt: string, messageId: string): boolean;
+  /** Remove expired witness rows after their short operational retention window. */
+  pruneControlChallenges(expiredBeforeIso: string): number;
   appendCheckLog(entry: CheckLogEntry): void;
   getLatestCheck(guildId: string, applicationId: string): CheckLogEntry | null;
   listCheckLog(guildId: string, applicationId?: string): CheckLogEntry[];
@@ -96,6 +119,21 @@ CREATE TABLE IF NOT EXISTS check_log (
 );
 CREATE INDEX IF NOT EXISTS check_log_lookup
   ON check_log (guild_id, application_id, id DESC);
+CREATE TABLE IF NOT EXISTS control_challenge (
+  nonce TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  verifier_bot_user_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  bot_user_id TEXT NOT NULL,
+  wallet TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  attestation_url TEXT NOT NULL,
+  issued_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  message_id TEXT
+);
 `;
 
 interface GuildConfigDbRow {
@@ -115,6 +153,40 @@ interface BindingDbRow {
   bound_by: string;
   bound_at: string;
   bot_user_id: string | null;
+}
+
+interface ControlChallengeDbRow {
+  nonce: string;
+  guild_id: string;
+  channel_id: string;
+  verifier_bot_user_id: string;
+  application_id: string;
+  bot_user_id: string;
+  wallet: `0x${string}`;
+  payload_hash: string;
+  attestation_url: string;
+  issued_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+  message_id: string | null;
+}
+
+function toControlChallenge(row: ControlChallengeDbRow): ControlChallenge {
+  return {
+    nonce: row.nonce,
+    guildId: row.guild_id,
+    channelId: row.channel_id,
+    verifierBotUserId: row.verifier_bot_user_id,
+    applicationId: row.application_id,
+    botUserId: row.bot_user_id,
+    wallet: row.wallet,
+    payloadHash: row.payload_hash,
+    attestationUrl: row.attestation_url,
+    issuedAt: row.issued_at,
+    expiresAt: row.expires_at,
+    consumedAt: row.consumed_at,
+    messageId: row.message_id,
+  };
 }
 
 interface CheckLogDbRow {
@@ -253,6 +325,38 @@ export class SqliteStore implements Store {
       .run(guildId, applicationId);
   }
 
+  saveControlChallenge(challenge: ControlChallenge): void {
+    this.db.prepare(
+      `INSERT INTO control_challenge
+       (nonce, guild_id, channel_id, verifier_bot_user_id, application_id, bot_user_id,
+        wallet, payload_hash, attestation_url, issued_at, expires_at, consumed_at, message_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+    ).run(
+      challenge.nonce, challenge.guildId, challenge.channelId, challenge.verifierBotUserId,
+      challenge.applicationId, challenge.botUserId, challenge.wallet, challenge.payloadHash,
+      challenge.attestationUrl, challenge.issuedAt, challenge.expiresAt,
+    );
+  }
+
+  getControlChallenge(nonce: string): ControlChallenge | null {
+    const row = this.db.prepare('SELECT * FROM control_challenge WHERE nonce = ?')
+      .get(nonce) as ControlChallengeDbRow | undefined;
+    return row ? toControlChallenge(row) : null;
+  }
+
+  consumeControlChallenge(nonce: string, consumedAt: string, messageId: string): boolean {
+    const changed = this.db.prepare(
+      `UPDATE control_challenge SET consumed_at = ?, message_id = ?
+       WHERE nonce = ? AND consumed_at IS NULL AND issued_at <= ? AND expires_at > ?`,
+    ).run(consumedAt, messageId, nonce, consumedAt, consumedAt);
+    return Number(changed.changes) === 1;
+  }
+
+  pruneControlChallenges(expiredBeforeIso: string): number {
+    return Number(this.db.prepare('DELETE FROM control_challenge WHERE expires_at < ?')
+      .run(expiredBeforeIso).changes);
+  }
+
   appendCheckLog(entry: CheckLogEntry): void {
     this.db
       .prepare(
@@ -311,6 +415,7 @@ export class SqliteStore implements Store {
 export class InMemoryStore implements Store {
   private readonly configs = new Map<string, GuildConfigRow>();
   private readonly bindings = new Map<string, Binding>();
+  private readonly controlChallenges = new Map<string, ControlChallenge>();
   private readonly checks: CheckLogEntry[] = [];
   private nextId = 1;
 
@@ -351,6 +456,34 @@ export class InMemoryStore implements Store {
 
   removeBinding(guildId: string, applicationId: string): void {
     this.bindings.delete(InMemoryStore.bindingKey(guildId, applicationId));
+  }
+
+  saveControlChallenge(challenge: ControlChallenge): void {
+    if (this.controlChallenges.has(challenge.nonce)) throw new Error('Challenge nonce already exists.');
+    this.controlChallenges.set(challenge.nonce, { ...challenge, consumedAt: null, messageId: null });
+  }
+
+  getControlChallenge(nonce: string): ControlChallenge | null {
+    const challenge = this.controlChallenges.get(nonce);
+    return challenge ? { ...challenge } : null;
+  }
+
+  consumeControlChallenge(nonce: string, consumedAt: string, messageId: string): boolean {
+    const challenge = this.controlChallenges.get(nonce);
+    if (!challenge || challenge.consumedAt || consumedAt < challenge.issuedAt || consumedAt >= challenge.expiresAt) return false;
+    this.controlChallenges.set(nonce, { ...challenge, consumedAt, messageId });
+    return true;
+  }
+
+  pruneControlChallenges(expiredBeforeIso: string): number {
+    let count = 0;
+    for (const [nonce, challenge] of this.controlChallenges) {
+      if (challenge.expiresAt < expiredBeforeIso) {
+        this.controlChallenges.delete(nonce);
+        count++;
+      }
+    }
+    return count;
   }
 
   appendCheckLog(entry: CheckLogEntry): void {

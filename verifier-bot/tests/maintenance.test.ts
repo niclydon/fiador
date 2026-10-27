@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { pruneExpiredChecks, scheduleGuildSync, startCheckLogPruning } from '../src/maintenance.js';
-import { InMemoryStore, SqliteStore, type CheckLogEntry, type Store } from '../src/store.js';
+import {
+  pruneExpiredChecks,
+  pruneExpiredControlChallenges,
+  scheduleGuildSync,
+  startCheckLogPruning,
+  startControlChallengePruning,
+} from '../src/maintenance.js';
+import { InMemoryStore, SqliteStore, type CheckLogEntry, type ControlChallenge, type Store } from '../src/store.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
@@ -16,6 +22,24 @@ function checkAt(checkedAt: number): CheckLogEntry {
     wallet: '0x1234567890123456789012345678901234567890',
     humanHash: 'a'.repeat(64),
     expiresAt: null,
+  };
+}
+
+function challengeAt(nonce: string, expiresAtMs: number): ControlChallenge {
+  return {
+    nonce,
+    guildId: 'guild-1',
+    channelId: 'channel-1',
+    verifierBotUserId: 'verifier-1',
+    applicationId: 'application-1',
+    botUserId: 'bot-1',
+    wallet: '0x1234567890123456789012345678901234567890',
+    payloadHash: 'a'.repeat(64),
+    attestationUrl: 'https://example.com/attestation.json',
+    issuedAt: new Date(expiresAtMs - 10 * MINUTE_MS).toISOString(),
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    consumedAt: null,
+    messageId: null,
   };
 }
 
@@ -58,6 +82,41 @@ describe('check log retention', () => {
     store.appendCheckLog(checkAt(NOW_MS - 89 * DAY_MS));
     await vi.advanceTimersByTimeAsync(2 * DAY_MS);
     expect(store.listCheckLog('guild-1')).toHaveLength(0);
+    clearInterval(timer);
+  });
+});
+
+describe('bot-response witness retention', () => {
+  for (const [name, create] of [
+    ['SQLite', () => new SqliteStore(':memory:')],
+    ['in-memory', () => new InMemoryStore()],
+  ] as const) {
+    it(`removes only witness rows expired more than 24 hours from ${name}`, () => {
+      const store: Store = create();
+      const cutoffMs = NOW_MS - DAY_MS;
+      store.saveControlChallenge(challengeAt('a'.repeat(64), cutoffMs - 1));
+      store.saveControlChallenge(challengeAt('b'.repeat(64), cutoffMs));
+      store.saveControlChallenge(challengeAt('c'.repeat(64), cutoffMs + 1));
+
+      expect(pruneExpiredControlChallenges(store, NOW_MS)).toBe(1);
+      expect(store.getControlChallenge('a'.repeat(64))).toBeNull();
+      expect(store.getControlChallenge('b'.repeat(64))).not.toBeNull();
+      expect(store.getControlChallenge('c'.repeat(64))).not.toBeNull();
+      store.close();
+    });
+  }
+
+  it('prunes at startup and daily without relying on a guild check', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+    const store = new InMemoryStore();
+    store.saveControlChallenge(challengeAt('a'.repeat(64), NOW_MS - DAY_MS - 1));
+    const timer = startControlChallengePruning(store);
+    expect(store.getControlChallenge('a'.repeat(64))).toBeNull();
+
+    store.saveControlChallenge(challengeAt('b'.repeat(64), NOW_MS - 23 * 60 * MINUTE_MS));
+    await vi.advanceTimersByTimeAsync(2 * DAY_MS);
+    expect(store.getControlChallenge('b'.repeat(64))).toBeNull();
     clearInterval(timer);
   });
 });
