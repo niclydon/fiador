@@ -155,7 +155,7 @@ not the headline.
   upholds it, is a small consumer-side check. Undecided, not
   hidden.
 - The demo (§9 of the design) still waits on what it always
-  waited on: the program wallet's registration tap, DNS and
+  waited on: the demo signing wallet's registration tap, DNS and
   hosting for fiador.org under the Vercel posture, and a live
   Discord run of the packaged bot — tonight's live proof ran
   on the upgraded fork bot, not on this package.
