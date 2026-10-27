@@ -532,6 +532,16 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       if (expected === undefined) {
         return fail(['signature_mismatch']);
       }
+      // Runtime callers can bypass the TypeScript input type. Reject
+      // malformed bytes before even checking chain identity; a
+      // permissive contract must not authenticate malformed input.
+      if (
+        typeof message !== 'string' ||
+        typeof signature !== 'string' ||
+        !/^0x(?:[0-9a-fA-F]{2})*$/.test(signature)
+      ) {
+        return fail(['signature_mismatch'], expected);
+      }
       let valid: boolean;
       try {
         valid = await erc1271Valid(expected, message, signature);

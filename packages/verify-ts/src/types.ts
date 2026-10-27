@@ -115,7 +115,7 @@ export type SignedMessageSignatureType = 'eoa' | 'erc1271';
 
 export interface VerifySignedMessageInput {
   message: string; // the exact caller-canonicalised message that was signed
-  signature: string; // 0x-prefixed EIP-191 signature over `message`
+  signature: string; // even-length 0x hex bytes; EOA path uses EIP-191
   signatureType: SignedMessageSignatureType;
   expectedAddress?: string; // optional claimed signer; when given, the
   // recovered or contract signer must equal it

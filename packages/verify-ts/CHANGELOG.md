@@ -13,7 +13,9 @@ silently switched), and returns its own small result —
 codes (`signature_mismatch`, `subject_mismatch`,
 `malformed_address`, `lookup_failed`, `lookup_timeout`). ERC-1271
 contract rejection is a mismatch; failed or timed-out RPC checks
-remain unchecked. It performs no AgentBook lookup and no
+remain unchecked. Malformed input is rejected before RPC, while
+contract signatures accept arbitrary even-length hex bytes. It
+performs no AgentBook lookup and no
 attestation semantics; registration composes through
 `verifyAddress`, and freshness and replay are the caller's
 protocol's concern. New signed-message fixture vector; test

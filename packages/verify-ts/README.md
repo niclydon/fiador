@@ -23,7 +23,8 @@ For ERC-1271, a non-magic result, contract revert, or empty return is
 `signature_mismatch`. An unavailable or wrong-chain RPC is
 `lookup_failed`; a timed-out check is `lookup_timeout`. Both RPC
 failure results leave `verified` false without claiming the signature
-was rejected.
+was rejected. A malformed message or signature is rejected before
+any RPC; contract signatures may be any even-length `0x` hex bytes.
 
 ```ts
 import { createVerifier, toPublicVerifyResult } from '@fiador/verify';

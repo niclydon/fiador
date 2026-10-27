@@ -14,6 +14,7 @@ import type {
   EvmAddress,
   SignedAttestation,
   VerifyResult,
+  VerifySignedMessageInput,
 } from '../src/index.js';
 import { buildVectors, type Vectors } from '../scripts/gen-fixtures.js';
 
@@ -557,16 +558,18 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
 
   async function with1271Rpc(
     ethCallResult: string,
-    check: (rpcUrl: string, ethCalls: () => number) => Promise<void>,
+    check: (rpcUrl: string, ethCalls: () => number, rpcCalls: () => number) => Promise<void>,
     chainId = '0x1e0',
     ethCallBehavior: { status?: number; delayMs?: number; revert?: boolean } = {},
   ) {
     let ethCalls = 0;
+    let rpcCalls = 0;
     const server = createServer((req, res) => {
       let body = '';
       req.on('data', (chunk) => (body += chunk));
       req.on('end', () => {
         const parsed = JSON.parse(body) as { method: string; id: number };
+        rpcCalls += 1;
         if (parsed.method === 'eth_call') ethCalls += 1;
         const reply = () => {
           if (parsed.method === 'eth_call' && ethCallBehavior.status !== undefined) {
@@ -604,7 +607,7 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
     const address = server.address();
     if (address === null || typeof address === 'string') throw new Error('no port');
     try {
-      await check(`http://127.0.0.1:${address.port}`, () => ethCalls);
+      await check(`http://127.0.0.1:${address.port}`, () => ethCalls, () => rpcCalls);
     } finally {
       server.close();
     }
@@ -728,6 +731,48 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
       expect(result.address).toBe(CONTRACT);
       expect(result.failures).toEqual([]);
       expect(ethCalls()).toBeGreaterThan(0);
+    });
+  });
+
+  it('ERC-1271: accepts a short, well-formed hex signature when the contract accepts it', async () => {
+    await with1271Rpc(`0x1626ba7e${'00'.repeat(28)}`, async (rpcUrl, ethCalls) => {
+      const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage({
+        message: SM.message,
+        signature: '0x11',
+        signatureType: 'erc1271',
+        expectedAddress: CONTRACT,
+      });
+      expect(result.verified).toBe(true);
+      expect(ethCalls()).toBe(1);
+    });
+  });
+
+  it('ERC-1271: malformed inputs fail before even the chain identity RPC', async () => {
+    await with1271Rpc(`0x1626ba7e${'00'.repeat(28)}`, async (rpcUrl, _ethCalls, rpcCalls) => {
+      const base = {
+        message: SM.message,
+        signature: '0x11',
+        signatureType: 'erc1271',
+        expectedAddress: CONTRACT,
+      };
+      const badInputs = [
+        { ...base, message: undefined },
+        { ...base, signature: 123 },
+        { ...base, signature: 'not-a-signature' },
+        { ...base, signature: '0xzz' },
+        { ...base, signature: '0x1' },
+      ];
+      for (const input of badInputs) {
+        const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage(
+          input as unknown as VerifySignedMessageInput,
+        );
+        expect(result).toEqual({
+          verified: false,
+          address: CONTRACT,
+          failures: ['signature_mismatch'],
+        });
+      }
+      expect(rpcCalls()).toBe(0);
     });
   });
 
