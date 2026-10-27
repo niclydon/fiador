@@ -605,7 +605,7 @@ describe('cache behaviour (SPEC 4.6 proposals)', () => {
     expect(fake.calls).toBe(1);
     expect(second.res.headers.get('x-checked-at')).toBe(first.res.headers.get('x-checked-at'));
     expect(second.text).toContain('checked 14:03 UTC');
-    nowRef.current = new Date(T0.getTime() + 301_000);
+    nowRef.current = new Date(T0.getTime() + 300_000);
     await get(base, '/badge/discord_application/app1.svg?theme=dark');
     expect(fake.calls).toBe(2);
   });
@@ -680,6 +680,50 @@ describe('failure behaviour, abuse posture, and misc routes', () => {
     expect(res.headers.get('x-checked-at')).toBeNull();
     expect(text).not.toContain('checked ');
     expect(text).not.toContain('data-checked-at');
+  });
+
+  it('stops reusing a verified badge after its original check expires under sustained rate limiting', async () => {
+    const base = await start({ rateLimitMax: 1, rateLimitWindowMs: 1_000_000 });
+    const path = `/badge/address/${ADDR}.svg?theme=dark`;
+    const first = await get(base, path, {}, { addressSubject: true });
+    expect(first.text).toContain(`stroke="${PILL_PALETTES.dark.verified.ring}"`);
+
+    nowRef.current = new Date(T0.getTime() + 299_000);
+    const stillFresh = await get(base, path, {}, { addressSubject: true });
+    expect(stillFresh.text).toBe(first.text);
+    expect(stillFresh.res.headers.get('cache-control')).toBe('no-store');
+
+    nowRef.current = new Date(T0.getTime() + 301_000);
+    const expired = await get(base, path, {}, { addressSubject: true });
+    expect(expired.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+    expect(expired.text).not.toContain(`stroke="${PILL_PALETTES.dark.verified.ring}"`);
+    expect(expired.text).not.toContain('data-checked-at');
+    expect(expired.res.headers.get('x-checked-at')).toBeNull();
+    expect(fake.calls).toBe(1);
+  });
+
+  it('keeps rate-limit PNG fallbacks separate by theme and variant', async () => {
+    const base = await start({ rateLimitMax: 0 });
+    const lightIcon = await getPng(base, '/badge/discord_application/app1.png?theme=light&variant=icon');
+    const darkPill = await getPng(base, '/badge/discord_application/app1.png?theme=dark&variant=pill');
+    const autoLight = await getPng(base, '/badge/discord_application/app1.png?theme=auto&variant=pill', {
+      'sec-ch-prefers-color-scheme': 'light',
+    });
+    const icon = PNG.sync.read(lightIcon.buf);
+    const pill = PNG.sync.read(darkPill.buf);
+    const autoPill = PNG.sync.read(autoLight.buf);
+    expect(icon.width).toBe(192);
+    expect(pill.width).toBeGreaterThan(192);
+    expect(autoPill.width).toBe(pill.width);
+    expect(lightIcon.res.headers.get('x-badge-theme')).toBe('light');
+    expect(darkPill.res.headers.get('x-badge-theme')).toBe('dark');
+    expect(autoLight.res.headers.get('x-badge-theme')).toBe('light');
+    expect(darkPill.res.headers.get('cache-control')).toBe('no-store');
+    expect(autoLight.res.headers.get('vary')).toBe('Sec-CH-Prefers-Color-Scheme');
+    expect(pixel(pill, Math.floor(pill.width / 2), 6)).toEqual(hexToRgb(PILL_PALETTES.dark.unverified.bg));
+    expect(pixel(autoPill, Math.floor(autoPill.width / 2), 6)).toEqual(hexToRgb(PILL_PALETTES.light.unverified.bg));
+    expect(lightIcon.buf.equals(darkPill.buf)).toBe(false);
+    expect(fake.calls).toBe(0);
   });
 
   it('no fetch route exists; a ?url= parameter fetches nothing', async () => {
@@ -1085,6 +1129,15 @@ describe('fix pass: configuration strictness and bind posture', () => {
   it('bind defaults to loopback, BADGE_HOST overrides', () => {
     expect(hostFromEnv({})).toBe('127.0.0.1');
     expect(hostFromEnv({ BADGE_HOST: '0.0.0.0' })).toBe('0.0.0.0');
+  });
+
+  it('rejects a public badge base with a query, fragment, or credentials', () => {
+    for (const base of ['https://badge.example/path?campaign=1', 'https://badge.example/path#anchor', 'https://user:pass@badge.example/path']) {
+      expect(() => depsFromEnv({ BADGE_PUBLIC_BASE_URL: base })).toThrow(ConfigError);
+      expect(() => depsFromEnv({ BADGE_PUBLIC_BASE_URL: base })).toThrow(/BADGE_PUBLIC_BASE_URL/);
+    }
+    expect(depsFromEnv({ BADGE_PUBLIC_BASE_URL: 'https://badge.example/path/' }).publicBaseUrl)
+      .toBe('https://badge.example/path/');
   });
 });
 

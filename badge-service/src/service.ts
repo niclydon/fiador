@@ -98,6 +98,7 @@ interface RenderEntry {
   body: Buffer;
   etag: string;
   resolvedTheme: ThemeName | undefined;
+  reuseUntilMs: number;
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -527,6 +528,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     forceNoStore?: boolean;
     labelOverride?: string;
     cacheControl?: string;
+    reuseUntilMs?: number;
   }
 
   /** Returns true when a response was sent. Honours the render
@@ -597,18 +599,17 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
             'utf8',
           )
         : renderBadgePng({ state, theme: resolved!, variant: args.variant, checkedAt: args.checkedAt, now: now(), ...(args.labelOverride ? { labelOverride: args.labelOverride } : {}) });
-    const entry: RenderEntry = { body, etag, resolvedTheme: resolved };
+    const entry: RenderEntry = { body, etag, resolvedTheme: resolved, reuseUntilMs: args.reuseUntilMs ?? 0 };
     renderCache.set(renderKey, entry);
     lastRender.set(routeKey, entry);
     res.writeHead(200, headers);
     res.end(head ? undefined : body);
   }
 
-  /** A rate-limited badge request must never rasterise: serve the
-   * subject's last render for this route shape when one exists,
-   * else a cheap static template (an SVG string built once; for
-   * PNG, the one cached unchecked raster). */
-  let busyPng: Buffer | null = null;
+  /** A limited request may reuse an observed badge only within its
+   * original check's TTL. Once that expires, show unchecked art; an
+   * old verified image must never survive indefinitely under load. */
+  const busyPng = new Map<string, Buffer>();
   function sendLimitedBadge(
     req: IncomingMessage,
     res: ServerResponse,
@@ -622,13 +623,15 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     const routeKey = JSON.stringify([args.subjectKeyValue, args.variant, args.format, themeKey]);
     const last = lastRender.get(routeKey);
     const headers: Record<string, string> = { 'cache-control': 'no-store' };
-    if (last) {
+    if (last && now().getTime() < last.reuseUntilMs) {
       headers['content-type'] = args.format === 'png' ? 'image/png' : 'image/svg+xml';
       if (args.format === 'png') headers['x-badge-theme'] = last.resolvedTheme ?? 'dark';
+      if (args.format === 'png' && args.theme === 'auto') headers.vary = 'Sec-CH-Prefers-Color-Scheme';
       res.writeHead(200, headers);
       res.end(head ? undefined : last.body);
       return;
     }
+    if (last) lastRender.delete(routeKey);
     // Nothing rendered yet for this route: the unchecked badge,
     // built without the rasteriser where possible.
     if (args.format === 'svg') {
@@ -644,20 +647,27 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       res.end(head ? undefined : svg);
       return;
     }
-    if (!busyPng) {
+    const resolvedTheme: ThemeName = args.theme === 'auto'
+      ? args.clientHint === 'light' ? 'light' : 'dark'
+      : args.theme;
+    const fallbackKey = JSON.stringify([args.variant, resolvedTheme]);
+    let png = busyPng.get(fallbackKey);
+    if (!png) {
       deps.onRender?.('png');
-      busyPng = renderBadgePng({
+      png = renderBadgePng({
         state: 'unverified',
-        theme: args.clientHint === 'light' ? 'light' : 'dark',
+        theme: resolvedTheme,
         variant: args.variant,
         checkedAt: null,
         now: now(),
       });
+      busyPng.set(fallbackKey, png);
     }
     headers['content-type'] = 'image/png';
-    headers['x-badge-theme'] = args.clientHint === 'light' ? 'light' : 'dark';
+    headers['x-badge-theme'] = resolvedTheme;
+    if (args.theme === 'auto') headers.vary = 'Sec-CH-Prefers-Color-Scheme';
     res.writeHead(200, headers);
-    res.end(head ? undefined : busyPng);
+    res.end(head ? undefined : png);
   }
 
   function uncheckedBadge(
@@ -865,6 +875,10 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
         }
         const { result, stale, storedAtMs } = resolvedResult;
         const claimUnconfirmed = parsed.type === 'discord_application' && result.status === 'verified';
+        const checkedAtMs = Date.parse(result.evidence.checkedAt);
+        const reuseUntilMs = stale || !Number.isFinite(checkedAtMs)
+          ? 0
+          : Math.min(storedAtMs, checkedAtMs) + ttlFor(result.status);
         sendBadge(
           req,
           res,
@@ -879,6 +893,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
             subjectKeyValue: key,
             forceNoStore: parsed.type === 'discord_application',
             cacheControl: cacheControlFor(result.status, ttlFor(result.status) - (now().getTime() - storedAtMs)),
+            reuseUntilMs,
             ...(claimUnconfirmed ? { labelOverride: 'Claim unconfirmed' } : {}),
           },
           head,

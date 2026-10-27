@@ -137,7 +137,10 @@ queried address appears **once** in the body, as the explicit
 `subject` echo. The response omits address badge URLs rather than
 publishing dead links made from a truncated address (spec 4.9).
 For every other subject type the body contains no
-wallet address at all unless it is the subject itself.
+wallet address at all unless it is the subject itself. This
+address response differs from MCP `badge_status`, which currently
+returns a badge URL matrix. Address and registry parity across the
+two surfaces is a later SPEC sections 4.2 and 11 release gate.
 
 Responses that report no check — rate-limited (429) and
 malformed-subject (400, and the grey badge on image routes) —
@@ -153,9 +156,9 @@ are capped at the core's limits (64 / 256 chars).
 
 ## Configuration
 
-Environment only; values are never committed. Names mirror the
-verify MCP package's, with the spec section 4.8 spellings accepted
-as fallbacks.
+Environment only; values are never committed. The core RPC names
+mirror the verify MCP package's. Registry inputs are configured
+separately for this service, as described below.
 
 Numeric configuration is strict (the M16 standard): an explicitly
 set zero, negative, or non-integer value for any numeric variable
@@ -175,7 +178,7 @@ stack) and exit non-zero.
 | `VERIFY_REGISTRY_URL` (`REGISTRY_URL`) | HTTPS registry URL; use instead of a file |
 | `REGISTRY_REFRESH_MS` | registry reload interval (default 300000, spec 4.6) |
 | `REGISTRY_MAX_BYTES` | registry file size bound at load (default 1048576) |
-| `BADGE_PUBLIC_BASE_URL` | base for badge URLs in JSON; configuration only — request headers are never used (default: path-relative URLs) |
+| `BADGE_PUBLIC_BASE_URL` | HTTP(S) base for badge URLs in JSON; credentials, query, and fragment are rejected; request headers are never used (default: path-relative URLs) |
 | `RATE_LIMIT_TRUSTED_PROXIES` | comma-separated exact proxy IPs allowed to supply the rightmost `X-Forwarded-For` client address (default: none) |
 | `CACHE_TTL_VERIFIED_MS`, `CACHE_TTL_NEGATIVE_MS`, `STALE_ON_ERROR_MS` | cache overrides |
 | `CACHE_MAX_ENTRIES` | result-cache LRU bound (default 1000) |
@@ -226,6 +229,12 @@ contain punctuation. The canonical `entries[]` file and remote URL
 use the guarded resolver; malformed or unavailable sources fail
 closed. There is no request-selected `?url=` fetch route.
 
+The verify MCP server uses a flat inline registry keyed by
+`type:id`; it does not consume this service's `entries[]` or nested
+file as interchangeable configuration. The two services need their
+own registry settings. Aligning their registry and address badge
+contracts remains a SPEC sections 4.2 and 11 release gate.
+
 ## Cache policy (spec 4.6, proposals implemented as configuration)
 
 The spec's cache numbers are proposals; they are implemented here
@@ -275,6 +284,12 @@ receives the deadline's `AbortSignal`); saturation returns 503 on
 the JSON route and the unchecked badge on badge routes. HTTP
 server timeouts are set explicitly. The whole source and core
 response has a five-second deadline.
+
+An over-limit request reuses the last observed badge only until
+that check's original cache deadline. Afterward it gets unchecked
+art with no check time, so a verified image cannot remain visible
+indefinitely because the rate limiter prevents rechecking. PNG
+fallbacks are cached separately by theme and variant.
 
 ## Tests
 

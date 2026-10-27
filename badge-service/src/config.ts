@@ -250,7 +250,11 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new ConfigError('invalid value for BADGE_PUBLIC_BASE_URL: expected an http(s) URL');
     }
-    deps.publicBaseUrl = env.BADGE_PUBLIC_BASE_URL;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash ||
+        env.BADGE_PUBLIC_BASE_URL.includes('?') || env.BADGE_PUBLIC_BASE_URL.includes('#')) {
+      throw new ConfigError('invalid value for BADGE_PUBLIC_BASE_URL: expected an http(s) URL without credentials, query, or fragment');
+    }
+    deps.publicBaseUrl = parsed.toString();
   }
   if (env.RATE_LIMIT_TRUSTED_PROXIES) {
     deps.trustedProxyIps = env.RATE_LIMIT_TRUSTED_PROXIES.split(',').map((ip) => ip.trim()).filter(Boolean);
