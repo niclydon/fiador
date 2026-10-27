@@ -342,7 +342,7 @@ describe('cache behaviour (SPEC 4.6 proposals)', () => {
     const base = await start({
       resolveAttestation: async () => {
         resolutions++;
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await new Promise((resolve) => setTimeout(resolve, 500));
         return ATTESTATION;
       },
     });
