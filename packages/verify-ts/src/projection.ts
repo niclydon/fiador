@@ -15,7 +15,13 @@ export function toPublicVerifyResult(result: VerifyResult): PublicVerifyResult {
     evidence: {
       checkedAt: result.evidence.checkedAt,
       source: result.evidence.source,
-      agentBook: { ...result.evidence.agentBook },
+      // Enumerated, not spread (7.5 review M13): a poisoned or
+      // future internal evidence object carrying extra keys inside
+      // agentBook must not ride through the projection.
+      agentBook: {
+        network: result.evidence.agentBook.network,
+        contract: result.evidence.agentBook.contract,
+      },
       ...(result.evidence.rpcLatencyMs !== undefined
         ? { rpcLatencyMs: result.evidence.rpcLatencyMs }
         : {}),

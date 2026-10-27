@@ -4,8 +4,8 @@ Live-run evidence is recorded with dates and dependency versions. A
 live pass is a fact about a day and a dependency version, not a
 permanent label; retest on change re-runs the full set (unit,
 fixture, service, then live). Public narrative entries identify the
-dedicated program wallet by role and record methods and status without
-wallet or human-hash fragments. The signed public attestation retains
+dedicated demo signing wallet by role and record methods and status
+without wallet or human-hash fragments. The signed public attestation retains
 the wallet address required by the protocol.
 
 ## 2026-10-26 — verify core 0.1.0 and verify MCP 0.1.0
@@ -25,14 +25,14 @@ decision: @worldcoin/agentkit-core 0.2.1.
   directly with viem (same contract, same ABI), preserving the
   `unregistered` vs `unknown` distinction.
 - Live, against the real AgentBook contract on World Chain:
-  - The dedicated program wallet (registered 2026-10-26) returned
+  - The dedicated demo signing wallet (registered 2026-10-26) returned
     `verified`.
   - A known-unregistered address returned `unregistered` +
     `not_registered`.
   - A dead RPC endpoint returned `unknown` + `lookup_failed`, never
     `unregistered`.
 - Live, through the MCP server (both transports): `verify_address`
-  for the dedicated program wallet returned `verified` over stdio
+  for the dedicated demo signing wallet returned `verified` over stdio
   and streamable HTTP. Tool outputs were scanned: no raw humanId,
   no `humanId` key, and no full address.
 
@@ -40,7 +40,7 @@ decision: @worldcoin/agentkit-core 0.2.1.
 
 - Signer CLI (`@fiador/signer`, PR #4, merge 63fee3b) signed the
   founding attestation for the Nova Discord application using the
-  dedicated program wallet. It was issued 2026-10-26 and expires
+  dedicated demo signing wallet. It was issued 2026-10-26 and expires
   2027-01-24.
 - Published in PR #6 (merge 6a11c07): `registry/registry.json`
   carries the founding entry; `verify-page/` hosts the attestation.
@@ -55,8 +55,9 @@ decision: @worldcoin/agentkit-core 0.2.1.
   the founding entry. A 2026-10-26 read-only comparison found that
   the live entry matches the repository entry on its present fields,
   but omits the repository's `payload_hash` field. The live and repo
-  registries are therefore not byte-identical. Reconcile and recheck
-  this deployment drift with the next production web release.
+  registries are therefore not byte-identical. The October 27 static
+  privacy/support release reused this deployed mirror, so this drift
+  remains to be reconciled and rechecked in a later web release.
 - On the same read-only check, the site root returned 200 while
   `/verify/` and a test `/v/` URL returned 404. §9 step 1 publication
   is complete; the page and preview live tests in steps 2–5a remain.
@@ -103,3 +104,59 @@ decision: @worldcoin/agentkit-core 0.2.1.
   a local build at check time. It does not test the protected Vercel
   preview, the still-missing production `/verify/` and `/v/` routes,
   a Discord unfurl, or application control.
+
+## 2026-10-27 — privacy and support static publication
+
+- On the separate static release branch, the eight-file allowlist and
+  source-byte checks passed three tests. Local HTTP returned 200 for
+  `/`, `/privacy/`, `/support/`, `/registry.json`, and the published
+  attestation; `/verify/`, `/v/example`, and `/api/preview` returned
+  404. Light desktop and dark mobile screenshots of both new pages
+  were checked for clipping. The full-tree secret scan found five
+  known synthetic fixture findings and no changed-path findings;
+  an all-refs scan found fifteen findings in the same fixture classes.
+  A privacy scan found no private identifiers in the changed release
+  files. The signed public attestation remained byte-identical.
+- Before publication, a protected preview returned 200 for the new
+  pages and 404 for the three unshipped routes. Its registry and
+  attestation responses matched the then-live site byte for byte,
+  including `Access-Control-Allow-Origin: *` on both JSON responses.
+  An independent adversarial review found no blocker.
+- After operator approval, Vercel production deployment
+  `dpl_2ZYomdjYFfzdYsMw82SqsPof56sk` reached READY from static
+  branch commit `9b5bc30781333376f8bea1459f03d5069e201858`, with
+  `fiador.org` and `www.fiador.org` attached. Draft PR #26 remained
+  open and was not merged into `main`.
+- Live `/`, `/privacy/`, `/support/`, `/registry.json`, and
+  `/attestations/nova.json` returned 200. The two JSON responses
+  matched the static release branch's public files byte for byte and
+  retained `Access-Control-Allow-Origin: *`; the canonical repo
+  registry mismatch noted above remains. Live `/verify/`,
+  `/v/example`, and `/api/preview` returned 404. The production home
+  page lacked the feedback marker injected in the protected preview.
+- This verifies the static publication and route boundary. It does
+  not verify Slack owner enrollment or sign-in, a completed World ID
+  check, Discord application control, or verifier bot operation.
+## 2026-10-26: §7.5 adversarial-review fix pass (verify core 0.3.0, verify-mcp 0.2.0)
+
+- The §7.5 review FAILED the gate on blockers B1–B4 (signatureType
+  validated then ignored; nonce-store check-then-set race; open
+  envelope/subject objects; unbounded HTTP body pre-read in the MCP
+  server), majors M1–M17, and minors m1–m8. The fix pass lands all
+  of them on branch w0/ar-fixes with a regression test per finding.
+- Test counts: @fiador/verify 36 passed / 3 skipped (baseline) ->
+  60 passed / 3 skipped; @fiador/verify-mcp 9 -> 25 passed. Full
+  root suite green (221 passed + 3 skipped across workspaces, plus
+  the web tests) and root typecheck clean. The one consumer touch:
+  verifier-bot FAILURE_SENTENCES gained the plain-language sentence
+  for the new attestation_lifetime_invalid code.
+- Canonical-form evidence: every pre-existing fixture vector keeps
+  a byte-identical canonical message after the serialisation fix
+  (baseline captured from the pre-fix implementation, pinned in
+  packages/verify-ts/test/canonical-baseline.json; all six
+  pre-existing attestations byte-identical incl. payload/signature,
+  three new vectors added for the __proto__, integer-key, and
+  astral-key cases).
+- Note: verify-page/verify/app.js is a bundle of this library; it
+  regenerates from the 0.3.0 core on the verify page next web
+  build and is deliberately not churned in this PR.

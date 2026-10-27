@@ -1,5 +1,21 @@
 # Changes
 
+## 2026-10-27: static privacy and support pages published
+
+- Published the eight-file static release from branch commit
+  `9b5bc30781333376f8bea1459f03d5069e201858` to fiador.org and
+  www.fiador.org after the operator approved production publication.
+  This was a direct Vercel deployment, not a merge into `main`;
+  draft PR #26 remains open.
+- Live `/privacy/` and `/support/` returned 200. The registry and
+  founding attestation matched the release branch's public files
+  byte for byte; `/verify/`, `/v/example`, and `/api/preview` remained
+  404. The canonical repo registry still differs from its deployed
+  mirror. This release added public information pages; it did not
+  establish live Slack sign-in, a World ID check, or bot control. See
+  `docs/narrative/2026-10-27-static-privacy-support-release.md` and
+  `docs/verification.md` for the release boundary and smoke results.
+
 ## 2026-10-26: verifier bot safety and maintenance
 
 - The bot checks and logs operator claims without creating a new
@@ -33,14 +49,14 @@
   served byte-for-byte at /attestations/nova.json, and the
   registry mirrored at /registry.json. The full §6.1 verify
   page is later work.
-- The founding attestation was signed with the dedicated
-  World Program wallet via tools/signer and live-verified at
+- The founding attestation was signed with the dedicated demo
+  signing wallet via tools/signer and live-verified at
   signing time: status verified, 2026-10-26T10:10:50Z,
   payload hash
   8bfeb9f9182de3ce63cdf42bdff941277250d96089982c65f0f97761f195a031,
   expires 2027-01-24. Narrative:
   docs/narrative/2026-10-26-founding-attestation.md.
-- DESIGN §9 precondition synced: the program wallet's
+- DESIGN §9 precondition synced: the demo signing wallet's
   AgentBook registration is recorded as done (Oct 26, 2026,
   live-verified), replacing the stale awaiting-the-tap text.
 
@@ -128,7 +144,7 @@
   base is configured, per the open M2 default). stdio and
   stateless streamable HTTP transports, parity-tested.
 - Live verification recorded in `docs/verification.md`: the
-  program wallet verifies against the real AgentBook contract,
+  demo signing wallet verifies against the real AgentBook contract,
   through the library and through both MCP transports.
 
 ## 2026-10-25: renamed to Fiador; build design lands

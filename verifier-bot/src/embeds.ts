@@ -60,6 +60,8 @@ export const FAILURE_SENTENCES: Record<FailureCode, string> = {
   wallet_mismatch: 'The attestation wallet does not match the expected wallet.',
   not_yet_valid: 'This attestation is not valid yet.',
   expired: 'This attestation has expired and must be renewed by its operator.',
+  attestation_lifetime_invalid:
+    'This attestation claims a validity period longer than the protocol allows (90 days).',
   not_registered: 'The signing wallet has no AgentBook registration.',
   replay_detected: 'This attestation nonce has been seen before (possible replay).',
   attestation_not_found: 'No attestation was found for this application.',
