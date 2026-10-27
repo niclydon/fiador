@@ -145,12 +145,15 @@ address response differs from MCP `badge_status`, which currently
 returns a badge URL matrix. Address and registry parity across the
 two surfaces is a later SPEC sections 4.2 and 11 release gate.
 
-Responses that report no check — rate-limited (429) and
-malformed-subject (400, and the grey badge on image routes) —
-carry **no check time**: no `X-Checked-At` header, no visible
-check label, no `data-checked-at`. A check time is evidence from
-the core (spec 4.4); the service never fabricates one. `HEAD` is
-answered per route with the GET headers and no body; other
+Responses without a completed check — a rate-limited JSON response
+(429), a malformed subject (400), or a freshly generated grey badge
+fallback — carry **no check time**: no `X-Checked-At` header, visible
+check label, or `data-checked-at`. A rate-limited image may instead
+reuse a still-fresh earlier render. Its original genuine check label
+and `data-checked-at` remain in the image, but the limited response
+is `no-store` and emits no `X-Checked-At` because no new check ran.
+A check time is evidence from the core (spec 4.4); the service never
+fabricates one. `HEAD` is answered per route with the GET headers and no body; other
 non-GET methods are 405. Invalid `theme`/`variant` values are
 400, never silently coerced, and route near-misses on the badge
 routes (empty ID, uppercase extension, trailing slash) serve the
@@ -207,9 +210,11 @@ Each active entry names a Discord application ID and an HTTPS
 attestation URL. The service can read this file locally or fetch
 the registry from an HTTPS URL. It fetches the selected attestation
 through a guarded HTTPS client with destination and response bounds.
-Registry and attestation data refresh after 300 seconds. A removed
-or revoked entry then stops verifying. A failed source request
-produces an uncached unknown result; it does not claim that
+Registry and attestation data refresh after 300 seconds. New
+requests after that boundary do not join source work begun before
+it; a result from the old generation fails closed if it completes
+after the boundary. A removed or revoked entry then stops verifying.
+A failed source request produces an uncached unknown result; it does not claim that
 AgentBook is unavailable.
 
 ```json
@@ -267,9 +272,10 @@ route then marks `evidence.source: 'cache'` and the response is
 Older than 900s, or no cache: unverified with status `unknown`.
 Serving a quietly-fresh-looking stale verified badge is the one
 failure this service must never have.
-When a local registry refreshes, new requests stop joining old
-source and core work; an old result cannot repopulate the cache
-after the registry version changes or render an old badge. An
+When a local registry refreshes or a canonical source reaches its
+300-second boundary, new requests stop joining old source and core
+work; an old result cannot repopulate the cache after the source
+generation changes or render an old badge. An
 in-flight request that loses this race returns 503 on JSON or an
 untimed unchecked image.
 
@@ -281,6 +287,9 @@ rendering happens: a repeated or conditional request never pays
 rasterisation twice for the same badge state. ETags are computed
 from the configured base only, so they are stable — and safe to
 store in shared caches — no matter what `Host` a request carried.
+For a badge with a check time, downstream `max-age` and `s-maxage`
+also end by the next UTC midnight, when its visible date label may
+change.
 
 Abuse posture: per-key rate limit (default 120 req/min) on the
 badge and status routes, keyed on the socket address (or on

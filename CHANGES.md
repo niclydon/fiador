@@ -32,7 +32,10 @@
   unchanged healthy file remains fresh past 24 hours; failed reloads
   still expire the last good entries after 24 hours. Refreshes also
   separate old in-flight work from new requests and keep old results
-  out of the current cache and badge render path.
+  out of the current cache and badge render path. Canonical HTTPS
+  registry refreshes now separate source generations at the 300-second
+  boundary, so a pending pre-refresh check cannot report a newly
+  revoked application as verified.
 - An over-limit request reuses observed artwork only until that
   check's original cache deadline; PNG fallbacks are separate for
   each theme and variant; limited SVG fallbacks are reused too.
@@ -40,12 +43,13 @@
   return 503 JSON or an untimed grey badge; a core-produced `unknown`
   still returns 200. A throwing core cannot turn a badge into a 500.
   Badge ETags change at UTC midnight when the visible check date
-  changes. Address status omits a badge URL rather than linking to
+  changes, and downstream badge cache lifetimes end by that boundary.
+  Address status omits a badge URL rather than linking to
   an unverifiable truncated address. Badge base URLs
   reject credentials, queries, and fragments. The badge registry and
   address response differ from the MCP server's current contract;
   sections 4.2 and 11 parity remains later work.
-- The integrated badge-service suite has 87 route, source, and
+- The integrated badge-service suite has 89 route, source, and
   security tests. Badge checks are configured in CI on Node 22 and 24.
   Nothing was deployed; no public badge instance is claimed.
 

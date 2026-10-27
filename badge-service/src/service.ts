@@ -43,6 +43,9 @@ export interface BadgeServiceDeps {
    * present it is the resolver, and it is refreshed on its cadence
    * as requests arrive (SPEC 4.6). */
   registrySource?: RegistrySource;
+  /** Generation of a canonical file/HTTPS resolver, including an
+   * expired snapshot whose refresh is still in flight. */
+  sourceVersion?: () => number;
   /** Absolute public base URL for badge URLs in the JSON route,
    * from configuration ONLY. Request headers (Host,
    * X-Forwarded-Proto) are never used to build URLs: a poisoned
@@ -367,7 +370,8 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     }
   }
 
-  let lastRegistryVersion = deps.registrySource?.version ?? 0;
+  const currentRegistryVersion = () => deps.registrySource?.version ?? deps.sourceVersion?.() ?? 0;
+  let lastRegistryVersion = currentRegistryVersion();
 
   async function resolveResult(
     subjectType: string,
@@ -375,7 +379,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     signal: AbortSignal,
   ): Promise<ResolvedResult> {
     deps.registrySource?.refreshIfDue(now().getTime());
-    const registryVersion = deps.registrySource?.version ?? 0;
+    const registryVersion = currentRegistryVersion();
     if (registryVersion !== lastRegistryVersion) {
       // The registry content changed under us (SPEC 4.6 refresh):
       // results and renders cached against the old registry are
@@ -390,9 +394,10 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       inFlight.clear();
       sourceInFlight.clear();
     }
-    const startVersion = canonicalSubject(subjectType, subjectId)[0] === 'address' || !deps.registrySource
+    const startVersion = canonicalSubject(subjectType, subjectId)[0] === 'address' ||
+      (!deps.registrySource && !deps.sourceVersion)
       ? null : registryVersion;
-    const registryIsCurrent = () => startVersion === null || deps.registrySource?.version === startVersion;
+    const registryIsCurrent = () => startVersion === null || currentRegistryVersion() === startVersion;
     const key = subjectKey(subjectType, subjectId);
     const nowMs = now().getTime();
     const source = subjectType === 'address'
@@ -552,7 +557,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     subjectKeyValue: string;
     forceNoStore?: boolean;
     labelOverride?: string;
-    cacheControl?: string;
+    remainingMs?: number;
     reuseUntilMs?: number;
   }
 
@@ -587,8 +592,16 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       args.labelOverride ?? '',
       args.checkedAt === null ? null : utcDay,
     ]);
+    // A cached "checked today" label becomes a dated label at UTC
+    // midnight. Its downstream freshness must end before that flip.
+    const msUntilMidnight = Date.UTC(
+      renderNow.getUTCFullYear(), renderNow.getUTCMonth(), renderNow.getUTCDate() + 1,
+    ) - renderNow.getTime();
+    const remainingMs = args.checkedAt === null
+      ? args.remainingMs
+      : Math.min(args.remainingMs ?? ttlFor(args.status), msUntilMidnight);
     const headers: Record<string, string> = {
-      'cache-control': args.forceNoStore || args.stale ? 'no-store' : args.cacheControl ?? cacheControlFor(args.status),
+      'cache-control': args.forceNoStore || args.stale ? 'no-store' : cacheControlFor(args.status, remainingMs),
       etag,
       'accept-ch': 'Sec-CH-Prefers-Color-Scheme',
     };
@@ -799,7 +812,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
           }
           throw err;
         }
-        if (resolvedResult.registryVersion !== null && deps.registrySource?.version !== resolvedResult.registryVersion) {
+        if (resolvedResult.registryVersion !== null && currentRegistryVersion() !== resolvedResult.registryVersion) {
           sendJson(res, 503, { error: 'service busy' }, { 'cache-control': 'no-store' }, head);
           return;
         }
@@ -912,7 +925,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
           uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
           return;
         }
-        if (resolvedResult.registryVersion !== null && deps.registrySource?.version !== resolvedResult.registryVersion) {
+        if (resolvedResult.registryVersion !== null && currentRegistryVersion() !== resolvedResult.registryVersion) {
           uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
           return;
         }
@@ -935,7 +948,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
             checkedAt: result.evidence.checkedAt,
             subjectKeyValue: key,
             forceNoStore: parsed.type === 'discord_application',
-            cacheControl: cacheControlFor(result.status, ttlFor(result.status) - (now().getTime() - storedAtMs)),
+            remainingMs: ttlFor(result.status) - (now().getTime() - storedAtMs),
             reuseUntilMs,
             ...(claimUnconfirmed ? { labelOverride: 'Claim unconfirmed' } : {}),
           },

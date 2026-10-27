@@ -252,7 +252,11 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
   const refreshMs = strictInt(env, 'REGISTRY_REFRESH_MS', 1, 3_600_000);
   const maxBytes = strictInt(env, 'REGISTRY_MAX_BYTES', 1024, 67_108_864);
   if (registryFile && registryUrl) throw new ConfigError('choose either REGISTRY_FILE or REGISTRY_URL');
-  if (registryUrl) deps.resolveAttestation = createRegistryResolver({ url: registryUrl });
+  if (registryUrl) {
+    const resolver = createRegistryResolver({ url: registryUrl });
+    deps.resolveAttestation = resolver;
+    deps.sourceVersion = resolver.currentVersion;
+  }
   if (registryFile) {
     const varName = env.VERIFY_REGISTRY_FILE !== undefined ? 'VERIFY_REGISTRY_FILE' : 'REGISTRY_FILE';
     const registry = new FileRegistry(registryFile, varName, {
@@ -282,7 +286,9 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
       } catch {
         throw new ConfigError(`${varName}: invalid canonical registry document`);
       }
-      deps.resolveAttestation = createRegistryResolver({ file: registryFile });
+      const resolver = createRegistryResolver({ file: registryFile });
+      deps.resolveAttestation = resolver;
+      deps.sourceVersion = resolver.currentVersion;
     }
   }
 

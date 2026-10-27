@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createVerifier, hashHumanId, type SignedAttestation, type VerifyResult, type Verifier } from '@fiador/verify';
 import { createBadgeService, type BadgeServiceDeps } from '../src/service.js';
 import { ConfigError, FileRegistry, depsFromEnv, hostFromEnv, portFromEnv, type RegistrySource } from '../src/config.js';
+import { createRegistryResolver } from '../src/registry.js';
 import { formatCheckedLabel } from '../src/render.js';
 import { PILL_PALETTES, type BadgeState } from '../src/palettes.js';
 
@@ -1048,7 +1049,9 @@ describe('fix pass: registry refresh and validation (SPEC 4.6)', () => {
     const file = join(dir, 'registry.json');
     writeFileSync(file, JSON.stringify({ version: 1, entries: [] }));
     const deps = depsFromEnv({ VERIFY_REGISTRY_FILE: file });
+    expect(deps.sourceVersion).toBeTypeOf('function');
     expect(await deps.resolveAttestation?.({ type: 'discord_application', id: '123456789012345678' })).toBeNull();
+    expect(depsFromEnv({ VERIFY_REGISTRY_URL: 'https://registry.example/registry.json' }).sourceVersion).toBeTypeOf('function');
     writeFileSync(file, JSON.stringify({ version: 1, entries: [{ discord_application_id: 'bad', attestation_url: 'http://example.com/a' }] }));
     expect(() => depsFromEnv({ VERIFY_REGISTRY_FILE: file })).toThrow(ConfigError);
     rmSync(dir, { recursive: true, force: true });
@@ -1460,6 +1463,60 @@ describe('registry refresh races', () => {
     }
   });
 
+  it('rejects a pre-expiry HTTPS attestation flight after the registry entry is revoked', async () => {
+    const id = '123456789012345678';
+    const registryUrl = 'https://registry.example/registry.json';
+    const attestationUrl = 'https://attestation.example/claim.json';
+    let document: { version: number; entries: Array<{ discord_application_id: string; attestation_url: string; status?: 'revoked' }> } =
+      { version: 1, entries: [{ discord_application_id: id, attestation_url: attestationUrl }] };
+    let registryFetches = 0;
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const resolver = createRegistryResolver({
+      url: registryUrl,
+      now: () => nowRef.current.getTime(),
+      async fetchJson(url) {
+        if (url === registryUrl) {
+          registryFetches++;
+          return document;
+        }
+        if (url !== attestationUrl) throw new Error('unexpected source URL');
+        entered();
+        await gate;
+        return ATTESTATION;
+      },
+    });
+    // Seed only the registry, leaving the first attestation fetch
+    // to start one millisecond before its 300-second source window ends.
+    expect(await resolver({ type: 'discord_application', id: '000000000000000000' })).toBeNull();
+    nowRef.current = new Date(T0.getTime() + 299_999);
+    const base = await start({ resolveAttestation: resolver, sourceVersion: resolver.currentVersion });
+    const oldRequest = get(base, `/v1/status/discord_application/${id}`);
+    try {
+      await started;
+      document = { version: 1, entries: [{ discord_application_id: id, attestation_url: attestationUrl, status: 'revoked' }] };
+      nowRef.current = new Date(T0.getTime() + 300_001);
+      const current = await get(base, `/v1/status/discord_application/${id}`);
+      expect(current.res.status).toBe(200);
+      expect((JSON.parse(current.text) as { status: string; failures: string[] })).toMatchObject({
+        status: 'unknown', failures: ['attestation_not_found'],
+      });
+      expect(registryFetches).toBe(2);
+      release();
+      const old = await oldRequest;
+      expect(old.res.status).toBe(503);
+      expect(old.res.headers.get('x-checked-at')).toBeNull();
+      expect(servers.at(-1)!.badgeInternals.resultCacheSize()).toBe(0);
+      const later = await get(base, `/v1/status/discord_application/${id}`);
+      expect((JSON.parse(later.text) as { status: string }).status).toBe('unknown');
+    } finally {
+      release();
+      await oldRequest;
+    }
+  });
+
   it('does not reuse an old verified image after revocation while rate limited', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'badge-art-race-'));
     const file = join(dir, 'registry.json');
@@ -1517,6 +1574,22 @@ describe('registry refresh races', () => {
 });
 
 describe('limited renders and lookup failures', () => {
+  it('ends downstream badge freshness before the UTC date label changes', async () => {
+    nowRef.current = new Date('2026-10-26T23:59:30.000Z');
+    const base = await start();
+    const path = `/badge/address/${ADDR}.svg?theme=dark`;
+    const first = await get(base, path);
+    expect(first.res.headers.get('cache-control')).toBe('public, max-age=30, s-maxage=30');
+    expect(first.text).toContain('checked 23:59 UTC');
+
+    // The original checked result is still fresh in the server, but
+    // even a one-second CDN lifetime would carry its label past midnight.
+    nowRef.current = new Date('2026-10-26T23:59:59.500Z');
+    const lastHalfSecond = await get(base, path);
+    expect(lastHalfSecond.res.headers.get('cache-control')).toBe('no-store');
+    expect(lastHalfSecond.res.headers.get('x-checked-at')).toBe(first.res.headers.get('x-checked-at'));
+  });
+
   it('changes the ETag and visible check date when UTC midnight passes', async () => {
     nowRef.current = new Date('2026-10-26T23:59:00.000Z');
     let renders = 0;

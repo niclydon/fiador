@@ -4,6 +4,9 @@ import { guardedFetchJson } from './guardedFetch.js';
 
 type Subject = { type: string; id: string };
 type FetchJson = (url: string) => Promise<unknown>;
+export type VersionedRegistryResolver = ((subject: Subject) => Promise<SignedAttestation | null>) & {
+  currentVersion(): number;
+};
 
 export interface RegistrySource {
   file?: string;
@@ -54,7 +57,7 @@ const SOURCE_TTL_MS = 300_000;
 /** Registry and attestation data share one bounded 300-second source
  * window. Single flights prevent a burst of badge requests from
  * multiplying registry and attestation fetches. */
-export function createRegistryResolver(source: RegistrySource): (subject: Subject) => Promise<SignedAttestation | null> {
+export function createRegistryResolver(source: RegistrySource): VersionedRegistryResolver {
   if (source.file && source.url) throw new Error('Choose either REGISTRY_FILE or REGISTRY_URL.');
   const fetchJson = source.fetchJson ?? guardedFetchJson;
   const now = source.now ?? Date.now;
@@ -63,9 +66,35 @@ export function createRegistryResolver(source: RegistrySource): (subject: Subjec
   let registryFlight: Promise<RegistrySnapshot> | undefined;
   const attestationCache = new Map<string, { value: SignedAttestation; loadedAtMs: number }>();
   const attestationFlights = new Map<string, Promise<SignedAttestation>>();
+  let generation = 0;
+  let nextExpiryAtMs = Infinity;
+
+  // A request crossing a source TTL must not join a flight that
+  // started with the prior registry/attestation snapshot. Advance
+  // once per expiry boundary, even while a refresh is still pending.
+  function currentVersion(nowMs = now()): number {
+    if (nowMs < nextExpiryAtMs) return generation;
+    generation++;
+    nextExpiryAtMs = Infinity;
+    // A new source window must not join a fetch begun in the old one.
+    // Old flights may complete for old callers, but cannot populate
+    // caches used by new requests.
+    attestationFlights.clear();
+    if (registryCache && registryCache.loadedAtMs + SOURCE_TTL_MS > nowMs) {
+      nextExpiryAtMs = registryCache.loadedAtMs + SOURCE_TTL_MS;
+    }
+    for (const cached of attestationCache.values()) {
+      if (cached.loadedAtMs + SOURCE_TTL_MS > nowMs) {
+        nextExpiryAtMs = Math.min(nextExpiryAtMs, cached.loadedAtMs + SOURCE_TTL_MS);
+      }
+    }
+    return generation;
+  }
 
   async function loadRegistry(): Promise<RegistrySnapshot> {
-    if (registryCache && now() - registryCache.loadedAtMs < SOURCE_TTL_MS) return registryCache.value;
+    const nowMs = now();
+    currentVersion(nowMs);
+    if (registryCache && nowMs - registryCache.loadedAtMs < SOURCE_TTL_MS) return registryCache.value;
     if (registryFlight) return registryFlight;
     const flight = (async () => {
       const document = source.file
@@ -75,6 +104,7 @@ export function createRegistryResolver(source: RegistrySource): (subject: Subjec
       if (!record(document)) throw new Error('Invalid registry document.');
       const snapshot = { document, entries };
       registryCache = { value: snapshot, loadedAtMs: now() };
+      nextExpiryAtMs = Math.min(nextExpiryAtMs, registryCache.loadedAtMs + SOURCE_TTL_MS);
       for (const [url, cached] of attestationCache) {
         if (now() - cached.loadedAtMs >= SOURCE_TTL_MS) attestationCache.delete(url);
       }
@@ -89,13 +119,20 @@ export function createRegistryResolver(source: RegistrySource): (subject: Subjec
   }
 
   async function loadAttestation(url: string): Promise<SignedAttestation> {
+    const nowMs = now();
+    currentVersion(nowMs);
     const cached = attestationCache.get(url);
-    if (cached && now() - cached.loadedAtMs < SOURCE_TTL_MS) return cached.value;
+    if (cached && nowMs - cached.loadedAtMs < SOURCE_TTL_MS) return cached.value;
     const pending = attestationFlights.get(url);
     if (pending) return pending;
+    const flightGeneration = generation;
     const flight = (async () => {
       const value = await fetchJson(url) as SignedAttestation;
-      attestationCache.set(url, { value, loadedAtMs: now() });
+      if (currentVersion() === flightGeneration) {
+        const loadedAtMs = now();
+        attestationCache.set(url, { value, loadedAtMs });
+        nextExpiryAtMs = Math.min(nextExpiryAtMs, loadedAtMs + SOURCE_TTL_MS);
+      }
       return value;
     })();
     attestationFlights.set(url, flight);
@@ -106,7 +143,7 @@ export function createRegistryResolver(source: RegistrySource): (subject: Subjec
     }
   }
 
-  return async (subject) => {
+  const resolve = async (subject: Subject) => {
     if (subject.type !== 'discord_application' || (!source.file && !source.url)) return null;
     const { document: registry, entries } = await loadRegistry();
     if (entries) {
@@ -118,4 +155,5 @@ export function createRegistryResolver(source: RegistrySource): (subject: Subjec
     // badge-service draft. The canonical public registry uses entries[].
     return (registry[`${subject.type}:${subject.id}`] ?? null) as SignedAttestation | null;
   };
+  return Object.assign(resolve, { currentVersion });
 }
