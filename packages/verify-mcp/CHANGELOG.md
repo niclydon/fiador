@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 — 2026-10-27
+
+Patch release pairing this server with `@fiador/verify` 0.3.1
+under the `^0.3.0` dependency (under npm 0.x caret rules the
+old `^0.1.0` admitted only <0.2.0 and never matched the
+published 0.3.x line). `server.json` conforms to the current
+registry schema (2025-12-11) with a within-limit description.
+No tool-surface changes.
+
 ## 0.2.0 — 2026-10-26
 
 The §7.5 adversarial-review fix pass (companion to
