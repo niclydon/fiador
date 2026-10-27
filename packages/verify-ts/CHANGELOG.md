@@ -9,15 +9,17 @@ sibling branch; this release is sequenced after it.)
 
 Breaking:
 
-- The nonce store contract is now a single atomic
-  `claim(nonce, wallet, expiresAt) -> Promise<boolean>` (true = newly
-  claimed, false = replay). The previous `has`/`add` pair had a
-  check-then-set race between the two awaits (B2). Replay is now
-  evaluated before the expired return, so a claimed nonce on an
+- The nonce store has a read-only, strongly consistent `has(nonce, wallet)` check for
+  replay precedence and an atomic
+  `claim(nonce, wallet, expiresAt) -> Promise<'claimed' | 'replay' | 'expired'>`
+  after registration succeeds. The store must use its own clock at
+  the atomic write and retain a claim only until `expiresAt` (B2).
+  This prevents expired, unregistered, or unchecked attestations
+  from consuming a fresh nonce, while concurrent presentations
+  still produce at most one verified result. A claimed nonce on an
   expired attestation reports `invalid` + `replay_detected`, per
-  SPEC 3.3 precedence (M1). A throwing claim store fails closed as
-  `unknown` + `lookup_failed` instead of throwing out of
-  `verifyAttestation` (M2).
+  SPEC 3.3 precedence (M1). A throwing store fails closed as
+  `unknown` + `lookup_failed` instead of throwing (M2).
 - `attestation_lifetime_invalid` is a failure code of its own,
   split out of `malformed_attestation` (M6, SPEC 3.0). Consumers
   matching on the old code for over-lifetime documents must match
@@ -34,7 +36,13 @@ Fixes:
   hanging `eth_call` returns `unknown` + `lookup_timeout` at
   `timeoutMs` instead of hanging (B1). A signature-step network
   failure no longer discards binding failures or pre-empts an
-  established expiry.
+  established expiry. A same-chain HTTP transport failure during
+  ERC-1271 validation is `unknown` + `lookup_failed`; a definitive
+  contract rejection remains `signature_mismatch`.
+- Expiry is checked again after registration and after the final
+  nonce claim. A lookup that crosses `expiresAt` returns `expired`
+  without consuming the nonce; an atomic claim that finds the
+  attestation expired records nothing.
 - The attestation envelope and subject objects are closed: keys
   outside `{payload, signature, signatureType}` and
   `{type, id}` are `malformed_attestation` (B3).

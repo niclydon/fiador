@@ -40,11 +40,13 @@ export function computeChecks(
   // with signature_mismatch, and outranks all of these).
   const pastSignature =
     result.status === 'verified' ||
-    result.status === 'expired' ||
     result.status === 'unregistered' ||
-    failures.has('not_yet_valid') ||
-    failures.has('expired') ||
-    failures.has('attestation_lifetime_invalid') ||
+    (!lookupFailed && (
+      result.status === 'expired' ||
+      failures.has('not_yet_valid') ||
+      failures.has('expired') ||
+      failures.has('attestation_lifetime_invalid')
+    )) ||
     failures.has('replay_detected') ||
     failures.has('not_registered');
   // An 'invalid' whose only failures are binding codes also proves

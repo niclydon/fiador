@@ -8,8 +8,9 @@ The §7.5 adversarial-review fix pass (companion to
 - HTTP transport: the handler no longer pre-reads the request
   body. The raw request goes to the SDK transport; a declared
   Content-Length over 1 MB is refused with 413 before any byte is
-  read, and a 30 s server request timeout bounds body arrival
-  (B4). Routing is on the URL pathname, `/health` is GET-only,
+  read, and the SDK's `maxRequestBodySize` enforces the same cap
+  while streaming chunked requests, before JSON parsing. A 30 s
+  server request timeout bounds body arrival (B4). Routing is on the URL pathname, `/health` is GET-only,
   and the catch path always ends or destroys the response (m7).
   The wiring lives in `src/http.ts` so integration tests exercise
   the real handler.
@@ -29,7 +30,8 @@ The §7.5 adversarial-review fix pass (companion to
   the same length caps as `badge_status` (m4).
 - The `checks` projection no longer fabricates stage results:
   on an `unknown` result, stages the failure codes cannot vouch
-  for report `not_checked` (M5), and a lifetime failure reports
+  for report `not_checked` (M5), including date failures combined
+  with ambiguous ERC-1271 lookup failures. A lifetime failure reports
   `expiry: 'lifetime_invalid'` with signature and binding stages
   intact (M6).
 - Configuration fails with fixed, sanitised startup messages:

@@ -1,4 +1,7 @@
 import {
+  BaseError,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
   createPublicClient,
   getAddress,
   hashMessage,
@@ -45,7 +48,7 @@ type RaceOutcome<T> =
   | { kind: 'value'; value: T }
   | { kind: 'timeout' }
   | { kind: 'aborted' }
-  | { kind: 'failed' };
+  | { kind: 'failed'; error: unknown };
 
 // Run an async operation against the verifier's deadline and an
 // optional caller AbortSignal. The operation is invoked INSIDE the
@@ -62,8 +65,8 @@ async function raceDeadline<T>(
   let call: Promise<T>;
   try {
     call = start();
-  } catch {
-    return { kind: 'failed' };
+  } catch (error) {
+    return { kind: 'failed', error };
   }
   call.catch(() => {});
   let timer: NodeJS.Timeout | undefined;
@@ -83,7 +86,7 @@ async function raceDeadline<T>(
     const winner = await Promise.race([
       call.then(
         (value) => ({ kind: 'value' as const, value }),
-        () => ({ kind: 'failed' as const }),
+        (error: unknown) => ({ kind: 'failed' as const, error }),
       ),
       deadline.then((kind) => ({ kind })),
     ]);
@@ -144,9 +147,10 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
   // under the same deadline/abort race as the AgentBook lookup (7.5
   // review B1): a hanging eth_call must not hold verifyAttestation open
   // past timeoutMs. Distinguish three outcomes honestly: the contract
-  // answered (match/mismatch), the read itself reverted or returned a
-  // non-magic value (mismatch — fail closed on the claim), or the
-  // network could not answer at all (unknown).
+  // answered (match/mismatch), the contract definitively rejected the
+  // call (mismatch), or the network could not answer at all (unknown).
+  // A viem readContract error can wrap either a revert or a transport
+  // failure; treating every rejection as a bad signature is unsound.
   async function erc1271Check(
     wallet: EvmAddress,
     message: string,
@@ -174,9 +178,16 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     if (read.kind === 'timeout') return { kind: 'unknown', code: 'lookup_timeout' };
     if (read.kind === 'aborted') return { kind: 'unknown', code: 'lookup_failed' };
     if (read.kind === 'failed') {
-      // A wallet that is not a contract, or a reverting validator, is
-      // not a valid ERC-1271 signature. Fail closed on the claim (SPEC 3.0).
-      return { kind: 'mismatch' };
+      const definitiveReject =
+        read.error instanceof BaseError &&
+        read.error.walk(
+          (cause) =>
+            cause instanceof ContractFunctionRevertedError ||
+            cause instanceof ContractFunctionZeroDataError,
+        ) !== null;
+      return definitiveReject
+        ? { kind: 'mismatch' }
+        : { kind: 'unknown', code: 'lookup_failed' };
     }
     return read.value.toLowerCase() === ERC1271_MAGIC
       ? { kind: 'match' }
@@ -396,25 +407,19 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       return finish('invalid');
     }
 
-    // Step 5, replay (SPEC 3.3), evaluated BEFORE the expired return
-    // (7.5 review M1): 'invalid' outranks 'expired', so a nonce that
-    // was already claimed makes an otherwise-expired attestation
-    // invalid, not expired. The store contract is a single atomic
-    // claim (B2). A store that throws is caller infrastructure
-    // failing: fail closed as 'unknown' + lookup_failed (M2), except
-    // that an established expiry still outranks it.
+    // Step 5, replay (SPEC 3.3): a read-only check establishes replay
+    // before expiry and registration, without consuming a fresh nonce.
+    // The final atomic claim below still decides concurrent attempts.
     if (opts.nonceStore) {
-      let claimed: boolean;
       try {
-        claimed = await opts.nonceStore.claim(payload.nonce, wallet, payload.expiresAt);
+        if (await opts.nonceStore.has(payload.nonce, wallet)) {
+          return finish('invalid', { failures: [...failures, 'replay_detected'] });
+        }
       } catch {
         if (expired) {
           return finish('expired', { failures: [...failures, 'lookup_failed'] });
         }
         return finish('unknown', { failures: ['lookup_failed'] });
-      }
-      if (!claimed) {
-        return finish('invalid', { failures: [...failures, 'replay_detected'] });
       }
     }
 
@@ -424,28 +429,51 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       return finish('expired');
     }
 
-    // Step 6, registration.
-    if (opts.checkRegistration === false) {
-      return finish('verified', { failures: [] });
+    // Step 6, registration. Only a successful lookup (or an explicit
+    // checkRegistration=false) may consume the nonce. A lookup can
+    // cross expiresAt, so recheck the clock before interpreting it.
+    const outcome = opts.checkRegistration === false
+      ? undefined
+      : await lookup(wallet, opts.signal);
+    if (expiresMs <= now().getTime()) {
+      return finish('expired', { failures: ['expired'] });
     }
-    const outcome = await lookup(wallet, opts.signal);
-    if (outcome.state === 'unknown') {
-      return finish('unknown', {
-        failures: [outcome.code],
-        latencyMs: outcome.latencyMs,
-      });
+    if (outcome?.state === 'unknown') {
+      return finish('unknown', { failures: [outcome.code], latencyMs: outcome.latencyMs });
     }
-    if (outcome.state === 'unregistered') {
-      // A valid signature from an unregistered wallet attests nothing.
+    if (outcome?.state === 'unregistered') {
       return finish('unregistered', {
         failures: ['not_registered'],
         latencyMs: outcome.latencyMs,
       });
     }
+    if (opts.nonceStore) {
+      try {
+        // claim's own expiry check closes the race between our clock
+        // check and its atomic write. A stale verifier must not make a
+        // nonce persist past expiry.
+        const claim = await opts.nonceStore.claim(payload.nonce, wallet, payload.expiresAt);
+        if (claim === 'replay') {
+          return finish('invalid', { failures: ['replay_detected'] });
+        }
+        if (claim === 'expired') {
+          return finish('expired', { failures: ['expired'] });
+        }
+        if (claim !== 'claimed') {
+          return finish('unknown', { failures: ['lookup_failed'] });
+        }
+      } catch {
+        return finish('unknown', { failures: ['lookup_failed'] });
+      }
+    }
+    if (expiresMs <= now().getTime()) {
+      return finish('expired', { failures: ['expired'] });
+    }
     return finish('verified', {
       failures: [],
-      humanId: outcome.humanId,
-      latencyMs: outcome.latencyMs,
+      ...(outcome?.state === 'registered'
+        ? { humanId: outcome.humanId, latencyMs: outcome.latencyMs }
+        : {}),
     });
   }
 

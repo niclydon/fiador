@@ -8,14 +8,10 @@ import { createVerifyMcpServer, type VerifyMcpDeps } from './server.js';
 // handling, and error paths — not a re-implementation of it (7.5
 // review B4).
 //
-// Body discipline: this handler NEVER reads or buffers the request
-// body. The raw request goes to the SDK transport, which reads it
-// itself. Two guards stand in front of that hand-off: a declared
-// Content-Length above MAX_HTTP_BODY_BYTES is refused with 413
-// before any byte is read, and the server's requestTimeout bounds
-// how long any body may take to arrive. (The SDK's Node transport
-// applies no application-level cap of its own in 1.32.x; these two
-// guards are the cap, and this comment is the record of that.)
+// The SDK transport reads the raw POST body with maxRequestBodySize,
+// counting streamed bytes before JSON parsing. This covers chunked
+// bodies with no declared Content-Length; the early header guard
+// rejects oversized declarations before a byte is read.
 export const MAX_HTTP_BODY_BYTES = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -100,6 +96,7 @@ export function createVerifyHttpServer(deps: VerifyMcpDeps, options: HttpOptions
       const requestServer = createVerifyMcpServer(deps);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
+        maxRequestBodySize: MAX_HTTP_BODY_BYTES,
         // DNS-rebinding protection for loopback binds (7.5 review
         // M15): without it, any website a local user visits can POST
         // to a loopback MCP server. Non-loopback binds are the

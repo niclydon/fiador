@@ -117,12 +117,21 @@ export interface VerifyAttestationOptions {
   expectedSubject?: { type: string; id: string };
   expectedWallet?: EvmAddress;
   nonceStore?: {
-    // A single ATOMIC claim (7.5 review B2): resolves true when this
-    // call newly recorded the nonce for the wallet, false when the
-    // nonce was already claimed (a replay). The previous has/add pair
-    // had a check-then-set race between the two awaits; there is no
-    // safe way to compose them, so the contract is one operation.
-    claim(nonce: string, wallet: EvmAddress, expiresAt: string): Promise<boolean>;
+    // Read-only, strongly consistent replay check against the same
+    // active-claim store used by claim, including for expired
+    // attestations. A stale false is safe only because claim is atomic;
+    // a stale false on an expired document would lose replay precedence.
+    has(nonce: string, wallet: EvmAddress): Promise<boolean>;
+    // Atomic final claim after successful registration. The store must
+    // check its own clock at the write point and never record a nonce
+    // after expiresAt. It checks an existing active claim first, so
+    // concurrent presentations get exactly one 'claimed' result.
+    // The read above does not replace this concurrency guard.
+    claim(
+      nonce: string,
+      wallet: EvmAddress,
+      expiresAt: string,
+    ): Promise<'claimed' | 'replay' | 'expired'>;
   };
   checkRegistration?: boolean; // default true: also run the AgentBook lookup
   signal?: AbortSignal;

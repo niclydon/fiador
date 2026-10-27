@@ -273,14 +273,22 @@ describe('verifyAttestation', () => {
   it('replay: second presentation with a nonce store -> replay_detected; other wallet unaffected', async () => {
     const records = new Map<string, string>();
     const store = {
-      // The claim contract (B2): true only for the call that newly
-      // records the (wallet, nonce) pair before its expiry.
-      async claim(nonce: string, wallet: EvmAddress, expiresAt: string) {
+      async has(nonce: string, wallet: EvmAddress) {
+        const exp = records.get(`${wallet}:${nonce}`);
+        return exp !== undefined && Date.parse(exp) > NOW.getTime();
+      },
+      // The claim contract records only a fresh, still-live nonce.
+      async claim(
+        nonce: string,
+        wallet: EvmAddress,
+        expiresAt: string,
+      ): Promise<'claimed' | 'replay' | 'expired'> {
         const key = `${wallet}:${nonce}`;
         const exp = records.get(key);
-        if (exp !== undefined && Date.parse(exp) > NOW.getTime()) return false;
+        if (exp !== undefined && Date.parse(exp) > NOW.getTime()) return 'replay';
+        if (Date.parse(expiresAt) <= NOW.getTime()) return 'expired';
         records.set(key, expiresAt);
-        return true;
+        return 'claimed';
       },
     };
     const v = verifier();
@@ -634,7 +642,13 @@ describe('7.5 regressions: envelope closure and shape (B3/M9/m4)', () => {
   });
 });
 
-function startStubRpc(respond: (method: string) => string | 'hang') {
+function startStubRpc(
+  respond: (method: string) =>
+    | string
+    | 'hang'
+    | { status: number }
+    | { error: { code: number; message: string } },
+) {
   const counts = new Map<string, number>();
   const server = createServer((req, res) => {
     let body = '';
@@ -645,7 +659,14 @@ function startStubRpc(respond: (method: string) => string | 'hang') {
       const out = respond(parsed.method);
       if (out === 'hang') return; // never respond
       res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result: out }));
+      if (typeof out === 'object' && 'status' in out) {
+        res.statusCode = out.status;
+        res.end(JSON.stringify({ error: 'unavailable' }));
+      } else if (typeof out === 'object') {
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, error: out.error }));
+      } else {
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result: out }));
+      }
     });
   });
   return { server, counts };
@@ -752,6 +773,55 @@ describe('7.5 regressions: signatureType is honoured (B1)', () => {
     }
   });
 
+  it('an ERC-1271 HTTP 503 after the World Chain check is unknown, not mismatch', async () => {
+    const { server } = startStubRpc((method) =>
+      method === 'eth_chainId' ? '0x1e0' : { status: 503 },
+    );
+    const rpcUrl = await listen(server);
+    try {
+      const att = clone(vectors.attestations.valid) as SignedAttestation;
+      att.payload.agentWalletAddress = CONTRACT_WALLET;
+      att.signatureType = 'eip1271';
+      att.signature = `0x${'11'.repeat(32)}`;
+      const v = createVerifier({
+        reader: createStaticReader({ [CONTRACT_WALLET]: HUMAN_1 }, 'live'),
+        rpcUrl,
+        now: () => NOW,
+      });
+      const result = await v.verifyAttestation(att);
+      expect(result.status).toBe('unknown');
+      expect(result.failures).toEqual(['lookup_failed']);
+      expect(result.failures).not.toContain('signature_mismatch');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('an explicit ERC-1271 contract revert remains a signature mismatch', async () => {
+    const { server } = startStubRpc((method) =>
+      method === 'eth_chainId'
+        ? '0x1e0'
+        : { error: { code: 3, message: 'execution reverted' } },
+    );
+    const rpcUrl = await listen(server);
+    try {
+      const att = clone(vectors.attestations.valid) as SignedAttestation;
+      att.payload.agentWalletAddress = CONTRACT_WALLET;
+      att.signatureType = 'eip1271';
+      att.signature = `0x${'11'.repeat(32)}`;
+      const v = createVerifier({
+        reader: createStaticReader({ [CONTRACT_WALLET]: HUMAN_1 }, 'live'),
+        rpcUrl,
+        now: () => NOW,
+      });
+      const result = await v.verifyAttestation(att);
+      expect(result.status).toBe('invalid');
+      expect(result.failures).toEqual(['signature_mismatch']);
+    } finally {
+      server.close();
+    }
+  });
+
   it('a signature-step network failure preserves binding failures (precedence)', async () => {
     const { server } = startStubRpc(() => '0x1'); // chain 1: 1271 check cannot run
     const rpcUrl = await listen(server);
@@ -781,9 +851,10 @@ describe('7.5 regressions: nonce store claim contract (B2/M1/M2)', () => {
   it('claim is called exactly once on the success path', async () => {
     let claims = 0;
     const store = {
+      async has() { return false; },
       async claim() {
         claims += 1;
-        return true;
+        return 'claimed' as const;
       },
     };
     const result = await verifier().verifyAttestation(vectors.attestations.valid, {
@@ -794,7 +865,7 @@ describe('7.5 regressions: nonce store claim contract (B2/M1/M2)', () => {
   });
 
   it('a store whose claim reports a prior claim -> replay on first presentation', async () => {
-    const store = { async claim() { return false; } };
+    const store = { async has() { return false; }, async claim() { return 'replay' as const; } };
     const result = await verifier().verifyAttestation(vectors.attestations.valid, {
       nonceStore: store,
     });
@@ -803,7 +874,10 @@ describe('7.5 regressions: nonce store claim contract (B2/M1/M2)', () => {
   });
 
   it('replay outranks expiry: claimed nonce + expired attestation -> invalid (M1)', async () => {
-    const store = { async claim() { return false; } };
+    const store = {
+      async has() { return true; },
+      async claim(): Promise<'claimed'> { throw new Error('must not claim an expired nonce'); },
+    };
     const result = await verifier().verifyAttestation(vectors.attestations.expired, {
       nonceStore: store,
     });
@@ -814,7 +888,8 @@ describe('7.5 regressions: nonce store claim contract (B2/M1/M2)', () => {
 
   it('a throwing claim store fails closed as unknown + lookup_failed (M2)', async () => {
     const store = {
-      async claim(): Promise<boolean> {
+      async has() { return false; },
+      async claim(): Promise<'claimed'> {
         throw new Error('store unavailable');
       },
     };
@@ -823,6 +898,145 @@ describe('7.5 regressions: nonce store claim contract (B2/M1/M2)', () => {
     });
     expect(result.status).toBe('unknown');
     expect(result.failures).toEqual(['lookup_failed']);
+  });
+
+  it('a failing replay read never claims and fails closed', async () => {
+    let claims = 0;
+    const store = {
+      async has(): Promise<boolean> { throw new Error('store unavailable'); },
+      async claim() { claims += 1; return 'claimed' as const; },
+    };
+    const result = await verifier().verifyAttestation(vectors.attestations.valid, {
+      nonceStore: store,
+    });
+    expect(result.status).toBe('unknown');
+    expect(result.failures).toEqual(['lookup_failed']);
+    expect(claims).toBe(0);
+  });
+
+  it('never claims a fresh nonce for expired, unregistered, or uncertain results', async () => {
+    let claims = 0;
+    const store = {
+      async has() { return false; },
+      async claim() { claims += 1; return 'claimed' as const; },
+    };
+    const expired = await verifier().verifyAttestation(vectors.attestations.expired, {
+      nonceStore: store,
+    });
+    expect(expired.status).toBe('expired');
+    const unregistered = await verifier({
+      reader: createStaticReader({ [A]: null }, 'live'),
+    }).verifyAttestation(vectors.attestations.valid, { nonceStore: store });
+    expect(unregistered.status).toBe('unregistered');
+    const uncertain = await verifier({
+      reader: { source: 'live', async lookupHuman() { throw new Error('offline'); } },
+    }).verifyAttestation(vectors.attestations.valid, { nonceStore: store });
+    expect(uncertain.status).toBe('unknown');
+    expect(claims).toBe(0);
+  });
+
+  it('claims on checkRegistration=false only after the read-only replay check', async () => {
+    const calls: string[] = [];
+    const store = {
+      async has() { calls.push('has'); return false; },
+      async claim() { calls.push('claim'); return 'claimed' as const; },
+    };
+    const result = await verifier().verifyAttestation(vectors.attestations.valid, {
+      nonceStore: store,
+      checkRegistration: false,
+    });
+    expect(result.status).toBe('verified');
+    expect(calls).toEqual(['has', 'claim']);
+  });
+
+  it('two concurrent presentations both pass has but only one atomic claim verifies', async () => {
+    let claimed = false;
+    const store = {
+      async has() { return false; },
+      async claim() {
+        if (claimed) return 'replay' as const;
+        claimed = true;
+        return 'claimed' as const;
+      },
+    };
+    const v = verifier();
+    const results = await Promise.all([
+      v.verifyAttestation(vectors.attestations.valid, { nonceStore: store }),
+      v.verifyAttestation(vectors.attestations.valid, { nonceStore: store }),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual(['invalid', 'verified']);
+    expect(results.find((result) => result.status === 'invalid')?.failures).toEqual([
+      'replay_detected',
+    ]);
+  });
+
+  it('a registration lookup that crosses expiry returns expired without claiming', async () => {
+    let clock = NOW;
+    let claims = 0;
+    const afterExpiry = new Date(Date.parse(vectors.attestations.valid.payload.expiresAt) + 1);
+    const v = verifier({
+      now: () => clock,
+      reader: {
+        source: 'live',
+        async lookupHuman() {
+          clock = afterExpiry;
+          return HUMAN_1;
+        },
+      },
+    });
+    const result = await v.verifyAttestation(vectors.attestations.valid, {
+      nonceStore: {
+        async has() { return false; },
+        async claim() { claims += 1; return 'claimed' as const; },
+      },
+    });
+    expect(result.status).toBe('expired');
+    expect(result.failures).toEqual(['expired']);
+    expect(claims).toBe(0);
+  });
+
+  it('an expiry crossing at the atomic claim returns expired and records nothing', async () => {
+    let clock = NOW;
+    let activeClaims = 0;
+    const afterExpiry = new Date(Date.parse(vectors.attestations.valid.payload.expiresAt) + 1);
+    const v = verifier({ now: () => clock });
+    const result = await v.verifyAttestation(vectors.attestations.valid, {
+      nonceStore: {
+        async has() { return false; },
+        async claim() {
+          clock = afterExpiry;
+          // The store's clock check occurs at its atomic write point.
+          if (Date.parse(vectors.attestations.valid.payload.expiresAt) <= clock.getTime()) {
+            return 'expired' as const;
+          }
+          activeClaims += 1;
+          return 'claimed' as const;
+        },
+      },
+    });
+    expect(result.status).toBe('expired');
+    expect(result.failures).toEqual(['expired']);
+    expect(activeClaims).toBe(0);
+  });
+
+  it('a claim made just before expiry cannot return verified after the clock crosses', async () => {
+    let clock = NOW;
+    let claimExpiresAt = 0;
+    const afterExpiry = new Date(Date.parse(vectors.attestations.valid.payload.expiresAt) + 1);
+    const v = verifier({ now: () => clock });
+    const store = {
+      async has() { return claimExpiresAt > clock.getTime(); },
+      async claim(_nonce: string, _wallet: EvmAddress, expiresAt: string) {
+        claimExpiresAt = Date.parse(expiresAt); // recorded while still live
+        clock = afterExpiry; // crosses before the verifier returns
+        return 'claimed' as const;
+      },
+    };
+    const result = await v.verifyAttestation(vectors.attestations.valid, {
+      nonceStore: store,
+    });
+    expect(result.status).toBe('expired');
+    expect(await store.has()).toBe(false); // its expiry makes the claim non-persistent
   });
 });
 

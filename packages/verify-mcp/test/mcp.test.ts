@@ -11,9 +11,11 @@ import {
   createVerifier,
   type AgentBookReader,
   type EvmAddress,
+  type FailureCode,
   type SignedAttestation,
   type Verifier,
 } from '@fiador/verify';
+import { computeChecks } from '../src/checks.js';
 import { ConfigError, depsFromEnv } from '../src/config.js';
 import { createVerifyHttpServer, parseHttpOptions } from '../src/http.js';
 import { createVerifyMcpServer, type VerifyMcpDeps } from '../src/server.js';
@@ -371,6 +373,34 @@ describe('7.5 regressions: HTTP wiring (B4/m7/M15)', () => {
     }
   });
 
+  it('a chunked body over the cap is refused 413 before SDK JSON parsing', async () => {
+    const { server, base } = await startHttp(makeDeps());
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = httpRequest(`${base}/mcp`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+            'transfer-encoding': 'chunked',
+          },
+        }, (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode ?? 0));
+        });
+        req.on('error', reject);
+        req.write('{"pad":"');
+        for (let index = 0; index < 17; index += 1) {
+          req.write('x'.repeat(64 * 1024));
+        }
+        req.end('"}');
+      });
+      expect(status).toBe(413);
+    } finally {
+      server.close();
+    }
+  });
+
   it('DNS-rebinding protection rejects a foreign Host header on loopback binds', async () => {
     const { server, base } = await startHttp(makeDeps());
     try {
@@ -486,6 +516,29 @@ describe('7.5 regressions: verify_attestation inputs (M10/M11/M5/M6)', () => {
     expect(body.checks.registration).toBe('not_checked');
     // Binding DID run and pass before the network stage; it may say so.
     expect(body.checks.binding.subject).toBe('pass');
+  });
+
+  it('date failures cannot prove signature success when a lookup failed ambiguously', async () => {
+    const publicResult = await makeDeps().verifier.verifyAttestation(
+      vectors.attestations.valid,
+    );
+    const cases: Array<{ status: 'expired' | 'invalid'; failures: FailureCode[] }> = [
+      { status: 'expired', failures: ['expired', 'lookup_failed'] },
+      { status: 'invalid', failures: ['not_yet_valid', 'lookup_timeout'] },
+      { status: 'invalid', failures: ['attestation_lifetime_invalid', 'lookup_failed'] },
+      { status: 'invalid', failures: ['subject_mismatch', 'expired', 'lookup_failed'] },
+    ];
+    for (const { status, failures } of cases) {
+      const checks = computeChecks({
+        status,
+        addressTruncated: publicResult.addressTruncated,
+        humanHash: null,
+        failures,
+        evidence: publicResult.evidence,
+      }, { subject: true, wallet: false });
+      expect(checks.signature).toBe('not_checked');
+      expect(checks.registration).toBe('not_checked');
+    }
   });
 
   it('a lifetime failure reports signature/binding honestly (M6)', async () => {
