@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+Fixes:
+
+- The AgentBook lookup fails closed on garbage reader values
+  (7.5 re-review N1, mirroring the @fiador/verify fix pass 2 in
+  PR #35): only None (no entry) or a string in the canonical
+  0x + 64-hex humanId shape counts as a lookup result. Any
+  other resolved value - a number, a malformed, unpadded, or
+  overlong string, a mapping, raw bytes - yields unknown +
+  lookup_failed on both the address and attestation paths,
+  never a verified result with a hash of the garbage. The
+  live reader now renders the contract's uint256 in that
+  canonical padded form (viem toHex(value, { size: 32 }))
+  instead of dropping leading zero bytes.
+
 ## 0.3.0 — 2026-10-26
 
 The §7.5 adversarial-review mirror pass: the Python counterpart of

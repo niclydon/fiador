@@ -155,7 +155,12 @@ class LiveReader:
         value = int(result, 16)
         if value == 0:
             return None
-        return hex(value)  # minimal lowercase hex, mirroring viem toHex
+        # Canonical 32-byte lowercase hex, mirroring viem's
+        # toHex(value, { size: 32 }): the verifier accepts only
+        # this shape as a registration (7.5 re-review N1), so the
+        # live reader must not hand it a minimal-length rendering
+        # with the leading zero bytes dropped.
+        return "0x" + format(value, "064x")
 
 
 class StaticReader:

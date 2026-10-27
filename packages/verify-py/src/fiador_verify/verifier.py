@@ -58,6 +58,8 @@ ERC1271_MAGIC = "0x1626ba7e"
 MAX_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000
 _IS_VALID_SIGNATURE_SELECTOR = "0x1626ba7e"  # isValidSignature(bytes32,bytes)
 _ADDRESS_SHAPE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+# The canonical humanId shape (SPEC 3.1/3.5): 0x-prefixed 32-byte hex.
+_HUMAN_ID_SHAPE = re.compile(r"0x[0-9a-fA-F]{64}")
 _MAX_INFLIGHT_DEADLINE_CALLS = 8
 _DEADLINE_SLOTS = threading.BoundedSemaphore(_MAX_INFLIGHT_DEADLINE_CALLS)
 
@@ -285,9 +287,20 @@ class Verifier:
             lambda: self._reader.lookup_human(address), signal
         )
         if kind == "value":
+            # Fail closed on the VALUE (7.5 re-review N1): None is
+            # the one unregistered signal; a string in the canonical
+            # humanId shape is a registration; ANYTHING else a reader
+            # resolves - a number, a malformed or unpadded string, a
+            # mapping, raw bytes - is a lookup failure. A non-None
+            # garbage value must never be hashed into a 'verified'
+            # result. fullmatch, not a $-anchored match: in Python
+            # '$' also matches before a trailing newline, which the
+            # TS core's shape test rejects.
             if value is None:
                 return _LookupOutcome("unregistered", latency_ms())
-            return _LookupOutcome("registered", latency_ms(), human_id=value)
+            if isinstance(value, str) and _HUMAN_ID_SHAPE.fullmatch(value):
+                return _LookupOutcome("registered", latency_ms(), human_id=value)
+            return _LookupOutcome("unknown", latency_ms(), code="lookup_failed")
         if kind == "timeout":
             return _LookupOutcome("unknown", latency_ms(), code="lookup_timeout")
         return _LookupOutcome("unknown", latency_ms(), code="lookup_failed")
