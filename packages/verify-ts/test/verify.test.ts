@@ -559,6 +559,7 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
     ethCallResult: string,
     check: (rpcUrl: string, ethCalls: () => number) => Promise<void>,
     chainId = '0x1e0',
+    ethCallBehavior: { status?: number; delayMs?: number; revert?: boolean } = {},
   ) {
     let ethCalls = 0;
     const server = createServer((req, res) => {
@@ -567,14 +568,36 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
       req.on('end', () => {
         const parsed = JSON.parse(body) as { method: string; id: number };
         if (parsed.method === 'eth_call') ethCalls += 1;
-        res.setHeader('content-type', 'application/json');
-        res.end(
-          JSON.stringify({
-            jsonrpc: '2.0',
-            id: parsed.id,
-            result: parsed.method === 'eth_call' ? ethCallResult : chainId,
-          }),
-        );
+        const reply = () => {
+          if (parsed.method === 'eth_call' && ethCallBehavior.status !== undefined) {
+            res.statusCode = ethCallBehavior.status;
+            res.end('RPC unavailable');
+            return;
+          }
+          res.setHeader('content-type', 'application/json');
+          if (parsed.method === 'eth_call' && ethCallBehavior.revert) {
+            res.end(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: parsed.id,
+                error: { code: 3, message: 'execution reverted', data: '0x' },
+              }),
+            );
+            return;
+          }
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: parsed.id,
+              result: parsed.method === 'eth_call' ? ethCallResult : chainId,
+            }),
+          );
+        };
+        if (parsed.method === 'eth_call' && ethCallBehavior.delayMs !== undefined) {
+          setTimeout(reply, ethCallBehavior.delayMs);
+        } else {
+          reply();
+        }
       });
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -720,6 +743,79 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
       expect(result.failures).toEqual(['signature_mismatch']);
       expect(result.address).toBe(CONTRACT);
     });
+  });
+
+  it('ERC-1271: empty contract response -> signature_mismatch', async () => {
+    await with1271Rpc('0x', async (rpcUrl) => {
+      const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage({
+        message: SM.message,
+        signature: `0x${'11'.repeat(65)}`,
+        signatureType: 'erc1271',
+        expectedAddress: CONTRACT,
+      });
+      expect(result.verified).toBe(false);
+      expect(result.failures).toEqual(['signature_mismatch']);
+    });
+  });
+
+  it('ERC-1271: contract revert -> signature_mismatch', async () => {
+    await with1271Rpc(
+      `0x1626ba7e${'00'.repeat(28)}`,
+      async (rpcUrl) => {
+        const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage({
+          message: SM.message,
+          signature: `0x${'11'.repeat(65)}`,
+          signatureType: 'erc1271',
+          expectedAddress: CONTRACT,
+        });
+        expect(result.verified).toBe(false);
+        expect(result.failures).toEqual(['signature_mismatch']);
+      },
+      '0x1e0',
+      { revert: true },
+    );
+  });
+
+  it('ERC-1271: same-chain HTTP 503 -> lookup_failed, never signature_mismatch', async () => {
+    await with1271Rpc(
+      `0x1626ba7e${'00'.repeat(28)}`,
+      async (rpcUrl, ethCalls) => {
+        const result = await noLookupVerifier({ rpcUrl, timeoutMs: 500 }).verifySignedMessage({
+          message: SM.message,
+          signature: `0x${'11'.repeat(65)}`,
+          signatureType: 'erc1271',
+          expectedAddress: CONTRACT,
+        });
+        expect(result.verified).toBe(false);
+        expect(result.failures).toEqual(['lookup_failed']);
+        expect(result.address).toBe(CONTRACT);
+        expect(ethCalls()).toBe(1);
+      },
+      '0x1e0',
+      { status: 503 },
+    );
+  });
+
+  it('ERC-1271: delayed eth_call obeys timeoutMs', async () => {
+    await with1271Rpc(
+      `0x1626ba7e${'00'.repeat(28)}`,
+      async (rpcUrl, ethCalls) => {
+        const started = Date.now();
+        const result = await noLookupVerifier({ rpcUrl, timeoutMs: 80 }).verifySignedMessage({
+          message: SM.message,
+          signature: `0x${'11'.repeat(65)}`,
+          signatureType: 'erc1271',
+          expectedAddress: CONTRACT,
+        });
+        expect(Date.now() - started).toBeLessThan(200);
+        expect(result.verified).toBe(false);
+        expect(result.failures).toEqual(['lookup_timeout']);
+        expect(result.address).toBe(CONTRACT);
+        expect(ethCalls()).toBe(1);
+      },
+      '0x1e0',
+      { delayMs: 300 },
+    );
   });
 
   it('ERC-1271: wrong-chain RPC -> lookup_failed (check unexecutable, not a mismatch)', async () => {

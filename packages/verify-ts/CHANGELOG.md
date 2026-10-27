@@ -11,7 +11,9 @@ ERC-1271 for contract signers, the path caller-declared and never
 silently switched), and returns its own small result —
 `{ verified, address, failures }` — reusing the existing failure
 codes (`signature_mismatch`, `subject_mismatch`,
-`malformed_address`). It performs no AgentBook lookup and no
+`malformed_address`, `lookup_failed`, `lookup_timeout`). ERC-1271
+contract rejection is a mismatch; failed or timed-out RPC checks
+remain unchecked. It performs no AgentBook lookup and no
 attestation semantics; registration composes through
 `verifyAddress`, and freshness and replay are the caller's
 protocol's concern. New signed-message fixture vector; test
