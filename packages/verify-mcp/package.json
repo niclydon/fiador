@@ -31,6 +31,7 @@
   "name": "@fiador/verify-mcp",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "start": "node dist/main.js",
     "start:http": "node dist/main.js --http",
     "test": "vitest run",
