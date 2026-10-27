@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'">
+  <meta name="description" content="Help with Fiador's public attestation checks and owner-only Slack trial.">
+  <title>Support — Fiador</title>
+  <link rel="stylesheet" href="/verify/style.css">
+  <script defer src="/theme.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="wordmark" href="/">Fiador</a>
+    <button id="theme-toggle" class="theme-toggle" type="button">Use dark mode</button>
+  </header>
+  <main id="content">
+    <div class="hero-art" aria-hidden="true"><img src="/assets/fiador-banner.webp" alt=""></div>
+    <div class="hero-copy">
+      <p class="eyebrow">Fiador / Support</p>
+      <h1>Help with a check</h1>
+      <p>Fiador — human-backed attestation for Discord bots. Its separate Slack app is being prepared for an owner-only staging trial. As of 27 October 2026, no live Slack sign-in or World proof has run; general Slack enrollment is closed.</p>
+    </div>
+
+    <section class="check-card" aria-labelledby="slack-title">
+      <h2 id="slack-title">Slack owner trial</h2>
+      <p>If the trial is enabled and the app says a private link expired, a check is pending, or an outcome is uncertain, stop. Do not open another World ID proof or repeat a submitted proof. A verification response can be lost after World has received a one-time proof. Only the trial operator can review the saved attempt and decide what happens next.</p>
+      <p>The owner can look for a confirmed check date in Fiador's App Home or with <code>/fiador-whois</code>. An installed app or a working command does not mean enrollment is enabled. The trial uses one configured workspace member; a second account is outside this test.</p>
+    </section>
+
+    <section class="check-card" aria-labelledby="browser-title">
+      <h2 id="browser-title">Public Discord attestation check</h2>
+      <p>Use the <a href="/verify/">browser verification page</a> for a fresh check. If an attestation host blocks browser access, paste its public signed JSON into the page. If the RPC endpoint is unavailable, the result may say it could not check; do not treat that as a verified result. A passing wallet check does not prove control of the named Discord application.</p>
+    </section>
+
+    <section class="check-card" aria-labelledby="contact-title">
+      <h2 id="contact-title">Get help without sharing a proof</h2>
+      <p>For a general question or reproducible public-site bug, <a href="https://github.com/niclydon/fiador/issues/new">open an issue in the Fiador repository</a>. Describe the page or command and the general error shown. The issue is public.</p>
+      <p>Do not put a private check link, completed World proof, Slack workspace or member ID, cookie, token, wallet key, or private recovery detail in an issue. The current Slack trial is for its operator's account only; account-specific problems must stay in the operator's private review process. There is no published private support inbox for other participants, so do not invite them into this trial.</p>
+      <p>Read <a href="/privacy/">privacy and data use</a> for what the site and trial process.</p>
+    </section>
+  </main>
+  <footer><p>Created by Nic Lydon · Independent open source · Updated 27 October 2026 · <a href="/privacy/">Privacy</a></p></footer>
+</body>
+</html>

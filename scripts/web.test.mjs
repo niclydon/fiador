@@ -11,6 +11,8 @@ test('the web build publishes the exact static source files at their requested p
     'verify/index.html',
     'verify/app.js',
     'verify/style.css',
+    'privacy/index.html',
+    'support/index.html',
     'attestations/nova.json',
     'assets/fiador-banner.webp',
     'assets/badges/fiador-pill-light-unverified.svg',

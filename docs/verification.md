@@ -8,6 +8,23 @@ dedicated program wallet by role and record methods and status without
 wallet or human-hash fragments. The signed public attestation retains
 the wallet address required by the protocol.
 
+## 2026-10-27 — privacy and support route candidate
+
+- The local web build includes `/privacy/` and `/support/`; `npm run
+  test:web` passed both web build tests. The pages describe the public
+  attestation site and the prepared, owner-only Slack trial. No Slack
+  sign-in or World proof was run for this candidate.
+- Manual gitleaks v8.30.1 scans of the full working tree and git
+  history found nine current matches and 15 historical instances.
+  Seven current matches are Discord application IDs in synthetic test
+  fixtures; two are the explicitly labelled Hardhat/Anvil test keys
+  in the signer suite. The historical matches are those same fixture
+  classes. None is in this candidate's changed files. No candidate
+  value is printed in this log.
+- This is local candidate evidence, not a public release. The web
+  build also includes `/verify/` and `/v/`, whose production release
+  has separate browser, preview, and privacy gates.
+
 ## 2026-10-26 — verify core 0.1.0 and verify MCP 0.1.0
 
 Environment: Node v22.23.4, viem 2.57.11, @modelcontextprotocol/sdk

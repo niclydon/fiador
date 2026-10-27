@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'">
+  <meta name="description" content="How Fiador's public attestation site and owner-only Slack trial handle verification data.">
+  <title>Privacy and data use — Fiador</title>
+  <link rel="stylesheet" href="/verify/style.css">
+  <script defer src="/theme.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="wordmark" href="/">Fiador</a>
+    <button id="theme-toggle" class="theme-toggle" type="button">Use dark mode</button>
+  </header>
+  <main id="content">
+    <div class="hero-art" aria-hidden="true"><img src="/assets/fiador-banner.webp" alt=""></div>
+    <div class="hero-copy">
+      <p class="eyebrow">Fiador / Privacy</p>
+      <h1>Privacy and data use</h1>
+      <p>Fiador — human-backed attestation for Discord bots. A separate Slack app is being prepared for an owner-only staging trial. As of 27 October 2026, its backend, Slack sign-in, and World proof have not run live. General Slack enrollment is closed.</p>
+    </div>
+
+    <section class="check-card" aria-labelledby="public-site-title">
+      <h2 id="public-site-title">Public site and attestation checks</h2>
+      <p>This site serves public pages, a registry, and signed attestations. Its browser verification page checks public records against World Chain and may fetch an attestation from another host. Starting a check, including by opening a prefilled verification link, sends requests to the chosen registry, attestation host, and RPC endpoint. Those hosts and this site's host may receive and log ordinary request data such as IP address and requested URL. The site code has no analytics or third-party page assets.</p>
+      <p>A published Fiador attestation includes the signing wallet's full address and a hash of its AgentBook human identifier. AgentBook registration is public on World Chain. A disclosed wallet or published hash can be matched to the pseudonymous identifier and other wallets registered to it. Fiador's public result omits the raw identifier; that does not make the chain data private.</p>
+      <p>The site stores your light or dark theme choice in your browser. The browser verification form runs locally; its inputs are not submitted to a Fiador account service.</p>
+    </section>
+
+    <section class="check-card" aria-labelledby="slack-title">
+      <h2 id="slack-title">Owner-only Slack trial</h2>
+      <p>When enabled, the separate Slack app uses the workspace and member IDs supplied with its commands and App Home events to limit who can use a check. Sign in with Slack requests the <code>openid</code> scope to match a private check link to the same workspace member. The app does not request message history. A member lookup for <code>/fiador-whois @member</code> also uses Slack's member information API. Slack's own handling of data is governed by Slack.</p>
+      <p><code>/fiador-verify</code> returns a private check link in an ephemeral Slack response. The browser keeps the link's signed state token, not the whole URL, in the tab's session storage across Slack sign-in. The token includes workspace and member IDs and is signed, not encrypted. The browser removes it when a proof callback starts, before the server replies, or on an IDKit error. A failed or expired sign-in flow can leave it there until the tab closes or its storage is cleared. Do not forward the link. The sign-in flow also places short-lived, signed but unencrypted cookies in the browser. They carry workspace and member IDs; the flow cookie lasts at most five minutes and the browser session at most ten minutes. The trial stores opaque flow hashes in its database, and does not store a Slack access token from the sign-in response.</p>
+      <p>To start a World ID check, the app would create a short-lived private link and a proof request for the selected member. The browser would send the completed proof to the Fiador trial server, which encrypts it in its database before asking World to verify it. World would receive the proof. The app would store a hashed workspace key and keyed account identifiers, the request and its outcome, and, after a confirmed check, a nullifier hash and verification date.</p>
+      <p>App Home and <code>/fiador-whois</code> send an account's recorded check date through Slack when one exists. Those responses do not identify the human or establish who is using the account now. Slack receives these app views and command responses. The prepared trial admits only its one configured owner account.</p>
+    </section>
+
+    <section class="check-card" aria-labelledby="retention-title">
+      <h2 id="retention-title">Retention and review</h2>
+      <p>The trial code erases the stored encrypted proof after a confirmed account binding, a definitive rejection, or a binding conflict. If the outcome is unclear, it holds the encrypted proof and the account's reservation for operator review rather than asking for another one-time proof. Enrollment intents, nonce rows, proof attempts, and bindings have no automatic deletion schedule, so this page cannot promise a deletion date for them. Expired sign-in flow rows are cleaned separately. General enrollment is still closed while retention and deletion handling are unresolved.</p>
+      <p>For help, use the <a href="/support/">support page</a>. The public <a href="https://github.com/niclydon/fiador/issues/new">Fiador issue tracker</a> accepts general questions and bugs. Do not post a private check link, proof, Slack account details, or secret in a public issue. The owner-only trial's operator handles account-specific review privately.</p>
+    </section>
+  </main>
+  <footer><p>Created by Nic Lydon · Independent open source · Updated 27 October 2026 · <a href="/support/">Support</a></p></footer>
+</body>
+</html>
