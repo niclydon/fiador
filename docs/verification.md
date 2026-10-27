@@ -137,3 +137,26 @@ decision: @worldcoin/agentkit-core 0.2.1.
 - This verifies the static publication and route boundary. It does
   not verify Slack owner enrollment or sign-in, a completed World ID
   check, Discord application control, or verifier bot operation.
+## 2026-10-26: §7.5 adversarial-review fix pass (verify core 0.3.0, verify-mcp 0.2.0)
+
+- The §7.5 review FAILED the gate on blockers B1–B4 (signatureType
+  validated then ignored; nonce-store check-then-set race; open
+  envelope/subject objects; unbounded HTTP body pre-read in the MCP
+  server), majors M1–M17, and minors m1–m8. The fix pass lands all
+  of them on branch w0/ar-fixes with a regression test per finding.
+- Test counts: @fiador/verify 36 passed / 3 skipped (baseline) ->
+  60 passed / 3 skipped; @fiador/verify-mcp 9 -> 25 passed. Full
+  root suite green (221 passed + 3 skipped across workspaces, plus
+  the web tests) and root typecheck clean. The one consumer touch:
+  verifier-bot FAILURE_SENTENCES gained the plain-language sentence
+  for the new attestation_lifetime_invalid code.
+- Canonical-form evidence: every pre-existing fixture vector keeps
+  a byte-identical canonical message after the serialisation fix
+  (baseline captured from the pre-fix implementation, pinned in
+  packages/verify-ts/test/canonical-baseline.json; all six
+  pre-existing attestations byte-identical incl. payload/signature,
+  three new vectors added for the __proto__, integer-key, and
+  astral-key cases).
+- Note: verify-page/verify/app.js is a bundle of this library; it
+  regenerates from the 0.3.0 core on the verify page next web
+  build and is deliberately not churned in this PR.

@@ -14,7 +14,7 @@ import {
 import { worldchain } from 'viem/chains';
 import { canonicalAttestationMessage, validateSignedAttestation } from './canonical.js';
 import { hashHumanId, truncateAddress } from './hash.js';
-import { AGENTBOOK_CONTRACT, createLiveReader } from './reader.js';
+import { AGENTBOOK_CONTRACT, assertRpcUrlAllowed, createLiveReader } from './reader.js';
 import type {
   CheckEvidence,
   EvmAddress,
@@ -47,7 +47,68 @@ const ERC1271_ABI = [
   },
 ] as const;
 
-class LookupTimeoutError extends Error {}
+type RaceOutcome<T> =
+  | { kind: 'value'; value: T }
+  | { kind: 'timeout' }
+  | { kind: 'aborted' }
+  | { kind: 'failed'; error: unknown };
+
+// Run an async operation against the verifier's deadline and an
+// optional caller AbortSignal. The operation is invoked INSIDE the
+// guarded region (7.5 review M12): a collaborator that throws
+// synchronously — before returning its promise — is a 'failed'
+// outcome, never an exception escaping a function whose contract is
+// "returns a result". A late rejection after the deadline wins is
+// swallowed so it never surfaces as an unhandled rejection.
+async function raceDeadline<T>(
+  start: () => Promise<T>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<RaceOutcome<T>> {
+  let call: Promise<T>;
+  try {
+    call = start();
+  } catch (error) {
+    return { kind: 'failed', error };
+  }
+  call.catch(() => {});
+  let timer: NodeJS.Timeout | undefined;
+  let onAbort: (() => void) | undefined;
+  const deadline = new Promise<'timeout' | 'aborted'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs);
+    if (signal) {
+      if (signal.aborted) {
+        resolve('aborted');
+        return;
+      }
+      onAbort = () => resolve('aborted');
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+  try {
+    const winner = await Promise.race([
+      call.then(
+        (value) => ({ kind: 'value' as const, value }),
+        (error: unknown) => ({ kind: 'failed' as const, error }),
+      ),
+      deadline.then((kind) => ({ kind })),
+    ]);
+    return winner;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+type LookupOutcome =
+  | { state: 'registered'; humanId: string; latencyMs: number }
+  | { state: 'unregistered'; latencyMs: number }
+  | { state: 'unknown'; code: 'lookup_failed' | 'lookup_timeout'; latencyMs: number };
+
+type SignatureOutcome =
+  | { kind: 'match' }
+  | { kind: 'mismatch' }
+  | { kind: 'unknown'; code: 'lookup_failed' | 'lookup_timeout' };
 
 function isErc1271Rejection(error: unknown): boolean {
   return (
@@ -62,16 +123,10 @@ function isErc1271Rejection(error: unknown): boolean {
 
 function isRpcTimeout(error: unknown): boolean {
   return (
-    error instanceof LookupTimeoutError ||
-    (error instanceof BaseError &&
-      error.walk((cause) => cause instanceof ViemTimeoutError) !== null)
+    error instanceof BaseError &&
+    error.walk((cause) => cause instanceof ViemTimeoutError) !== null
   );
 }
-
-type LookupOutcome =
-  | { state: 'registered'; humanId: string; latencyMs: number }
-  | { state: 'unregistered'; latencyMs: number }
-  | { state: 'unknown'; code: 'lookup_failed' | 'lookup_timeout'; latencyMs: number };
 
 function readDisclosure(input: unknown): 'hash' | 'none' | undefined {
   if (typeof input === 'object' && input !== null) {
@@ -88,9 +143,11 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
   const contract: EvmAddress = options.contractAddress ?? AGENTBOOK_CONTRACT;
   if (!isAddress(contract)) {
     // Programmer error, not an expected failure: the library throws here
-    // and only here (SPEC 3.0).
-    throw new TypeError(`createVerifier: malformed contract address: ${contract}`);
+    // and only here (SPEC 3.0). The message names no value (7.5 review
+    // M14): configuration values are operator material, not diagnostics.
+    throw new TypeError('createVerifier: malformed contract address');
   }
+  assertRpcUrlAllowed(options.rpcUrl);
   const reader =
     options.reader ??
     createLiveReader({
@@ -107,72 +164,82 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     transport: http(options.rpcUrl, { retryCount: 0, timeout: timeoutMs }),
   });
 
-  async function erc1271Valid(
+  // ERC-1271 validation for a smart-wallet signer. Both RPC calls share
+  // one deadline, with the same timeout/abort race as AgentBook (7.5
+  // review B1): a hanging eth_call must not hold verifyAttestation open
+  // past timeoutMs. Distinguish three outcomes honestly: the contract
+  // answered (match/mismatch), the contract definitively rejected the
+  // call (mismatch), or the network could not answer at all (unknown).
+  // A viem readContract error can wrap either a revert or a transport
+  // failure; treating every rejection as a bad signature is unsound.
+  async function erc1271Check(
     wallet: EvmAddress,
     message: string,
     signature: string,
-  ): Promise<boolean> {
-    const check = async () => {
-      // Chain identity and the contract read share one deadline. A
-      // non-World Chain RPC is an unchecked signature, not a mismatch.
-      if (await publicClient.getChainId() !== worldchain.id) {
-        throw new Error('ERC-1271 RPC is not World Chain.');
-      }
-      try {
-        const result = await publicClient.readContract({
+    signal?: AbortSignal,
+  ): Promise<SignatureOutcome> {
+    // The configured RPC is the trust oracle for this answer too; the
+    // chain-id call is a misconfiguration guard (it catches an endpoint
+    // answering for another chain), not an authentication of the RPC.
+    const deadlineAt = performance.now() + timeoutMs;
+    const remaining = () => Math.max(0, deadlineAt - performance.now());
+    const chain = await raceDeadline(() => publicClient.getChainId(), remaining(), signal);
+    if (chain.kind === 'timeout') return { kind: 'unknown', code: 'lookup_timeout' };
+    if (chain.kind === 'failed' && isRpcTimeout(chain.error)) {
+      return { kind: 'unknown', code: 'lookup_timeout' };
+    }
+    if (chain.kind !== 'value') return { kind: 'unknown', code: 'lookup_failed' };
+    if (chain.value !== worldchain.id) return { kind: 'unknown', code: 'lookup_failed' };
+    if (remaining() === 0) return { kind: 'unknown', code: 'lookup_timeout' };
+    const read = await raceDeadline(
+      () =>
+        publicClient.readContract({
           address: wallet,
           abi: ERC1271_ABI,
           functionName: 'isValidSignature',
           args: [hashMessage(message), signature as Hex],
-        });
-        return result.toLowerCase() === ERC1271_MAGIC;
-      } catch (error) {
-        // A definitive contract revert or empty result rejects the
-        // signature. Transport and ambiguous execution errors cannot
-        // establish a mismatch, so callers report an unchecked result.
-        if (isErc1271Rejection(error)) return false;
-        throw error;
-      }
-    };
-
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new LookupTimeoutError()), timeoutMs);
-    });
-    try {
-      return await Promise.race([check(), deadline]);
-    } finally {
-      if (timer) clearTimeout(timer);
+        }),
+      remaining(),
+      signal,
+    );
+    if (read.kind === 'timeout') return { kind: 'unknown', code: 'lookup_timeout' };
+    if (read.kind === 'aborted') return { kind: 'unknown', code: 'lookup_failed' };
+    if (read.kind === 'failed') {
+      if (isErc1271Rejection(read.error)) return { kind: 'mismatch' };
+      return { kind: 'unknown', code: isRpcTimeout(read.error) ? 'lookup_timeout' : 'lookup_failed' };
     }
+    return read.value.toLowerCase() === ERC1271_MAGIC
+      ? { kind: 'match' }
+      : { kind: 'mismatch' };
   }
 
-  // EIP-191 recovery, shared by verifyAttestation and
-  // verifySignedMessage so there is exactly one recovery path in the
-  // package (SPEC 3.6 amendment). Returns the checksummed signer, or
-  // null when the signature is not EOA-recoverable at all.
-  async function recoverSigner(
-    message: string,
-    signature: string,
-  ): Promise<EvmAddress | null> {
+  // Shared EIP-191 recovery for attestations and arbitrary signed
+  // messages. No RPC or AgentBook lookup runs on this path.
+  async function recoverSigner(message: string, signature: string): Promise<EvmAddress | null> {
     try {
-      return await recoverMessageAddress({
-        message,
-        signature: signature as Hex,
-      });
+      return await recoverMessageAddress({ message, signature: signature as Hex });
     } catch {
       return null;
     }
   }
 
-  async function signatureValid(
+  // The declared signatureType selects the ONE verification path (7.5
+  // review B1). It was previously validated and then ignored: an
+  // 'eip191' document silently fell through to ERC-1271 (an unexpected
+  // RPC call), and a contract wallet's EOA-looking signature could be
+  // accepted on the wrong path. 'eip191' is pure local recovery and
+  // never touches the network; 'eip1271' never attempts recovery.
+  async function signatureCheck(
     attestation: SignedAttestation,
     message: string,
-  ): Promise<boolean> {
+    signal?: AbortSignal,
+  ): Promise<SignatureOutcome> {
     const wallet = attestation.payload.agentWalletAddress;
+    if (attestation.signatureType === 'eip1271') {
+      return erc1271Check(wallet, message, attestation.signature, signal);
+    }
     const recovered = await recoverSigner(message, attestation.signature);
-    if (recovered === wallet) return true;
-    // Not an EOA signature for this wallet; fall through to ERC-1271.
-    return erc1271Valid(wallet, message, attestation.signature);
+    return recovered === wallet ? { kind: 'match' } : { kind: 'mismatch' };
   }
 
   function evidence(latencyMs?: number): CheckEvidence {
@@ -212,36 +279,16 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
   ): Promise<LookupOutcome> {
     const start = Date.now();
     const latency = () => Date.now() - start;
-    const call = reader.lookupHuman(address);
-    // If the deadline wins the race, the underlying call may reject
-    // later; swallow that late rejection so it never surfaces as an
-    // unhandled rejection in the host process.
-    call.catch(() => {});
-    let timer: NodeJS.Timeout | undefined;
-    let onAbort: (() => void) | undefined;
-    const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new LookupTimeoutError()), timeoutMs);
-      if (signal) {
-        if (signal.aborted) {
-          reject(new Error('aborted'));
-          return;
-        }
-        onAbort = () => reject(new Error('aborted'));
-        signal.addEventListener('abort', onAbort, { once: true });
-      }
-    });
-    try {
-      const value = await Promise.race([call, deadline]);
-      if (value === null) return { state: 'unregistered', latencyMs: latency() };
-      return { state: 'registered', humanId: value, latencyMs: latency() };
-    } catch (err) {
-      if (err instanceof LookupTimeoutError) {
+    const outcome = await raceDeadline(() => reader.lookupHuman(address), timeoutMs, signal);
+    switch (outcome.kind) {
+      case 'value':
+        return outcome.value === null
+          ? { state: 'unregistered', latencyMs: latency() }
+          : { state: 'registered', humanId: outcome.value, latencyMs: latency() };
+      case 'timeout':
         return { state: 'unknown', code: 'lookup_timeout', latencyMs: latency() };
-      }
-      return { state: 'unknown', code: 'lookup_failed', latencyMs: latency() };
-    } finally {
-      if (timer) clearTimeout(timer);
-      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      default:
+        return { state: 'unknown', code: 'lookup_failed', latencyMs: latency() };
     }
   }
 
@@ -309,8 +356,19 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     const { payload } = envelope.attestation;
     const wallet = payload.agentWalletAddress;
     const failures: FailureCode[] = [];
+    const finish = (status: VerificationStatus, extra: Partial<Parameters<typeof buildResult>[0]> = {}) =>
+      buildResult({
+        status,
+        address: wallet,
+        failures,
+        ...(disclosure !== undefined ? { disclosure } : {}),
+        ...extra,
+      });
 
-    // Step 2, binding (SPEC 3.3).
+    // Step 2, binding (SPEC 3.3). Expected-wallet comparison is on the
+    // normalised (lowercased) forms (7.5 review m2): a differently-cased
+    // or bad-checksum spelling of the same address is the same wallet,
+    // and a non-string expectation is a mismatch, never a throw.
     if (
       opts.expectedSubject &&
       (opts.expectedSubject.type !== payload.subject.type ||
@@ -318,117 +376,126 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     ) {
       failures.push('subject_mismatch');
     }
-    if (opts.expectedWallet) {
-      let expected: string;
-      try {
-        expected = getAddress(opts.expectedWallet);
-      } catch {
-        expected = opts.expectedWallet.toLowerCase();
-      }
-      if (expected !== wallet) failures.push('wallet_mismatch');
+    if (opts.expectedWallet !== undefined) {
+      const expected: unknown = opts.expectedWallet;
+      const matches =
+        typeof expected === 'string' &&
+        /^0x[0-9a-fA-F]{40}$/.test(expected) &&
+        expected.toLowerCase() === wallet.toLowerCase();
+      if (!matches) failures.push('wallet_mismatch');
     }
 
-    // Step 3, signature over the canonical form.
+    // Step 3, signature over the canonical form, on the declared path.
     const message = canonicalAttestationMessage(payload);
-    let signatureMatches: boolean;
-    try {
-      signatureMatches = await signatureValid(envelope.attestation, message);
-    } catch (error) {
-      return buildResult({
-        status: 'unknown',
-        address: wallet,
-        failures: [isRpcTimeout(error) ? 'lookup_timeout' : 'lookup_failed'],
-        ...(disclosure !== undefined ? { disclosure } : {}),
-      });
-    }
-    if (!signatureMatches) {
-      failures.push('signature_mismatch');
-    }
+    const signature = await signatureCheck(envelope.attestation, message, opts.signal);
 
-    // Step 4, dates and the protocol lifetime cap.
+    // Step 4 facts (dates and the protocol lifetime cap) are computed
+    // before any early return: they are established from the payload
+    // alone, and per SPEC 3.3 precedence they outrank 'unknown' — a
+    // network failure at the signature step must not pre-empt an
+    // expiry or discard a binding failure (7.5 review B1).
     const nowMs = now().getTime();
     const issuedMs = Date.parse(payload.issuedAt);
     const expiresMs = Date.parse(payload.expiresAt);
-    if (expiresMs <= issuedMs || expiresMs - issuedMs > MAX_LIFETIME_MS) {
-      failures.push('malformed_attestation');
-    }
-    if (issuedMs > nowMs + clockSkewMs) failures.push('not_yet_valid');
+    const lifetimeInvalid = expiresMs <= issuedMs || expiresMs - issuedMs > MAX_LIFETIME_MS;
+    const notYetValid = issuedMs > nowMs + clockSkewMs;
     const expired = expiresMs <= nowMs;
-    if (expired) failures.push('expired');
+    const dateFailures = (): FailureCode[] => {
+      const out: FailureCode[] = [];
+      if (lifetimeInvalid) out.push('attestation_lifetime_invalid');
+      if (notYetValid) out.push('not_yet_valid');
+      if (expired) out.push('expired');
+      return out;
+    };
+
+    if (signature.kind === 'unknown') {
+      failures.push(...dateFailures());
+      const invalidClass = failures.some((f) => f !== 'expired');
+      if (invalidClass) {
+        return finish('invalid', { failures: [...failures, signature.code] });
+      }
+      if (expired) {
+        return finish('expired', { failures: [...failures, signature.code] });
+      }
+      return finish('unknown', { failures: [signature.code] });
+    }
+    if (signature.kind === 'mismatch') {
+      failures.push('signature_mismatch');
+    }
+    failures.push(...dateFailures());
 
     const invalidFailures = failures.filter((f) => f !== 'expired');
     if (invalidFailures.length > 0) {
-      return buildResult({
-        status: 'invalid',
-        address: wallet,
-        failures,
-        ...(disclosure !== undefined ? { disclosure } : {}),
-      });
-    }
-    if (expired) {
-      // Expired outranks the lookup outcome (SPEC 3.3 precedence), so the
-      // network check is not run.
-      return buildResult({
-        status: 'expired',
-        address: wallet,
-        failures,
-        ...(disclosure !== undefined ? { disclosure } : {}),
-      });
+      return finish('invalid');
     }
 
-    // Step 5, replay. A supplied nonce store is caller infrastructure;
-    // its own errors propagate as programmer/infra errors, not verdicts.
-    if (opts.nonceStore && (await opts.nonceStore.has(payload.nonce, wallet))) {
-      return buildResult({
-        status: 'invalid',
-        address: wallet,
-        failures: ['replay_detected'],
-        ...(disclosure !== undefined ? { disclosure } : {}),
-      });
-    }
-
-    // Step 6, registration.
-    if (opts.checkRegistration === false) {
-      if (opts.nonceStore) {
-        await opts.nonceStore.add(payload.nonce, wallet, payload.expiresAt);
+    // Step 5, replay (SPEC 3.3): a read-only check establishes replay
+    // before expiry and registration, without consuming a fresh nonce.
+    // The final atomic claim below still decides concurrent attempts.
+    if (opts.nonceStore) {
+      try {
+        if (await opts.nonceStore.has(payload.nonce, wallet)) {
+          return finish('invalid', { failures: [...failures, 'replay_detected'] });
+        }
+      } catch {
+        if (expired) {
+          return finish('expired', { failures: [...failures, 'lookup_failed'] });
+        }
+        return finish('unknown', { failures: ['lookup_failed'] });
       }
-      return buildResult({
-        status: 'verified',
-        address: wallet,
-        failures: [],
-        ...(disclosure !== undefined ? { disclosure } : {}),
-      });
     }
-    const outcome = await lookup(wallet, opts.signal);
-    if (outcome.state === 'unknown') {
-      return buildResult({
-        status: 'unknown',
-        address: wallet,
-        failures: [outcome.code],
-        latencyMs: outcome.latencyMs,
-        ...(disclosure !== undefined ? { disclosure } : {}),
-      });
+
+    if (expired) {
+      // Expired outranks the lookup outcome (SPEC 3.3 precedence), so
+      // the network check is not run.
+      return finish('expired');
     }
-    if (outcome.state === 'unregistered') {
-      // A valid signature from an unregistered wallet attests nothing.
-      return buildResult({
-        status: 'unregistered',
-        address: wallet,
+
+    // Step 6, registration. Only a successful lookup (or an explicit
+    // checkRegistration=false) may consume the nonce. A lookup can
+    // cross expiresAt, so recheck the clock before interpreting it.
+    const outcome = opts.checkRegistration === false
+      ? undefined
+      : await lookup(wallet, opts.signal);
+    if (expiresMs <= now().getTime()) {
+      return finish('expired', { failures: ['expired'] });
+    }
+    if (outcome?.state === 'unknown') {
+      return finish('unknown', { failures: [outcome.code], latencyMs: outcome.latencyMs });
+    }
+    if (outcome?.state === 'unregistered') {
+      return finish('unregistered', {
         failures: ['not_registered'],
         latencyMs: outcome.latencyMs,
-        ...(disclosure !== undefined ? { disclosure } : {}),
       });
     }
     if (opts.nonceStore) {
-      await opts.nonceStore.add(payload.nonce, wallet, payload.expiresAt);
+      try {
+        // claim's own expiry check closes the race between our clock
+        // check and its atomic write. A stale verifier must not make a
+        // nonce persist past expiry.
+        const claim = await opts.nonceStore.claim(payload.nonce, wallet, payload.expiresAt);
+        if (claim === 'replay') {
+          return finish('invalid', { failures: ['replay_detected'] });
+        }
+        if (claim === 'expired') {
+          return finish('expired', { failures: ['expired'] });
+        }
+        if (claim !== 'claimed') {
+          return finish('unknown', { failures: ['lookup_failed'] });
+        }
+      } catch {
+        return finish('unknown', { failures: ['lookup_failed'] });
+      }
     }
-    return buildResult({
-      status: 'verified',
-      address: wallet,
+    if (expiresMs <= now().getTime()) {
+      return finish('expired', { failures: ['expired'] });
+    }
+    return finish('verified', {
       failures: [],
-      humanId: outcome.humanId,
-      latencyMs: outcome.latencyMs,
-      ...(disclosure !== undefined ? { disclosure } : {}),
+      ...(outcome?.state === 'registered'
+        ? { humanId: outcome.humanId, latencyMs: outcome.latencyMs }
+        : {}),
     });
   }
 
@@ -452,40 +519,49 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       });
     }
     // attested_subject: resolve, then verify with the subject as the
-    // expectation (SPEC 3.5).
-    let attestation: SignedAttestation | null;
-    try {
-      attestation = await subject.resolveAttestation(subject.subject);
-    } catch {
+    // expectation (SPEC 3.5). The resolver runs under the same
+    // deadline/abort race as the AgentBook lookup and receives the
+    // caller's signal (7.5 review M3): a hanging resolver must not
+    // hold resolveStatus open past timeoutMs.
+    const resolved = await raceDeadline(
+      () => subject.resolveAttestation(subject.subject, opts?.signal),
+      timeoutMs,
+      opts?.signal,
+    );
+    if (resolved.kind === 'timeout') {
+      return buildResult({
+        status: 'unknown',
+        address: ZERO_ADDRESS,
+        failures: ['lookup_timeout'],
+      });
+    }
+    if (resolved.kind !== 'value') {
       return buildResult({
         status: 'unknown',
         address: ZERO_ADDRESS,
         failures: ['lookup_failed'],
       });
     }
-    if (attestation === null) {
+    // A resolver returning undefined means the same as null (7.5
+    // review m1): no attestation for this subject.
+    if (resolved.value == null) {
       return buildResult({
         status: 'unknown',
         address: ZERO_ADDRESS,
         failures: ['attestation_not_found'],
       });
     }
-    return verifyAttestation(attestation, {
+    return verifyAttestation(resolved.value, {
       expectedSubject: subject.subject,
       ...(opts?.signal ? { signal: opts.signal } : {}),
     });
   }
 
-  // D5 (SPEC 3.6 amendment, Oct 26, 2026): verify an arbitrary
-  // caller-canonicalised signed message through the same machinery
-  // verifyAttestation uses internally. Signature-only: no AgentBook
-  // lookup, no expiry/replay/subject semantics, no humanId in either
-  // direction. The caller declares the signature path; a contract
-  // address checked through the EOA path fails rather than silently
-  // switching to ERC-1271. Never throws for an expected failure.
-  async function verifySignedMessage(
-    input: VerifySignedMessageInput,
-  ): Promise<SignedMessageResult> {
+  // D5 (SPEC 3.6 amendment): verify one arbitrary caller-canonicalised
+  // message without AgentBook, attestation, expiry, or replay semantics.
+  // The caller declares the signature path; there is no EOA-to-contract
+  // fallback and no human identifier in the result.
+  async function verifySignedMessage(input: VerifySignedMessageInput): Promise<SignedMessageResult> {
     const fail = (
       failures: FailureCode[],
       address: EvmAddress | null = null,
@@ -496,9 +572,6 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     }
     const { message, signature, signatureType, expectedAddress } = input;
 
-    // A malformed expected address is its own failure, checked before
-    // any signature work (mirrors verifyAddress validating its input
-    // before the lookup).
     let expected: EvmAddress | undefined;
     if (expectedAddress !== undefined) {
       if (typeof expectedAddress !== 'string' || !isAddress(expectedAddress)) {
@@ -516,10 +589,7 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
         typeof message === 'string' && typeof signature === 'string'
           ? await recoverSigner(message, signature)
           : null;
-      if (recovered === null) {
-        // Invalid or undecodable signature.
-        return fail(['signature_mismatch']);
-      }
+      if (recovered === null) return fail(['signature_mismatch']);
       if (expected !== undefined && recovered !== expected) {
         return fail(['subject_mismatch'], recovered);
       }
@@ -527,14 +597,9 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     }
 
     if (signatureType === 'erc1271') {
-      // There is no recovery for a contract signer: the claimed
-      // contract address is required, and it is the signer.
-      if (expected === undefined) {
-        return fail(['signature_mismatch']);
-      }
-      // Runtime callers can bypass the TypeScript input type. Reject
-      // malformed bytes before even checking chain identity; a
-      // permissive contract must not authenticate malformed input.
+      // No recovery is possible for a contract signer: a named contract
+      // is required, and malformed bytes must fail before any RPC call.
+      if (expected === undefined) return fail(['signature_mismatch']);
       if (
         typeof message !== 'string' ||
         typeof signature !== 'string' ||
@@ -542,26 +607,12 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       ) {
         return fail(['signature_mismatch'], expected);
       }
-      let valid: boolean;
-      try {
-        valid = await erc1271Valid(expected, message, signature);
-      } catch (error) {
-        // The check could not be executed at all (RPC transport
-        // failure or a wrong-chain RPC). SPEC 3.6 D5 amendment,
-        // pinned Oct 26, 2026 (world-program cba7539): that case is
-        // unchecked, not mismatched. A deadline has its existing
-        // lookup_timeout code; other failed checks use lookup_failed.
-        return fail([isRpcTimeout(error) ? 'lookup_timeout' : 'lookup_failed'], expected);
-      }
-      if (!valid) {
-        return fail(['signature_mismatch'], expected);
-      }
+      const outcome = await erc1271Check(expected, message, signature);
+      if (outcome.kind === 'unknown') return fail([outcome.code], expected);
+      if (outcome.kind === 'mismatch') return fail(['signature_mismatch'], expected);
       return { verified: true, address: expected, failures: [] };
     }
 
-    // An unrecognised signatureType from an untyped caller: the path
-    // cannot be determined, which is a wrong-path signature failure,
-    // not a thrown error.
     return fail(['signature_mismatch']);
   }
 
