@@ -1,5 +1,35 @@
 # Changes
 
+## 2026-10-26: dynamic badge service (W0 SPEC section 4)
+
+- badge-service/: the served badge from W0 SPEC section 4, as a
+  top-level app (not a workspace package) over @fiador/verify
+  through its public exports only. Plain Node HTTP; PNG via
+  @resvg/resvg-js rasterising the served SVG at 3x. Routes:
+  /badge/:subjectType/:subjectId.svg|.png (plus the legacy
+  untyped alias), /v1/status/:subjectType/:subjectId returning
+  the public projection plus the badge URL matrix (the verify
+  MCP badge_status shape), /health, and the both-themes
+  explainer at /.
+- States verified/expired/unverified rendered from the canonical
+  palette tables in assets/badges/, both themes and both
+  variants; auto SVG composes both palettes via
+  prefers-color-scheme, auto PNG resolves from the client hint
+  with the dark fallback and X-Badge-Theme. Cache behaviour
+  implements the SPEC 4.6 proposals as configuration (300s
+  verified/expired, 60s negative, no-store on unknown,
+  stale-on-error inside 900s with the original check time).
+- Keyless and fetchless: the attestation source is a local
+  registry file mapping type:id to a signed attestation (the
+  verify MCP shape), loaded at startup; the service fetches
+  nothing. That narrows SPEC 4.2"s URL-registry-plus-fetch
+  sketch deliberately; the divergence and its rationale are
+  recorded in badge-service/README.md.
+- Suite: 27 route-level tests in badge-service (fake verifier
+  and resolver, real HTTP on an ephemeral port), including the
+  raw-humanId deep scan over every response. Nothing deployed;
+  v1 operates no project-run public instance.
+
 ## 2026-10-26: verifier bot safety and maintenance
 
 - The bot checks and logs operator claims without creating a new
