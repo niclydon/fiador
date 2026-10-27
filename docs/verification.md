@@ -58,3 +58,37 @@ decision: @worldcoin/agentkit-core 0.2.1.
   7bf4573c68a6… matching the registration record above.
   https://fiador.org/registry.json is byte-identical to the
   repo registry. §9 step 1 is complete; steps 2-5a remain.
+
+## 2026-10-27 — privacy and support static release candidate
+
+Prepared locally from the verified deployed site commit `4f366af`.
+No preview, PR, or production deployment has been made from this
+candidate. The build publishes only the eight files listed in
+`docs/narrative/2026-10-27-static-privacy-support-release.md`.
+
+- `node scripts/build-pages-static.mjs` and
+  `node --test scripts/static-web.test.mjs`: 3 tests passed. The
+  output allowlist has no `/verify/`, `/v/`, or `/api/preview` route,
+  function, or rewrite. Local HTTP returned 200 for `/`,
+  `/privacy/`, `/support/`, `/registry.json`, and the published
+  attestation, and 404 for those three unshipped routes.
+- Chromium screenshots inspected at 1280 × 800 in light mode and
+  390 × 844 in dark mode for both new pages. Layout and text fit
+  without clipping; the local theme control rendered in both modes.
+- Gitleaks 8.30.1 manual full-tree scan: five pre-existing synthetic
+  test-fixture findings (three Discord ID examples, two generic API
+  key examples), zero in changed paths. All-refs git-history scan:
+  fifteen findings of the same fixture classes, zero in changed
+  paths. No scan finding is being dismissed as a real credential.
+  A private roster comparison found no full identifier or
+  12-character fragment in changed files. The already published
+  attestation's protocol-required wallet and hash data remain
+  byte-identical and are the only private-roster matches in the
+  pre-existing static site.
+- Live `fiador.org` still returned 404 for `/privacy/`,
+  `/support/`, `/verify/`, `/v/example`, and `/api/preview` at this
+  checkpoint. Its `/registry.json` and founding attestation
+  returned 200 and matched this candidate's bytes: SHA-256
+  `65b4d5f9cff45bbf967eb4248348bac1a443ec725ac9571cfdf71b47b5e006aa`
+  and `ad1c0e5e2ab9ea3b78aebd5c2f1b3905392b86a96bc10246264e3a6eba4cce6b`,
+  respectively. This is a baseline comparison, not a release smoke.
