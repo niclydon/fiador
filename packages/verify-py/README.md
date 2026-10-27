@@ -1,0 +1,100 @@
+# fiador-verify (Python)
+
+Verify that a unique human stands behind an agent wallet: AgentBook
+registration lookups and signed operator attestations, with a
+hash-only public result shape.
+
+This package is the Python parity port of
+[`@fiador/verify`](../verify-ts) (the W0 verify core, spec at
+`w0-verify-core/SPEC.md` in the world-program repo). It mirrors the
+TypeScript core field-for-field with snake_case names (W1 DESIGN
+4.1): same check order, same statuses, same failure codes, same
+canonical signing form byte-for-byte, same canonical human hash.
+Parity is not asserted by this README; it is proven by the test
+suite, which runs the TypeScript package's committed fixture vectors
+(`packages/verify-ts/fixtures/vectors.json`, read from the sibling
+path at test time) through this implementation and diffs the
+outcomes. If the TS vectors change, the Python tests fail loudly
+until the port is reconciled.
+
+## Install
+
+```sh
+pip install fiador-verify        # once published
+# From this repo:
+pip install -e packages/verify-py
+```
+
+Requires Python >= 3.11. Runtime dependencies are deliberately
+minimal and mainstream: `eth-account` / `eth-utils` (keys, EIP-191
+recovery, EIP-55 checksums, hashing) and `httpx` (raw JSON-RPC
+transport). There is no `web3.py`: the port speaks raw JSON-RPC so
+that transport failures stay visible as failures instead of being
+collapsed into a null result by middleware — the distinction between
+"checked, not registered" and "could not check" is the core's reason
+to exist (spec 3.1).
+
+## Usage
+
+```python
+from fiador_verify import create_verifier, to_public_verify_result
+
+verifier = create_verifier()  # direct AgentBook reads on World Chain
+
+result = verifier.verify_address("0x…")
+public = to_public_verify_result(result)   # the only public shape
+print(public.status, public.human_hash)    # 'verified', '7bf457…'…
+```
+
+`verify_attestation(attestation, ...)` checks a signed operator
+attestation in a fixed order (shape, subject/wallet binding,
+signature, dates, replay, registration) and returns the same
+`VerifyResult`. `resolve_status(subject)` composes the two for
+address, attestation, and resolver-backed attested-subject inputs.
+`verify_signed_message(message, signature, signature_type,
+expected_address=None)` verifies an arbitrary caller-canonicalised
+message through the same signature machinery (EIP-191 recovery for
+EOAs, ERC-1271 for contract signers, per the signature type the
+caller declares); it performs no AgentBook lookup and no attestation
+semantics (spec 3.6).
+
+Result types are dataclasses: `VerifyResult` (internal; may carry a
+raw humanId only when the verifier was built with
+`include_raw_human_id=True`) and `PublicVerifyResult` (the public
+projection — no raw humanId, no full address, ever).
+
+Options on `create_verifier(...)` mirror the TS core: `reader`
+(an object with `lookup_human(address) -> str | None` that raises on
+transport failure), `rpc_url`, `contract_address`, `timeout_ms`
+(per-lookup deadline, default 5000), `now` (clock injection),
+`clock_skew_ms` (default 60_000; applies to `issuedAt` only, never
+to expiry), and `include_raw_human_id` (default False).
+
+Two deliberate Python adaptations, neither of which changes any
+verdict:
+
+- The API is synchronous. Lookups run under the deadline on a daemon
+  thread, so a hung reader yields `unknown` + `lookup_timeout`
+  exactly as the TS core's promise race does.
+- Where the TS core takes an `AbortSignal`, Python takes a
+  `threading.Event` (`signal=`); setting it aborts a pending lookup,
+  reported as `unknown` + `lookup_failed`, as in TS.
+
+## Tests
+
+The suite is not wired into the repo's npm test chain (which stays
+npm-only). Run it with a virtualenv from the repo root:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -e "packages/verify-py[test]"
+.venv/bin/python -m pytest packages/verify-py
+```
+
+Live-chain tests are gated behind `LIVE_AGENTBOOK=1` (with
+`LIVE_REGISTERED_ADDRESS` / `LIVE_UNREGISTERED_ADDRESS` set) and are
+skipped by default, as in the TS package.
+
+## Licence
+
+Apache-2.0. Copyright 2026 Nic Lydon.

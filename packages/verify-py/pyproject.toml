@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fiador-verify"
+version = "0.1.0"
+description = "Verify that a unique human stands behind an agent wallet: AgentBook registration lookups and signed operator attestations, with a hash-only public result shape. Python parity port of @fiador/verify."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Nic Lydon" }]
+dependencies = [
+    # Keys, EIP-191 recovery, hashing, EIP-55 checksums. Used directly;
+    # no web3.py: the port speaks raw JSON-RPC so transport failures
+    # stay visible instead of collapsing into null (W0 spec 3.1).
+    "eth-account>=0.13",
+    "eth-utils>=5",
+    # Raw JSON-RPC transport for eth_chainId / eth_call.
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
