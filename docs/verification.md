@@ -80,11 +80,9 @@ been made. The build publishes only the eight files listed in
   key examples), zero in changed paths. All-refs git-history scan:
   fifteen findings of the same fixture classes, zero in changed
   paths. No scan finding is being dismissed as a real credential.
-  A private roster comparison found no full identifier or
-  12-character fragment in changed files. The already published
-  attestation's protocol-required wallet and hash data remain
-  byte-identical and are the only private-roster matches in the
-  pre-existing static site.
+  A private identifier scan found no full identifier or 12-character
+  wallet/hash fragment in changed lines. The already published
+  attestation remains byte-identical.
 - Live `fiador.org` still returned 404 for `/privacy/`,
   `/support/`, `/verify/`, `/v/example`, and `/api/preview` at this
   checkpoint. Its `/registry.json` and founding attestation
@@ -97,5 +95,24 @@ been made. The build publishes only the eight files listed in
   `/privacy/` and `/support/` returned 200, while `/verify/`,
   `/v/example`, and `/api/preview` returned 404. Preview registry and
   attestation response bytes and `Access-Control-Allow-Origin: *`
-  matched the existing production deployment. No production deployment
-  has been made from this candidate.
+  matched the existing production deployment. Production publication
+  followed this preview checkpoint and is recorded below.
+
+## 2026-10-27 — privacy and support production publication
+
+- The operator approved production publication of the static release.
+  Vercel deployment `dpl_2ZYomdjYFfzdYsMw82SqsPof56sk` reached
+  READY from branch commit
+  `9b5bc30781333376f8bea1459f03d5069e201858`, with `fiador.org`
+  and `www.fiador.org` attached. Draft PR #26 remains open and was
+  not merged into `main`.
+- Live `/`, `/privacy/`, `/support/`, `/registry.json`, and
+  `/attestations/nova.json` returned 200. The JSON responses were
+  byte-identical to the branch public files, with
+  `Access-Control-Allow-Origin: *` retained. Live `/verify/`,
+  `/v/example`, and `/api/preview` returned 404. The production home
+  page did not contain the feedback marker injected into the
+  protected preview.
+- These checks verify the static page release and route boundary.
+  They do not verify owner enrollment, Slack sign-in, a World ID
+  check, or verifier bot control.

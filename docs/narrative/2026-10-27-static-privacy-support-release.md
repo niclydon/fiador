@@ -1,14 +1,14 @@
-# 2026-10-27 — static privacy and support release candidate
+# 2026-10-27 — static privacy and support release
 
 This branch starts at the verified deployed site commit `4f366af`.
-It prepares two public information pages while preserving the
+It adds two public information pages while preserving the
 existing founding attestation and registry byte for byte. The
 Fiador Slack app remains an owner-only trial: private backend health
 checks have run in closed mode, but owner enrollment, Slack sign-in,
 and a World ID check have not run live as of this record. General
 enrollment remains closed. At preparation, this was a local
 candidate. It was later staged in draft PR #26 and a protected preview;
-production publication has not happened.
+the operator then approved its separate production publication.
 
 ## Published file boundary
 
@@ -51,11 +51,10 @@ synthetic test-fixture findings under `link-preview/test/`,
 The all-refs history yielded fifteen findings in the same fixture
 classes, including repeated findings across commits. No changed
 path was flagged. This disposition applies to those test literals,
-not to any operational credential. A private comparison against
-the confirmed program roster found no full identifier or
-12-character wallet/hash fragment in the changed files. The
-pre-existing public attestation is the only static-file match to
-the program roster and is unchanged, as its signed format requires.
+not to any operational credential. A private identifier scan found
+no full identifier or 12-character wallet/hash fragment in the
+changed lines. The pre-existing public attestation remains
+byte-identical.
 
 At this checkpoint, live `https://fiador.org/privacy/` and
 `https://fiador.org/support/` both returned 404; the three
@@ -67,5 +66,23 @@ reached READY. In that preview, `/privacy/` and `/support/` returned
 200, while `/verify/`, `/v/example`, and `/api/preview` returned 404.
 Its registry and attestation responses were byte-identical to the
 existing production deployment, including the public CORS header.
-An independent adversarial review found no blocking issue. Production
-publication remains a separate decision.
+An independent adversarial review found no blocking issue. These
+checks preceded the production decision.
+
+## Production publication
+
+After operator approval, Vercel production deployment
+`dpl_2ZYomdjYFfzdYsMw82SqsPof56sk` reached READY from branch commit
+`9b5bc30781333376f8bea1459f03d5069e201858`. Both `fiador.org`
+and `www.fiador.org` are attached. This branch deployment did not
+merge draft PR #26 into `main`; that PR remains open for review.
+
+Live checks returned 200 for `/`, `/privacy/`, `/support/`,
+`/registry.json`, and `/attestations/nova.json`. The registry and
+attestation responses were byte-identical to the branch's public
+files and retained `Access-Control-Allow-Origin: *`. `/verify/`,
+`/v/example`, and `/api/preview` returned 404. The production home
+page did not include the injected feedback marker seen in the
+protected preview. The result is a static information release; it
+does not establish live Slack sign-in, a completed World ID check,
+or bot control.

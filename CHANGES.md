@@ -1,5 +1,20 @@
 # Changes
 
+## 2026-10-27: static privacy and support pages published
+
+- Published the eight-file static release from branch commit
+  `9b5bc30781333376f8bea1459f03d5069e201858` to fiador.org and
+  www.fiador.org after the operator approved production publication.
+  This was a direct Vercel deployment, not a merge into `main`;
+  draft PR #26 remains open.
+- Live `/privacy/` and `/support/` return 200. The registry and
+  founding attestation still match the branch files byte for byte;
+  `/verify/`, `/v/example`, and `/api/preview` remain 404. This
+  release adds public information pages, not a live Slack sign-in,
+  World ID check, or verifier bot. See
+  `docs/narrative/2026-10-27-static-privacy-support-release.md` and
+  `docs/verification.md` for the release boundary and smoke results.
+
 ## 2026-10-26: founding attestation published (§9 step 1)
 
 - registry/: the first entry — Discord application
