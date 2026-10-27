@@ -125,12 +125,15 @@ it to logs and browser history. The
 internal verify result is never serialised on any route. A subject
 with no attestation returns status `unknown` with failure
 `attestation_not_found` (never `unregistered`: nothing was checked
-on-chain for the subject itself). A dead RPC likewise returns 200
-with status `unknown`: the subject's status is the content, the
-transport worked. Only malformed requests 400 (a malformed address
+on-chain for the subject itself). A core result of `unknown` for a
+dead RPC returns 200: the core completed its check and the subject's
+status is the content. A service deadline that ends the request
+before a result returns 503 with no check time. Malformed requests
+return 400 (a malformed address
 on the JSON route; on the badge routes it renders the unverified
 badge with `Cache-Control: no-store`, because an `<img>` cannot
-usefully show a 400), and only an internal rendering fault 500s.
+usefully show a 400). An unexpected JSON-route fault returns a fixed
+500; an image lookup fault renders an unchecked badge.
 
 For an `address` subject, the disclosure rule is exact: the
 queried address appears **once** in the body, as the explicit
@@ -266,11 +269,14 @@ Serving a quietly-fresh-looking stale verified badge is the one
 failure this service must never have.
 When a local registry refreshes, new requests stop joining old
 source and core work; an old result cannot repopulate the cache
-after the registry version changes.
+after the registry version changes or render an old badge. An
+in-flight request that loses this race returns 503 on JSON or an
+untimed unchecked image.
 
 Rendered badges are cached by the same identity as their `ETag`
 (subject, status, check time, variant, format, theme, configured
-base), and `If-None-Match` is honoured with a 304 **before** any
+base, and the current UTC day when a check time is shown), and
+`If-None-Match` is honoured with a 304 **before** any
 rendering happens: a repeated or conditional request never pays
 rasterisation twice for the same badge state. ETags are computed
 from the configured base only, so they are stable — and safe to
@@ -286,9 +292,9 @@ concurrency cap plus a bounded queue with a
 per-lookup deadline bounds outbound core lookups (the core
 receives the deadline's `AbortSignal`, and the service enforces
 the deadline even if the core ignores it). Saturation or an elapsed
-lookup deadline returns 503 on the JSON route and an unchecked
-badge on image routes; a thrown core check also yields an unchecked
-badge. HTTP
+lookup or whole-request deadline returns 503 on the JSON route
+and an untimed unchecked badge on image routes; a thrown core
+check also yields an unchecked badge. HTTP
 server timeouts are set explicitly. The whole source and core
 response has a five-second deadline.
 
@@ -297,7 +303,8 @@ that check's original cache deadline. Afterward it gets unchecked
 art with no check time, so a verified image cannot remain visible
 indefinitely because the rate limiter prevents rechecking. PNG
 fallbacks are cached separately by theme and variant, for both
-SVG and PNG.
+SVG and PNG. The last-render reuse key changes at UTC midnight;
+an old undated image cannot carry across the day boundary.
 
 ## Tests
 

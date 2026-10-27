@@ -407,7 +407,7 @@ describe('cache behaviour (SPEC 4.6 proposals)', () => {
     expect(fake.calls).toBe(1);
   });
 
-  it('bounds the combined registry and core wait with a grey result', async () => {
+  it('bounds the combined registry and core wait with a no-store 503', async () => {
     const delayedVerifier: Verifier = {
       ...fake,
       resolveStatus: async () => {
@@ -424,10 +424,10 @@ describe('cache behaviour (SPEC 4.6 proposals)', () => {
       requestTimeoutMs: 50,
     } as Partial<BadgeServiceDeps>);
     const response = await get(base, '/v1/status/discord_application/app1');
-    const body = JSON.parse(response.text) as { status: string; failures: string[] };
-    expect(body.status).toBe('unknown');
-    expect(body.failures).toContain('lookup_timeout');
+    expect(response.res.status).toBe(503);
+    expect(response.text).toBe('{"error":"service busy"}');
     expect(response.res.headers.get('cache-control')).toBe('no-store');
+    expect(response.res.headers.get('x-checked-at')).toBeNull();
   });
 
   it('renders a neutral no-store badge when source resolution exceeds the request deadline', async () => {
@@ -485,8 +485,7 @@ describe('cache behaviour (SPEC 4.6 proposals)', () => {
       get(base, `/v1/status/discord_application/app${id}`)));
     await started;
     const responses = await requests;
-    expect(responses.map(({ text }) => (JSON.parse(text) as { status: string }).status))
-      .toEqual(['unknown', 'unknown', 'unknown']);
+    expect(responses.map(({ res }) => res.status)).toEqual([503, 503, 503]);
     expect(sourceStarts).toBe(1);
     releaseSource();
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -525,7 +524,7 @@ describe('cache behaviour (SPEC 4.6 proposals)', () => {
     }
     const surviving = await second;
     await blocker;
-    expect((JSON.parse(timedOut.text) as { status: string }).status).toBe('unknown');
+    expect(timedOut.res.status).toBe(503);
     expect((JSON.parse(surviving.text) as { status: string }).status).toBe('verified');
     expect(applicationStarts).toBe(1);
   });
@@ -551,7 +550,7 @@ describe('cache behaviour (SPEC 4.6 proposals)', () => {
     const early = await first;
     finishCore();
     const later = await second;
-    expect((JSON.parse(early.text) as { status: string }).status).toBe('unknown');
+    expect(early.res.status).toBe(503);
     expect((JSON.parse(later.text) as { status: string }).status).toBe('verified');
   });
 
@@ -1411,7 +1410,10 @@ describe('registry refresh races', () => {
       const second = await get(base, '/v1/status/discord_application/race');
       expect((JSON.parse(second.text) as { failures: string[] }).failures).toContain('attestation_not_found');
       release();
-      expect(((await (await first).json()) as { status: string }).status).toBe('verified');
+      const oldResponse = await first;
+      expect(oldResponse.status).toBe(503);
+      expect(oldResponse.headers.get('x-checked-at')).toBeNull();
+      await oldResponse.text();
       expect(source.version).toBe(1);
       expect(servers.at(-1)!.badgeInternals.resultCacheSize()).toBe(0);
       const third = await get(base, '/v1/status/discord_application/race');
@@ -1457,9 +1459,107 @@ describe('registry refresh races', () => {
       await first;
     }
   });
+
+  it('does not reuse an old verified image after revocation while rate limited', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'badge-art-race-'));
+    const file = join(dir, 'registry.json');
+    writeFileSync(file, JSON.stringify({ service: { race: ATTESTATION } }));
+    const source = new FileRegistry(file, 'VERIFY_REGISTRY_FILE', {
+      now: () => nowRef.current.getTime(),
+      refreshMs: 1_000,
+      log: () => {},
+    });
+    source.loadInitial();
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const verifier: Verifier = {
+      verifyAddress: fake.verifyAddress.bind(fake),
+      verifyAttestation: fake.verifyAttestation.bind(fake),
+      async resolveStatus(subject) {
+        if (subject.kind === 'attested_subject' && subject.subject.id === 'race') {
+          const attestation = await subject.resolveAttestation(subject.subject);
+          entered();
+          await gate;
+          return attestation ? resultFor('verified') : resultFor('unknown');
+        }
+        return fake.resolveStatus(subject);
+      },
+    };
+    try {
+      const base = await start({ verifier, registrySource: source, rateLimitMax: 2, rateLimitWindowMs: 1_000_000 });
+      const first = fetch(`${base}/badge/service/race.svg?theme=dark`);
+      await started;
+      writeFileSync(file, JSON.stringify({ service: {} }));
+      nowRef.current = new Date(T0.getTime() + 1_001);
+      await get(base, '/v1/status/service/other'); // refresh without using the race gate
+      release();
+      const oldImage = await first;
+      const oldBody = await oldImage.text();
+      expect(oldImage.status).toBe(200);
+      expect(oldBody).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+      expect(oldBody).not.toContain(`stroke="${PILL_PALETTES.dark.verified.ring}"`);
+      expect(oldBody).not.toContain('data-checked-at');
+      expect(oldImage.headers.get('x-checked-at')).toBeNull();
+
+      const limited = await get(base, '/badge/service/race.svg?theme=dark');
+      expect(limited.res.status).toBe(200);
+      expect(limited.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+      expect(limited.text).not.toContain(`stroke="${PILL_PALETTES.dark.verified.ring}"`);
+      expect(limited.res.headers.get('cache-control')).toBe('no-store');
+      expect(limited.res.headers.get('x-checked-at')).toBeNull();
+    } finally {
+      release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('limited renders and lookup failures', () => {
+  it('changes the ETag and visible check date when UTC midnight passes', async () => {
+    nowRef.current = new Date('2026-10-26T23:59:00.000Z');
+    let renders = 0;
+    const base = await start({ onRender: () => renders++ });
+    const path = `/badge/address/${ADDR}.svg?theme=dark`;
+    const first = await get(base, path);
+    expect(first.text).toContain('checked 23:59 UTC');
+    expect(first.text).not.toContain('checked 2026-10-26 23:59 UTC');
+    const etag = first.res.headers.get('etag');
+    expect(etag).not.toBeNull();
+
+    nowRef.current = new Date('2026-10-27T00:01:00.000Z'); // same cached check, new UTC day
+    const next = await get(base, path, { 'if-none-match': etag! });
+    expect(next.res.status).toBe(200);
+    expect(next.res.headers.get('etag')).not.toBe(etag);
+    expect(next.text).toContain('checked 2026-10-26 23:59 UTC');
+    expect(renders).toBe(2);
+    const unchanged = await get(base, path, { 'if-none-match': next.res.headers.get('etag')! });
+    expect(unchanged.res.status).toBe(304);
+    expect(renders).toBe(2);
+  });
+
+  it('uses 503 and an untimed grey image at production defaults when the core never settles', async () => {
+    const never: Verifier = {
+      verifyAddress: fake.verifyAddress.bind(fake),
+      verifyAttestation: fake.verifyAttestation.bind(fake),
+      async resolveStatus() { return new Promise<VerifyResult>(() => {}); },
+    };
+    const base = await start({ verifier: never }); // 5s whole request, 10s lookup deadline
+    const [status, image] = await Promise.all([
+      fetch(`${base}/v1/status/discord_application/app1`),
+      get(base, '/badge/discord_application/app1.svg?theme=dark'),
+    ]);
+    expect(status.status).toBe(503);
+    expect(status.headers.get('cache-control')).toBe('no-store');
+    expect(status.headers.get('x-checked-at')).toBeNull();
+    expect(await status.text()).toBe('{"error":"service busy"}');
+    expect(image.res.status).toBe(200);
+    expect(image.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+    expect(image.text).not.toContain('data-checked-at');
+    expect(image.res.headers.get('x-checked-at')).toBeNull();
+  }, 12_000);
+
   it('renders each rate-limited SVG theme and variant only once', async () => {
     let renders = 0;
     const base = await start({ rateLimitMax: 0, onRender: () => renders++ });

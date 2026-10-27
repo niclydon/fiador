@@ -22,7 +22,6 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { isIP } from 'node:net';
 import {
   toPublicVerifyResult,
-  truncateAddress,
   type EvmAddress,
   type SignedAttestation,
   type VerificationStatus,
@@ -87,6 +86,14 @@ interface CacheEntry {
   sourceFingerprint: string;
 }
 
+interface ResolvedResult {
+  result: VerifyResult;
+  stale: boolean;
+  storedAtMs: number;
+  /** Null for address checks, which do not depend on the registry. */
+  registryVersion: number | null;
+}
+
 interface SourceFlight {
   promise: Promise<{ attestation: SignedAttestation | null; failed: boolean }>;
   controller: AbortController;
@@ -104,8 +111,6 @@ interface RenderEntry {
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const MAX_TYPE_LENGTH = 64; // aligned with the core's subject limits
 const MAX_ID_LENGTH = 256;
-const ZERO_ADDRESS: EvmAddress = '0x0000000000000000000000000000000000000000';
-const AGENTBOOK_CONTRACT: EvmAddress = '0xA23aB2712eA7BBa896930544C7d6636a96b944dA';
 
 export function badgeUrls(base: string, subjectType: string, subjectId: string) {
   const path = `${base.replace(/\/$/, '')}/badge/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`;
@@ -183,6 +188,20 @@ class LookupDeadlineError extends Error {
   }
 }
 
+class RequestDeadlineError extends Error {
+  constructor() {
+    super('request deadline exceeded');
+    this.name = 'RequestDeadlineError';
+  }
+}
+
+class RegistryChangedError extends Error {
+  constructor() {
+    super('registry changed during check');
+    this.name = 'RegistryChangedError';
+  }
+}
+
 export interface BadgeServiceInternals {
   resultCacheSize(): number;
   renderCacheSize(): number;
@@ -205,7 +224,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
   /** Last render per route shape, for shedding rate-limited load:
    * a limited request serves this instead of rasterising. */
   const lastRender = new LruCache<RenderEntry>(deps.renderCacheMaxEntries ?? 500);
-  const inFlight = new Map<string, Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }>>();
+  const inFlight = new Map<string, Promise<ResolvedResult>>();
   const sourceInFlight = new Map<string, SourceFlight>();
   const rateWindows = new Map<string, number[]>();
   const health = { agentBookReachable: true, lastLookupMs: null as number | null };
@@ -354,7 +373,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     subjectType: string,
     subjectId: string,
     signal: AbortSignal,
-  ): Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }> {
+  ): Promise<ResolvedResult> {
     deps.registrySource?.refreshIfDue(now().getTime());
     const registryVersion = deps.registrySource?.version ?? 0;
     if (registryVersion !== lastRegistryVersion) {
@@ -371,13 +390,16 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       inFlight.clear();
       sourceInFlight.clear();
     }
-    const startVersion = registryVersion;
+    const startVersion = canonicalSubject(subjectType, subjectId)[0] === 'address' || !deps.registrySource
+      ? null : registryVersion;
+    const registryIsCurrent = () => startVersion === null || deps.registrySource?.version === startVersion;
     const key = subjectKey(subjectType, subjectId);
     const nowMs = now().getTime();
     const source = subjectType === 'address'
       ? { attestation: null, failed: false }
       : await resolveSource(key, subjectType, subjectId, signal);
     if (signal.aborted) throw new Error('request deadline exceeded');
+    if (!registryIsCurrent()) throw new RegistryChangedError();
     const { attestation, failed: sourceFailed } = source;
     // Read the source before using the result cache. A removed or
     // replaced registry entry must not inherit the old verified result.
@@ -391,7 +413,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       entry = undefined;
     }
     if (!sourceFailed && entry && nowMs - entry.storedAtMs < ttlFor(entry.result.status)) {
-      return { result: entry.result, stale: false, storedAtMs: entry.storedAtMs };
+      return { result: entry.result, stale: false, storedAtMs: entry.storedAtMs, registryVersion: startVersion };
     }
     const flightKey = JSON.stringify([key, sourceFingerprint]);
     const pending = inFlight.get(flightKey);
@@ -417,6 +439,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       } finally {
         if (timer) clearTimeout(timer);
       }
+      if (!registryIsCurrent()) throw new RegistryChangedError();
       if (result.evidence.rpcLatencyMs !== undefined) health.lastLookupMs = result.evidence.rpcLatencyMs;
       const lookupFailed =
         result.status === 'unknown' &&
@@ -430,12 +453,12 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       // verified result younger than the ceiling, with its ORIGINAL
       // check time; older, or none, and the honest answer is unknown.
       if (lookupFailed && entry && entry.result.status === 'verified' && now().getTime() - entry.storedAtMs < staleCeiling) {
-        return { result: entry.result, stale: true, storedAtMs: entry.storedAtMs };
+        return { result: entry.result, stale: true, storedAtMs: entry.storedAtMs, registryVersion: startVersion };
       }
-      if (!sourceFailed && ttlFor(result.status) > 0 && (deps.registrySource?.version ?? 0) === startVersion) {
+      if (!sourceFailed && !signal.aborted && ttlFor(result.status) > 0) {
         cache.set(key, { result, storedAtMs: now().getTime(), sourceFingerprint });
       }
-      return { result, stale: false, storedAtMs: nowMs };
+      return { result, stale: false, storedAtMs: nowMs, registryVersion: startVersion };
     })();
     inFlight.set(flightKey, flight);
     try {
@@ -445,29 +468,13 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     }
   }
 
-  function timeoutResult(subjectType: string, subjectId: string): VerifyResult {
-    const address = subjectType === 'address' ? subjectId as EvmAddress : ZERO_ADDRESS;
-    return {
-      status: 'unknown',
-      address,
-      addressTruncated: truncateAddress(address),
-      humanHash: null,
-      failures: ['lookup_timeout'],
-      evidence: {
-        checkedAt: now().toISOString(),
-        source: 'live',
-        agentBook: { network: 'eip155:480', contract: deps.agentBookContract ?? AGENTBOOK_CONTRACT },
-      },
-    };
-  }
-
-  async function resolveWithDeadline(subjectType: string, subjectId: string): Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }> {
+  async function resolveWithDeadline(subjectType: string, subjectId: string): Promise<ResolvedResult> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<{ result: VerifyResult; stale: boolean; storedAtMs: number }>((resolve) => {
+    const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
         controller.abort();
-        resolve({ result: timeoutResult(subjectType, subjectId), stale: false, storedAtMs: now().getTime() });
+        reject(new RequestDeadlineError());
       }, requestTimeoutMs);
     });
     try {
@@ -555,6 +562,8 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
   function sendBadge(req: IncomingMessage, res: ServerResponse, args: BadgeArgs, head: boolean): void {
     const state = stateForStatus(args.status);
     const base = effectiveBase();
+    const renderNow = now();
+    const utcDay = renderNow.toISOString().slice(0, 10);
     // For the auto PNG the resolved theme is part of the render
     // identity; for everything else the requested theme is.
     const resolved: ThemeName | undefined =
@@ -576,6 +585,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       themeKey,
       base,
       args.labelOverride ?? '',
+      args.checkedAt === null ? null : utcDay,
     ]);
     const headers: Record<string, string> = {
       'cache-control': args.forceNoStore || args.stale ? 'no-store' : args.cacheControl ?? cacheControlFor(args.status),
@@ -592,7 +602,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     }
 
     const renderKey = etag; // the ETag IS the render identity
-    const routeKey = JSON.stringify([args.subjectKeyValue, args.variant, args.format, themeKey]);
+    const routeKey = JSON.stringify([args.subjectKeyValue, args.variant, args.format, themeKey, utcDay]);
 
     if (ifNoneMatchHits(req, etag)) {
       // A conditional hit is answered from the ETag alone: no
@@ -613,10 +623,10 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     const body =
       args.format === 'svg'
         ? Buffer.from(
-            renderBadgeSvg({ state, theme: args.theme, variant: args.variant, checkedAt: args.checkedAt, now: now(), ...(args.labelOverride ? { labelOverride: args.labelOverride } : {}) }),
+            renderBadgeSvg({ state, theme: args.theme, variant: args.variant, checkedAt: args.checkedAt, now: renderNow, ...(args.labelOverride ? { labelOverride: args.labelOverride } : {}) }),
             'utf8',
           )
-        : renderBadgePng({ state, theme: resolved!, variant: args.variant, checkedAt: args.checkedAt, now: now(), ...(args.labelOverride ? { labelOverride: args.labelOverride } : {}) });
+        : renderBadgePng({ state, theme: resolved!, variant: args.variant, checkedAt: args.checkedAt, now: renderNow, ...(args.labelOverride ? { labelOverride: args.labelOverride } : {}) });
     const entry: RenderEntry = { body, etag, resolvedTheme: resolved, reuseUntilMs: args.reuseUntilMs ?? 0 };
     renderCache.set(renderKey, entry);
     lastRender.set(routeKey, entry);
@@ -639,7 +649,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       args.format === 'png' && args.theme === 'auto'
         ? `auto:${args.clientHint === 'light' ? 'light' : 'dark'}`
         : args.theme;
-    const routeKey = JSON.stringify([args.subjectKeyValue, args.variant, args.format, themeKey]);
+    const routeKey = JSON.stringify([args.subjectKeyValue, args.variant, args.format, themeKey, now().toISOString().slice(0, 10)]);
     const last = lastRender.get(routeKey);
     const headers: Record<string, string> = { 'cache-control': 'no-store' };
     if (last && now().getTime() < last.reuseUntilMs) {
@@ -778,15 +788,20 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
           );
           return;
         }
-        let resolvedResult: { result: VerifyResult; stale: boolean; storedAtMs: number };
+        let resolvedResult: ResolvedResult;
         try {
           resolvedResult = await resolveWithDeadline(parsed.type, parsed.id);
         } catch (err) {
-          if (err instanceof OverloadedError || err instanceof LookupDeadlineError) {
+          if (err instanceof OverloadedError || err instanceof LookupDeadlineError ||
+              err instanceof RequestDeadlineError || err instanceof RegistryChangedError) {
             sendJson(res, 503, { error: 'service busy' }, { 'cache-control': 'no-store' }, head);
             return;
           }
           throw err;
+        }
+        if (resolvedResult.registryVersion !== null && deps.registrySource?.version !== resolvedResult.registryVersion) {
+          sendJson(res, 503, { error: 'service busy' }, { 'cache-control': 'no-store' }, head);
+          return;
         }
         const { result, stale, storedAtMs } = resolvedResult;
         const pub = toPublicVerifyResult(result);
@@ -887,13 +902,17 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
           uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
           return;
         }
-        let resolvedResult: { result: VerifyResult; stale: boolean; storedAtMs: number };
+        let resolvedResult: ResolvedResult;
         try {
           resolvedResult = await resolveWithDeadline(parsed.type, parsed.id);
         } catch {
           // A lookup failure, including a thrown core or deadline,
           // is always an unchecked badge. Rendering errors still
           // reach the outer fixed-error handler.
+          uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
+          return;
+        }
+        if (resolvedResult.registryVersion !== null && deps.registrySource?.version !== resolvedResult.registryVersion) {
           uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
           return;
         }
