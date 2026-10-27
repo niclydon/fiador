@@ -142,3 +142,37 @@ def test_erc1271_magic_constant_matches_stub(vectors: dict[str, Any]):
     # Guards the test harness itself: the stub's magic result is the
     # ERC-1271 value the verifier checks for.
     assert MAGIC_RESULT.startswith("0x1626ba7e")
+
+
+def test_signed_message_outcomes_for_every_shared_vector(vectors: dict[str, Any], fixed_now):
+    """Signed-message parity (SPEC 3.6 amendment, D5): every shared
+    signedMessages vector runs through verify_signed_message and lands
+    on the outcome its recorded fields pin. The section is additive in
+    the TS vectors — when it is present, every entry is covered; the
+    recorded signer doubles as the expected address, so a passing
+    vector must verify, report the checksummed signer, and carry no
+    failures. Mirrors the TS suite's use of the same vector
+    (packages/verify-ts/test/verify.test.ts)."""
+    verifier = make_verifier(vectors, fixed_now)
+    for name, vector in vectors.get("signedMessages", {}).items():
+        # Fixture sanity, as in the TS suite: the vector's signer is
+        # the wallet recorded under the same name.
+        assert vector["signer"] == vectors["wallets"][name], name
+        result = verifier.verify_signed_message(
+            vector["message"],
+            vector["signature"],
+            "eoa",
+            expected_address=vector["signer"],
+        )
+        assert result.verified is True, name
+        assert result.address == vector["signer"], name
+        assert result.failures == [], name
+        # Bare (no expected address) the same vector verifies, and the
+        # result is exactly the amendment's small shape — no human
+        # identifier in either direction.
+        bare = verifier.verify_signed_message(
+            vector["message"], vector["signature"], "eoa"
+        )
+        assert bare.verified is True, name
+        assert bare.address == vector["signer"], name
+        assert set(bare.to_dict()) == {"verified", "address", "failures"}, name
