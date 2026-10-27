@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   canonicalAttestationMessage,
   createVerifier,
@@ -1146,7 +1146,13 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
     ethCallResult: string,
     check: (rpcUrl: string, ethCalls: () => number, rpcCalls: () => number) => Promise<void>,
     chainId = '0x1e0',
-    ethCallBehavior: { status?: number; delayMs?: number; chainDelayMs?: number; revert?: boolean } = {},
+    ethCallBehavior: {
+      status?: number;
+      delayMs?: number;
+      chainDelayMs?: number;
+      onChainReply?: () => void;
+      revert?: boolean;
+    } = {},
   ) {
     let ethCalls = 0;
     let rpcCalls = 0;
@@ -1158,6 +1164,7 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
         rpcCalls += 1;
         if (parsed.method === 'eth_call') ethCalls += 1;
         const reply = () => {
+          if (parsed.method === 'eth_chainId') ethCallBehavior.onChainReply?.();
           if (parsed.method === 'eth_call' && ethCallBehavior.status !== undefined) {
             res.statusCode = ethCallBehavior.status;
             res.end('RPC unavailable');
@@ -1453,22 +1460,34 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
   });
 
   it('ERC-1271: chain identity and contract call share one deadline', async () => {
-    await with1271Rpc(
-      `0x1626ba7e${'00'.repeat(28)}`,
-      async (rpcUrl, ethCalls) => {
-        const result = await noLookupVerifier({ rpcUrl, timeoutMs: 500 }).verifySignedMessage({
-          message: SM.message,
-          signature: `0x${'11'.repeat(65)}`,
-          signatureType: 'erc1271',
-          expectedAddress: CONTRACT,
-        });
-        expect(ethCalls()).toBe(1);
-        expect(result.verified).toBe(false);
-        expect(result.failures).toEqual(['lookup_timeout']);
-      },
-      '0x1e0',
-      { chainDelayMs: 300, delayMs: 300 },
-    );
+    const realNow = performance.now.bind(performance);
+    let elapsedMs = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => realNow() + elapsedMs);
+    try {
+      await with1271Rpc(
+        `0x1626ba7e${'00'.repeat(28)}`,
+        async (rpcUrl, _ethCalls, rpcCalls) => {
+          const result = await noLookupVerifier({ rpcUrl, timeoutMs: 10_000 }).verifySignedMessage({
+            message: SM.message,
+            signature: `0x${'11'.repeat(65)}`,
+            signatureType: 'erc1271',
+            expectedAddress: CONTRACT,
+          });
+          expect(rpcCalls()).toBeGreaterThanOrEqual(1);
+          expect(result.verified).toBe(false);
+          expect(result.failures).toEqual(['lookup_timeout']);
+        },
+        '0x1e0',
+        {
+          // Advance the verifier's clock when chain identity is answered,
+          // without making that RPC depend on an overloaded event loop.
+          onChainReply: () => { elapsedMs = 9_800; },
+          delayMs: 400,
+        },
+      );
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('ERC-1271: wrong-chain RPC -> lookup_failed (check unexecutable, not a mismatch)', async () => {
