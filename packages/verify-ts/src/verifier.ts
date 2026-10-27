@@ -16,11 +16,13 @@ import type {
   EvmAddress,
   FailureCode,
   SignedAttestation,
+  SignedMessageResult,
   StatusSubject,
   VerificationStatus,
   VerifyAttestationOptions,
   VerifyCoreOptions,
   VerifyResult,
+  VerifySignedMessageInput,
   Verifier,
 } from './types.js';
 
@@ -108,20 +110,32 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     }
   }
 
+  // EIP-191 recovery, shared by verifyAttestation and
+  // verifySignedMessage so there is exactly one recovery path in the
+  // package (SPEC 3.6 amendment). Returns the checksummed signer, or
+  // null when the signature is not EOA-recoverable at all.
+  async function recoverSigner(
+    message: string,
+    signature: string,
+  ): Promise<EvmAddress | null> {
+    try {
+      return await recoverMessageAddress({
+        message,
+        signature: signature as Hex,
+      });
+    } catch {
+      return null;
+    }
+  }
+
   async function signatureValid(
     attestation: SignedAttestation,
     message: string,
   ): Promise<boolean> {
     const wallet = attestation.payload.agentWalletAddress;
-    try {
-      const recovered = await recoverMessageAddress({
-        message,
-        signature: attestation.signature as Hex,
-      });
-      if (recovered === wallet) return true;
-    } catch {
-      // Not an EOA-recoverable signature; fall through to ERC-1271.
-    }
+    const recovered = await recoverSigner(message, attestation.signature);
+    if (recovered === wallet) return true;
+    // Not an EOA signature for this wallet; fall through to ERC-1271.
     return erc1271Valid(wallet, message, attestation.signature);
   }
 
@@ -426,5 +440,83 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     });
   }
 
-  return { verifyAddress, verifyAttestation, resolveStatus };
+  // D5 (SPEC 3.6 amendment, Oct 26, 2026): verify an arbitrary
+  // caller-canonicalised signed message through the same machinery
+  // verifyAttestation uses internally. Signature-only: no AgentBook
+  // lookup, no expiry/replay/subject semantics, no humanId in either
+  // direction. The caller declares the signature path; a contract
+  // address checked through the EOA path fails rather than silently
+  // switching to ERC-1271. Never throws for an expected failure.
+  async function verifySignedMessage(
+    input: VerifySignedMessageInput,
+  ): Promise<SignedMessageResult> {
+    const fail = (
+      failures: FailureCode[],
+      address: EvmAddress | null = null,
+    ): SignedMessageResult => ({ verified: false, address, failures });
+
+    if (typeof input !== 'object' || input === null) {
+      return fail(['signature_mismatch']);
+    }
+    const { message, signature, signatureType, expectedAddress } = input;
+
+    // A malformed expected address is its own failure, checked before
+    // any signature work (mirrors verifyAddress validating its input
+    // before the lookup).
+    let expected: EvmAddress | undefined;
+    if (expectedAddress !== undefined) {
+      if (typeof expectedAddress !== 'string' || !isAddress(expectedAddress)) {
+        return fail(['malformed_address']);
+      }
+      try {
+        expected = getAddress(expectedAddress);
+      } catch {
+        return fail(['malformed_address']);
+      }
+    }
+
+    if (signatureType === 'eoa') {
+      const recovered =
+        typeof message === 'string' && typeof signature === 'string'
+          ? await recoverSigner(message, signature)
+          : null;
+      if (recovered === null) {
+        // Invalid or undecodable signature.
+        return fail(['signature_mismatch']);
+      }
+      if (expected !== undefined && recovered !== expected) {
+        return fail(['subject_mismatch'], recovered);
+      }
+      return { verified: true, address: recovered, failures: [] };
+    }
+
+    if (signatureType === 'erc1271') {
+      // There is no recovery for a contract signer: the claimed
+      // contract address is required, and it is the signer.
+      if (expected === undefined) {
+        return fail(['signature_mismatch']);
+      }
+      let valid = false;
+      try {
+        valid = await erc1271Valid(expected, message, signature);
+      } catch {
+        // erc1271Valid deliberately lets a wrong-chain RPC surface
+        // for verifyAttestation, which can report 'unknown'. This
+        // result type has no unknown state and the amendment adds
+        // no failure code for it, so the check fails closed here.
+        valid = false;
+      }
+      if (!valid) {
+        return fail(['signature_mismatch'], expected);
+      }
+      return { verified: true, address: expected, failures: [] };
+    }
+
+    // An unrecognised signatureType from an untyped caller: the path
+    // cannot be determined, which is a wrong-path signature failure,
+    // not a thrown error.
+    return fail(['signature_mismatch']);
+  }
+
+  return { verifyAddress, verifyAttestation, resolveStatus, verifySignedMessage };
 }

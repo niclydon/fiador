@@ -13,6 +13,11 @@ on World Chain:
 - `resolveStatus(subject)` — one call that composes the two for
   consumers (an address, an attestation, or a subject resolved to an
   attestation).
+- `verifySignedMessage({ message, signature, signatureType,
+  expectedAddress })` — is this arbitrary signed message authentic
+  for its signer? Signature-only (EOA recovery or ERC-1271, the
+  path caller-declared): no registration check, so compose with
+  `verifyAddress` when registration matters.
 
 ```ts
 import { createVerifier, toPublicVerifyResult } from '@fiador/verify';

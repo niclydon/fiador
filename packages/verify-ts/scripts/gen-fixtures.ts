@@ -93,6 +93,16 @@ export async function buildVectors() {
   // Payload claims operatorA's wallet; the signature is strangerC's.
   const wrongSigner = await sign(strangerC, validPayload);
 
+  // D5 (verifySignedMessage): an arbitrary caller-canonicalised
+  // message, signed by operatorA. Tampered variants are derived in
+  // the tests, not stored.
+  const signedMessageText = 'fiador verifySignedMessage synthetic vector v1';
+  const signedMessage = {
+    message: signedMessageText,
+    signature: await operatorA.signMessage({ message: signedMessageText }),
+    signer: operatorA.address,
+  };
+
   return {
     note: 'SYNTHETIC FIXTURES ONLY. Generated deterministically by scripts/gen-fixtures.ts. No real wallet, humanId, or key material appears in this file.',
     fixedNow: FIXED_NOW_ISO,
@@ -116,6 +126,9 @@ export async function buildVectors() {
       notYetValid,
       longLifetime,
       wrongSigner,
+    },
+    signedMessages: {
+      operatorA: signedMessage,
     },
   };
 }

@@ -538,3 +538,214 @@ describe('canonical form', () => {
     expect(message).not.toContain(', "');
   });
 });
+
+describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
+  const SM = vectors.signedMessages.operatorA;
+  const CONTRACT = '0x00000000000000000000000000000000C0FFEE01' as EvmAddress;
+
+  // verifySignedMessage performs no AgentBook lookup: build its
+  // verifiers on a reader that throws if it is ever called.
+  const throwingReader: AgentBookReader = {
+    source: 'live',
+    async lookupHuman() {
+      throw new Error('verifySignedMessage must not call the AgentBook reader');
+    },
+  };
+  function noLookupVerifier(overrides: Record<string, unknown> = {}) {
+    return createVerifier({ reader: throwingReader, now: () => NOW, ...overrides });
+  }
+
+  async function with1271Rpc(
+    ethCallResult: string,
+    check: (rpcUrl: string, ethCalls: () => number) => Promise<void>,
+  ) {
+    let ethCalls = 0;
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const parsed = JSON.parse(body) as { method: string; id: number };
+        if (parsed.method === 'eth_call') ethCalls += 1;
+        res.setHeader('content-type', 'application/json');
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result: parsed.method === 'eth_call' ? ethCallResult : '0x1e0',
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no port');
+    try {
+      await check(`http://127.0.0.1:${address.port}`, () => ethCalls);
+    } finally {
+      server.close();
+    }
+  }
+
+  it('fixture sanity: the signed-message vector belongs to operatorA', () => {
+    expect(SM.signer).toBe(A);
+  });
+
+  it('EOA: valid signature verifies and returns the checksummed signer, with no lookup and no human identifier', async () => {
+    const result = await noLookupVerifier().verifySignedMessage({
+      message: SM.message,
+      signature: SM.signature,
+      signatureType: 'eoa',
+    });
+    expect(result.verified).toBe(true);
+    expect(result.address).toBe(A);
+    expect(result.failures).toEqual([]);
+    // The result is exactly the amendment's small shape; no humanId
+    // or humanHash in either direction.
+    expect(Object.keys(result).sort()).toEqual(['address', 'failures', 'verified']);
+    expect(JSON.stringify(result)).not.toContain(HUMAN_1);
+  });
+
+  it('EOA: expectedAddress match verifies (case-insensitive input, checksummed output)', async () => {
+    const result = await noLookupVerifier().verifySignedMessage({
+      message: SM.message,
+      signature: SM.signature,
+      signatureType: 'eoa',
+      expectedAddress: A.toLowerCase(),
+    });
+    expect(result.verified).toBe(true);
+    expect(result.address).toBe(A);
+    expect(result.failures).toEqual([]);
+  });
+
+  it('EOA: expectedAddress mismatch -> subject_mismatch, recovered signer still reported', async () => {
+    const result = await noLookupVerifier().verifySignedMessage({
+      message: SM.message,
+      signature: SM.signature,
+      signatureType: 'eoa',
+      expectedAddress: B,
+    });
+    expect(result.verified).toBe(false);
+    expect(result.failures).toEqual(['subject_mismatch']);
+    expect(result.address).toBe(A);
+  });
+
+  it('EOA: tampered message no longer matches the expected signer -> subject_mismatch', async () => {
+    // A tampered message still recovers, to a different signer; the
+    // amendment assigns that event to the expected-address code, and
+    // an undecodable signature (next test) to signature_mismatch.
+    const result = await noLookupVerifier().verifySignedMessage({
+      message: `${SM.message} (tampered)`,
+      signature: SM.signature,
+      signatureType: 'eoa',
+      expectedAddress: A,
+    });
+    expect(result.verified).toBe(false);
+    expect(result.failures).toEqual(['subject_mismatch']);
+    expect(result.address).not.toBeNull();
+    expect(result.address).not.toBe(A);
+  });
+
+  it('EOA: undecodable signatures -> signature_mismatch, no signer, never throws', async () => {
+    const v = noLookupVerifier();
+    const badSignatures = [
+      SM.signature.slice(0, 82), // truncated: invalid length
+      '0xbeef', // well-formed hex, not a signature
+      'not-a-signature', // not hex at all
+    ];
+    for (const signature of badSignatures) {
+      const result = await v.verifySignedMessage({
+        message: SM.message,
+        signature,
+        signatureType: 'eoa',
+        expectedAddress: A,
+      });
+      expect(result.verified).toBe(false);
+      expect(result.failures).toEqual(['signature_mismatch']);
+      expect(result.address).toBeNull();
+    }
+  });
+
+  it('malformed expectedAddress -> malformed_address, never throws', async () => {
+    const v = noLookupVerifier();
+    for (const expectedAddress of ['0x123', 'not-an-address', '']) {
+      const result = await v.verifySignedMessage({
+        message: SM.message,
+        signature: SM.signature,
+        signatureType: 'eoa',
+        expectedAddress,
+      });
+      expect(result.verified).toBe(false);
+      expect(result.failures).toEqual(['malformed_address']);
+      expect(result.address).toBeNull();
+    }
+  });
+
+  it('unrecognised signatureType is rejected without throwing', async () => {
+    const result = await noLookupVerifier().verifySignedMessage({
+      message: SM.message,
+      signature: SM.signature,
+      signatureType: 'eip712' as unknown as 'eoa',
+      expectedAddress: A,
+    });
+    expect(result.verified).toBe(false);
+    expect(result.failures).toEqual(['signature_mismatch']);
+    expect(result.address).toBeNull();
+  });
+
+  it('ERC-1271: magic value from the named contract verifies', async () => {
+    await with1271Rpc(`0x1626ba7e${'00'.repeat(28)}`, async (rpcUrl, ethCalls) => {
+      const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage({
+        message: SM.message,
+        signature: `0x${'11'.repeat(65)}`,
+        signatureType: 'erc1271',
+        expectedAddress: CONTRACT,
+      });
+      expect(result.verified).toBe(true);
+      expect(result.address).toBe(CONTRACT);
+      expect(result.failures).toEqual([]);
+      expect(ethCalls()).toBeGreaterThan(0);
+    });
+  });
+
+  it('ERC-1271: non-magic result -> signature_mismatch', async () => {
+    await with1271Rpc(`0x${'00'.repeat(32)}`, async (rpcUrl) => {
+      const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage({
+        message: SM.message,
+        signature: `0x${'11'.repeat(65)}`,
+        signatureType: 'erc1271',
+        expectedAddress: CONTRACT,
+      });
+      expect(result.verified).toBe(false);
+      expect(result.failures).toEqual(['signature_mismatch']);
+      expect(result.address).toBe(CONTRACT);
+    });
+  });
+
+  it('ERC-1271: missing expectedAddress -> signature_mismatch, no signer named', async () => {
+    const result = await noLookupVerifier().verifySignedMessage({
+      message: SM.message,
+      signature: `0x${'11'.repeat(65)}`,
+      signatureType: 'erc1271',
+    });
+    expect(result.verified).toBe(false);
+    expect(result.failures).toEqual(['signature_mismatch']);
+    expect(result.address).toBeNull();
+  });
+
+  it("EOA path against a contract address fails and never falls through to ERC-1271", async () => {
+    // The stub would answer the magic value if the EOA path silently
+    // switched paths; the assertion on ethCalls proves it does not.
+    await with1271Rpc(`0x1626ba7e${'00'.repeat(28)}`, async (rpcUrl, ethCalls) => {
+      const result = await noLookupVerifier({ rpcUrl }).verifySignedMessage({
+        message: SM.message,
+        signature: `0x${'11'.repeat(65)}`,
+        signatureType: 'eoa',
+        expectedAddress: CONTRACT,
+      });
+      expect(result.verified).toBe(false);
+      expect(result.failures).toEqual(['signature_mismatch']);
+      expect(result.address).toBeNull();
+      expect(ethCalls()).toBe(0);
+    });
+  });
+});
