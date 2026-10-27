@@ -1,5 +1,21 @@
 # Changes
 
+## 2026-10-27: bot-response witness merged and exercised live (PR #16)
+
+- `verifier-bot/` gains the one-use wallet-signature and
+  bot-response witness (`/fiador control-start`,
+  `/fiador control-complete`): ten-minute challenges, signed
+  Discord profile and registry rechecks, a live AgentBook
+  verification, exact-message and guild-integration matching,
+  and an atomic SQLite consume.
+- Exercised live the same day in the operator's guild against
+  the founding attestation: the challenge was consumed and the
+  completion check recorded `verified`. See
+  `docs/verification.md` and
+  `docs/narrative/2026-10-27-bot-response-witness.md`.
+- The witness records a bot response only. It does not prove
+  application-operator control, create a binding, or change a
+  role; the public claim state is unchanged.
 ## 2026-10-27: W0 verify core lane closed (narrative record)
 
 - The W0 (AgentBook Verify Core) lane that produced this

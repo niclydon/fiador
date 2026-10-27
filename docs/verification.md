@@ -8,6 +8,31 @@ dedicated demo signing wallet by role and record methods and status
 without wallet or human-hash fragments. The signed public attestation retains
 the wallet address required by the protocol.
 
+## 2026-10-27 — live bot-response witness (verifier bot, PR #16)
+
+Environment: the verifier bot was built from PR #16 head `950f2af`
+(Node v22, workspace `@fiador/verify` built first) and run against
+the operator's own guild, in a private witness channel created for
+the run. The target was the Nova Discord application's founding
+attestation, checked through the published registry.
+
+- `/fiador control-start` at 2026-10-27T22:13:10Z opened a
+  ten-minute, one-use challenge; its pre-check of the founding
+  attestation recorded status `verified`.
+- The dedicated demo signing wallet signed the private challenge
+  text (EIP-191). The target bot posted the public response text
+  in the witness channel (message `1564764158514299083`); the
+  fetched message matched the canonical response exactly.
+- `/fiador control-complete` consumed the challenge at
+  2026-10-27T22:15:06Z. The completion check recorded status
+  `verified` with no failures.
+- Boundary held: this run records a bot response witnessed.
+  Application-operator control remains unproven; no binding was
+  created, no role was changed, and the public claim state is
+  unchanged.
+- PR #16 merged to `main` the same day (squash `1840cb7`) after
+  this live run satisfied the draft gate its body named.
+
 ## 2026-10-26 — verify core 0.1.0 and verify MCP 0.1.0
 
 Environment: Node v22.23.4, viem 2.57.11, @modelcontextprotocol/sdk
