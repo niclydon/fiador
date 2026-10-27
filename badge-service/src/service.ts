@@ -372,19 +372,12 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
 
   const currentRegistryVersion = () => deps.registrySource?.version ?? deps.sourceVersion?.() ?? 0;
   let lastRegistryVersion = currentRegistryVersion();
-
-  async function resolveResult(
-    subjectType: string,
-    subjectId: string,
-    signal: AbortSignal,
-  ): Promise<ResolvedResult> {
+  function refreshRegistryVersion(): number {
     deps.registrySource?.refreshIfDue(now().getTime());
     const registryVersion = currentRegistryVersion();
     if (registryVersion !== lastRegistryVersion) {
-      // The registry content changed under us (SPEC 4.6 refresh):
-      // results and renders cached against the old registry are
-      // dropped, so a removed or replaced attestation takes
-      // effect now, not at cache expiry.
+      // A local registry changed, or a canonical source window ended.
+      // Old results and renders cannot survive the generation change.
       lastRegistryVersion = registryVersion;
       cache.clear();
       renderCache.clear();
@@ -394,6 +387,15 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       inFlight.clear();
       sourceInFlight.clear();
     }
+    return registryVersion;
+  }
+
+  async function resolveResult(
+    subjectType: string,
+    subjectId: string,
+    signal: AbortSignal,
+  ): Promise<ResolvedResult> {
+    const registryVersion = refreshRegistryVersion();
     const startVersion = canonicalSubject(subjectType, subjectId)[0] === 'address' ||
       (!deps.registrySource && !deps.sourceVersion)
       ? null : registryVersion;
@@ -907,6 +909,10 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
         }
         const key = subjectKey(type, id);
         if (rateLimited(rateKey(req))) {
+          // A limited image may reuse the last checked render, but
+          // only while its source generation remains current. This
+          // refresh performs no core or network lookup.
+          refreshRegistryVersion();
           sendLimitedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
           return;
         }

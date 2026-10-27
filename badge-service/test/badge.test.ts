@@ -702,6 +702,40 @@ describe('failure behaviour, abuse posture, and misc routes', () => {
     expect(fake.calls).toBe(1);
   });
 
+  it('drops a verified render when a rate-limited request observes registry revocation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'badge-limited-revocation-'));
+    const file = join(dir, 'registry.json');
+    writeFileSync(file, JSON.stringify({ service: { race: ATTESTATION } }));
+    const source = new FileRegistry(file, 'VERIFY_REGISTRY_FILE', {
+      now: () => nowRef.current.getTime(),
+      refreshMs: 1_000,
+      log: () => {},
+    });
+    source.loadInitial();
+    try {
+      const base = await start({ registrySource: source, rateLimitMax: 1, rateLimitWindowMs: 1_000_000 });
+      const path = '/badge/service/race.svg?theme=dark';
+      nowRef.current = new Date(T0.getTime() + 999);
+      const first = await get(base, path);
+      expect(first.text).toContain(`stroke="${PILL_PALETTES.dark.verified.ring}"`);
+
+      writeFileSync(file, JSON.stringify({ service: {} }));
+      nowRef.current = new Date(T0.getTime() + 1_001);
+      const limited = await get(base, path);
+      expect(limited.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+      expect(limited.text).not.toContain(`stroke="${PILL_PALETTES.dark.verified.ring}"`);
+      expect(limited.text).not.toContain('data-checked-at');
+      expect(limited.res.headers.get('x-checked-at')).toBeNull();
+      expect(limited.res.headers.get('cache-control')).toBe('no-store');
+      expect(source.version).toBe(1);
+      await get(base, path); // limited again; refresh cadence prevents another read
+      expect(source.version).toBe(1);
+      expect(fake.calls).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps rate-limit PNG fallbacks separate by theme and variant', async () => {
     const base = await start({ rateLimitMax: 0 });
     const lightIcon = await getPng(base, '/badge/discord_application/app1.png?theme=light&variant=icon');
@@ -1511,6 +1545,64 @@ describe('registry refresh races', () => {
       expect(servers.at(-1)!.badgeInternals.resultCacheSize()).toBe(0);
       const later = await get(base, `/v1/status/discord_application/${id}`);
       expect((JSON.parse(later.text) as { status: string }).status).toBe('unknown');
+    } finally {
+      release();
+      await oldRequest;
+    }
+  });
+
+  it('does not join or cache a registry fetch from a prior source generation', async () => {
+    const id = '123456789012345678';
+    const registryUrl = 'https://registry.example/registry.json';
+    const attestationUrl = 'https://attestation.example/claim.json';
+    let document: { version: number; entries: Array<{ discord_application_id: string; attestation_url: string; status?: 'revoked' }> } =
+      { version: 1, entries: [{ discord_application_id: id, attestation_url: attestationUrl }] };
+    let registryFetches = 0;
+    let entered!: () => void;
+    let release!: () => void;
+    const oldRefreshStarted = new Promise<void>((resolve) => { entered = resolve; });
+    const oldRefreshGate = new Promise<void>((resolve) => { release = resolve; });
+    const resolver = createRegistryResolver({
+      url: registryUrl,
+      now: () => nowRef.current.getTime(),
+      async fetchJson(url) {
+        if (url === attestationUrl) return ATTESTATION;
+        if (url !== registryUrl) throw new Error('unexpected source URL');
+        registryFetches++;
+        const snapshot = document;
+        if (registryFetches === 2) {
+          entered();
+          await oldRefreshGate;
+        }
+        return snapshot;
+      },
+    });
+    const subject = { type: 'discord_application', id };
+    expect(await resolver({ type: subject.type, id: '000000000000000000' })).toBeNull(); // registry at t=0
+    nowRef.current = new Date(T0.getTime() + 1_000);
+    expect(await resolver(subject)).toBe(ATTESTATION); // attestation at t=1s
+    const base = await start({ resolveAttestation: resolver, sourceVersion: resolver.currentVersion });
+
+    nowRef.current = new Date(T0.getTime() + 300_100);
+    const oldRequest = get(base, `/v1/status/discord_application/${id}`);
+    try {
+      await oldRefreshStarted;
+      document = { version: 1, entries: [{ discord_application_id: id, attestation_url: attestationUrl, status: 'revoked' }] };
+      nowRef.current = new Date(T0.getTime() + 301_100); // attestation TTL advances generation again
+      const currentRequest = get(base, `/v1/status/discord_application/${id}`);
+      release();
+      const current = await currentRequest;
+      expect(current.res.status).toBe(200);
+      expect((JSON.parse(current.text) as { status: string; failures: string[] })).toMatchObject({
+        status: 'unknown', failures: ['attestation_not_found'],
+      });
+      expect(registryFetches).toBe(3);
+      const old = await oldRequest;
+      expect(old.res.status).toBe(503);
+      expect(old.res.headers.get('x-checked-at')).toBeNull();
+      const later = await get(base, `/v1/status/discord_application/${id}`);
+      expect((JSON.parse(later.text) as { status: string }).status).toBe('unknown');
+      expect(servers.at(-1)!.badgeInternals.resultCacheSize()).toBe(0);
     } finally {
       release();
       await oldRequest;

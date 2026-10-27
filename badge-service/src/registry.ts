@@ -79,6 +79,7 @@ export function createRegistryResolver(source: RegistrySource): VersionedRegistr
     // A new source window must not join a fetch begun in the old one.
     // Old flights may complete for old callers, but cannot populate
     // caches used by new requests.
+    registryFlight = undefined;
     attestationFlights.clear();
     if (registryCache && registryCache.loadedAtMs + SOURCE_TTL_MS > nowMs) {
       nextExpiryAtMs = registryCache.loadedAtMs + SOURCE_TTL_MS;
@@ -96,6 +97,7 @@ export function createRegistryResolver(source: RegistrySource): VersionedRegistr
     currentVersion(nowMs);
     if (registryCache && nowMs - registryCache.loadedAtMs < SOURCE_TTL_MS) return registryCache.value;
     if (registryFlight) return registryFlight;
+    const flightGeneration = generation;
     const flight = (async () => {
       const document = source.file
         ? JSON.parse(await readFile(source.file, 'utf8')) as unknown
@@ -103,10 +105,13 @@ export function createRegistryResolver(source: RegistrySource): VersionedRegistr
       const entries = canonicalEntries(document);
       if (!record(document)) throw new Error('Invalid registry document.');
       const snapshot = { document, entries };
-      registryCache = { value: snapshot, loadedAtMs: now() };
-      nextExpiryAtMs = Math.min(nextExpiryAtMs, registryCache.loadedAtMs + SOURCE_TTL_MS);
-      for (const [url, cached] of attestationCache) {
-        if (now() - cached.loadedAtMs >= SOURCE_TTL_MS) attestationCache.delete(url);
+      if (currentVersion() === flightGeneration) {
+        const loadedAtMs = now();
+        registryCache = { value: snapshot, loadedAtMs };
+        nextExpiryAtMs = Math.min(nextExpiryAtMs, loadedAtMs + SOURCE_TTL_MS);
+        for (const [url, cached] of attestationCache) {
+          if (now() - cached.loadedAtMs >= SOURCE_TTL_MS) attestationCache.delete(url);
+        }
       }
       return snapshot;
     })();

@@ -213,9 +213,10 @@ through a guarded HTTPS client with destination and response bounds.
 Registry and attestation data refresh after 300 seconds. New
 requests after that boundary do not join source work begun before
 it; a result from the old generation fails closed if it completes
-after the boundary. A removed or revoked entry then stops verifying.
-A failed source request produces an uncached unknown result; it does not claim that
-AgentBook is unavailable.
+after the boundary. A late old fetch cannot overwrite the refreshed
+registry cache. A removed or revoked entry then stops verifying.
+A failed source request produces an uncached unknown result; it does
+not claim that AgentBook is unavailable.
 
 ```json
 {
@@ -295,8 +296,11 @@ Abuse posture: per-key rate limit (default 120 req/min) on the
 badge and status routes, keyed on the socket address (or on
 `X-Forwarded-For` only from an IP in `RATE_LIMIT_TRUSTED_PROXIES`).
 Over-limit returns 429 on the JSON route; on badge
-routes it serves the subject's last render when one exists, else
-a reusable unchecked badge — in both cases `no-store`. A global
+routes it first checks whether the registry or source generation is
+due to change. It then serves the subject's last render only while
+that generation and the original check deadline remain current;
+otherwise it serves a reusable unchecked badge. Both are `no-store`.
+A global
 concurrency cap plus a bounded queue with a
 per-lookup deadline bounds outbound core lookups (the core
 receives the deadline's `AbortSignal`, and the service enforces

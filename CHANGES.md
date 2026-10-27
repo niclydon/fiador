@@ -35,9 +35,12 @@
   out of the current cache and badge render path. Canonical HTTPS
   registry refreshes now separate source generations at the 300-second
   boundary, so a pending pre-refresh check cannot report a newly
-  revoked application as verified.
+  revoked application as verified. A registry fetch started in an old
+  generation cannot block a new fetch or overwrite its cached result.
 - An over-limit request reuses observed artwork only until that
-  check's original cache deadline; PNG fallbacks are separate for
+  check's original cache deadline. It checks for a due source refresh
+  before reusing artwork, so revoked claims turn neutral even under
+  sustained rate limiting. PNG fallbacks are separate for
   each theme and variant; limited SVG fallbacks are reused too.
   Service deadlines, including a core that ignores cancellation,
   return 503 JSON or an untimed grey badge; a core-produced `unknown`
@@ -49,7 +52,7 @@
   reject credentials, queries, and fragments. The badge registry and
   address response differ from the MCP server's current contract;
   sections 4.2 and 11 parity remains later work.
-- The integrated badge-service suite has 89 route, source, and
+- The integrated badge-service suite has 91 route, source, and
   security tests. Badge checks are configured in CI on Node 22 and 24.
   Nothing was deployed; no public badge instance is claimed.
 
