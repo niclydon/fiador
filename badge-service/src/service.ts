@@ -153,6 +153,18 @@ class OverloadedError extends Error {
   }
 }
 
+/** The per-lookup deadline elapsed before the core answered. This
+ * is raised by the service's own race (see resolveResult), so it
+ * fires even when the core ignores its AbortSignal entirely: the
+ * client is answered at the deadline and the late result, when it
+ * lands, is discarded — never cached, never served. */
+class LookupDeadlineError extends Error {
+  constructor() {
+    super('lookup deadline exceeded');
+    this.name = 'LookupDeadlineError';
+  }
+}
+
 export interface BadgeServiceInternals {
   resultCacheSize(): number;
   renderCacheSize(): number;
@@ -273,12 +285,23 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       // The registry content changed under us (SPEC 4.6 refresh):
       // results and renders cached against the old registry are
       // dropped, so a removed or replaced attestation takes
-      // effect now, not at cache expiry.
+      // effect now, not at cache expiry. In-flight lookups are
+      // dropped from the join map too: a lookup started under the
+      // old registry must not be JOINED by a post-refresh request
+      // (its creator still receives its own result; see the
+      // version stamp on the cache write below).
       lastRegistryVersion = registryVersion;
       cache.clear();
       renderCache.clear();
       lastRender.clear();
+      inFlight.clear();
     }
+    // Version stamp for this lookup: a flight that completes
+    // after the registry has moved on must not seed the result
+    // cache with an outcome the current registry contradicts (a
+    // revoked subject would otherwise stay verified for the full
+    // TTL off the back of one in-flight lookup).
+    const startVersion = registryVersion;
     const key = subjectKey(subjectType, subjectId);
     const nowMs = now().getTime();
     const entry = cache.get(key);
@@ -288,19 +311,27 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     const pending = inFlight.get(key);
     if (pending) return pending;
     const flight = (async () => {
-      // One deadline covers queue wait + the core call; its signal
-      // is what the core receives, so a queued-then-expired lookup
-      // aborts the RPC instead of running unbounded.
+      // One deadline covers queue wait + the core call. It is
+      // enforced HERE, by racing the core call, not merely
+      // signalled: its AbortSignal is what the core receives (so
+      // a cooperative core aborts its RPC), but a core that
+      // ignores the signal cannot hold the request past the
+      // deadline — the race rejects, the routes answer 503 /
+      // unchecked badge, and the late result is discarded by the
+      // settled race: it never reaches the cache write below.
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), lookupDeadline);
+      let deadlineTimer: NodeJS.Timeout | undefined;
+      const deadlinePromise = new Promise<never>((_resolve, reject) => {
+        deadlineTimer = setTimeout(() => {
+          controller.abort();
+          reject(new LookupDeadlineError());
+        }, lookupDeadline);
+      });
       let result: VerifyResult;
       try {
-        result = await callCore(subjectType, subjectId, controller.signal);
-      } catch (err) {
-        if (err instanceof OverloadedError) throw err;
-        throw err;
+        result = await Promise.race([callCore(subjectType, subjectId, controller.signal), deadlinePromise]);
       } finally {
-        clearTimeout(timer);
+        if (deadlineTimer) clearTimeout(deadlineTimer);
       }
       if (result.evidence.rpcLatencyMs !== undefined) health.lastLookupMs = result.evidence.rpcLatencyMs;
       const lookupFailed =
@@ -317,7 +348,13 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
       if (lookupFailed && entry && entry.result.status === 'verified' && now().getTime() - entry.storedAtMs < staleCeiling) {
         return { result: entry.result, stale: true };
       }
-      if (ttlFor(result.status) > 0) {
+      if (ttlFor(result.status) > 0 && (deps.registrySource?.version ?? 0) === startVersion) {
+        // Seeded only if the registry has not moved since this
+        // lookup started. A stale-stamped outcome is still
+        // returned to its own requester (their lookup genuinely
+        // ran under the registry they started with) but seeds
+        // nothing: the next request re-resolves against the
+        // current registry.
         cache.set(key, { result, storedAtMs: now().getTime() });
       }
       return { result, stale: false };
@@ -326,7 +363,9 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     try {
       return await flight;
     } finally {
-      inFlight.delete(key);
+      // Guarded: a registry bump may have cleared the map and a
+      // newer flight may own this key now; only remove our own.
+      if (inFlight.get(key) === flight) inFlight.delete(key);
     }
   }
 
@@ -408,13 +447,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     // For the auto PNG the resolved theme is part of the render
     // identity; for everything else the requested theme is.
     const resolved: ThemeName | undefined =
-      args.format === 'png'
-        ? args.theme !== 'auto'
-          ? args.theme
-          : args.clientHint === 'light'
-            ? 'light'
-            : 'dark'
-        : undefined;
+      args.format === 'png' ? effectivePngTheme(args.theme, args.clientHint) : undefined;
     const themeKey =
       args.format === 'png' && args.theme === 'auto' ? `auto:${resolved}` : args.theme;
     const etag = etagFor([
@@ -473,11 +506,25 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     res.end(head ? undefined : body);
   }
 
-  /** A rate-limited badge request must never rasterise: serve the
-   * subject's last render for this route shape when one exists,
-   * else a cheap static template (an SVG string built once; for
-   * PNG, the one cached unchecked raster). */
-  let busyPng: Buffer | null = null;
+  /** The theme a PNG is actually rasterised in: an explicit
+   * theme parameter always wins; `auto` resolves from the
+   * client hint, falling back to dark. One definition, used by
+   * the normal render path and the rate-limited path alike, so
+   * the X-Badge-Theme header can never describe a different
+   * theme than the bytes carry. */
+  function effectivePngTheme(theme: ThemeSelection, clientHint: string | undefined): ThemeName {
+    return theme !== 'auto' ? theme : clientHint === 'light' ? 'light' : 'dark';
+  }
+
+  /** A rate-limited badge request must never rasterise a subject
+   * badge: serve the subject's last render for this route shape
+   * when one exists (that render legitimately carries its own
+   * genuine check time — it is never re-stamped), else the static
+   * unchecked badge. The static fallbacks are cached too, keyed
+   * like other renders, so a limited route renders each of its
+   * shapes at most once: the SVG in the render/last-render
+   * caches, the PNG in the busy-raster cache below. */
+  const busyPngs = new Map<string, { body: Buffer; theme: ThemeName }>();
   function sendLimitedBadge(
     req: IncomingMessage,
     res: ServerResponse,
@@ -486,7 +533,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
   ): void {
     const themeKey =
       args.format === 'png' && args.theme === 'auto'
-        ? `auto:${args.clientHint === 'light' ? 'light' : 'dark'}`
+        ? `auto:${effectivePngTheme(args.theme, args.clientHint)}`
         : args.theme;
     const routeKey = JSON.stringify([args.subjectKeyValue, args.variant, args.format, themeKey]);
     const last = lastRender.get(routeKey);
@@ -502,31 +549,55 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
     // built without the rasteriser where possible.
     if (args.format === 'svg') {
       deps.onRender?.('svg');
-      const svg = renderBadgeSvg({
-        state: 'unverified',
-        theme: args.theme,
-        variant: args.variant,
-        checkedAt: null,
-        now: now(),
-      });
+      const body = Buffer.from(
+        renderBadgeSvg({
+          state: 'unverified',
+          theme: args.theme,
+          variant: args.variant,
+          checkedAt: null,
+          now: now(),
+        }),
+        'utf8',
+      );
+      // Cached under the same identity sendBadge gives an
+      // unchecked render, so repeated limited hits serve this
+      // instead of rebuilding it on every request.
+      const etag = etagFor([
+        args.subjectKeyValue,
+        'invalid',
+        null,
+        args.variant,
+        'svg',
+        args.theme,
+        effectiveBase(),
+      ]);
+      const entry: RenderEntry = { body, etag, resolvedTheme: undefined };
+      renderCache.set(etag, entry);
+      lastRender.set(routeKey, entry);
       res.writeHead(200, { 'content-type': 'image/svg+xml', ...headers });
-      res.end(head ? undefined : svg);
+      res.end(head ? undefined : body);
       return;
     }
-    if (!busyPng) {
+    // Busy rasters are keyed by (variant, effective theme): the
+    // unchecked badge is subject-independent, but its geometry
+    // and palette are not — an icon request must never be
+    // answered with pill bytes, nor a light request with dark
+    // bytes, and the header reports the theme actually served.
+    const theme = effectivePngTheme(args.theme, args.clientHint);
+    const busyKey = `${args.variant}:${theme}`;
+    let busy = busyPngs.get(busyKey);
+    if (!busy) {
       deps.onRender?.('png');
-      busyPng = renderBadgePng({
-        state: 'unverified',
-        theme: args.clientHint === 'light' ? 'light' : 'dark',
-        variant: args.variant,
-        checkedAt: null,
-        now: now(),
-      });
+      busy = {
+        body: renderBadgePng({ state: 'unverified', theme, variant: args.variant, checkedAt: null, now: now() }),
+        theme,
+      };
+      busyPngs.set(busyKey, busy);
     }
     headers['content-type'] = 'image/png';
-    headers['x-badge-theme'] = args.clientHint === 'light' ? 'light' : 'dark';
+    headers['x-badge-theme'] = busy.theme;
     res.writeHead(200, headers);
-    res.end(head ? undefined : busyPng);
+    res.end(head ? undefined : busy.body);
   }
 
   function uncheckedBadge(
@@ -617,7 +688,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
         try {
           resolvedResult = await resolveResult(parsed.type, parsed.id);
         } catch (err) {
-          if (err instanceof OverloadedError) {
+          if (err instanceof OverloadedError || err instanceof LookupDeadlineError) {
             sendJson(res, 503, { error: 'service busy' }, { 'cache-control': 'no-store' }, head);
             return;
           }
@@ -628,13 +699,15 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
         if (stale) pub.evidence = { ...pub.evidence, source: 'cache' };
         // Address-subject disclosure rule (spec reconciliation):
         // the queried address appears ONCE in this body, as the
-        // explicit subject echo below. Every other field carries
-        // the truncated form only — including the badge URLs, which
-        // are therefore built from the truncated address for
-        // address subjects (a full wallet address in a URL is a
-        // log/history leak, SPEC 4.9).
+        // explicit subject echo below. Badge URLs are OMITTED for
+        // address subjects (badge: null): a working badge URL
+        // would have to embed the full address (a log/history
+        // leak, SPEC 4.9), and one built from the truncated
+        // address is worse than none — it resolves to a badge
+        // reading "not verified" for a verified subject,
+        // affirmatively misstating its status. Every other field
+        // carries the truncated form only.
         const [canonType] = canonicalSubject(parsed.type, parsed.id);
-        const urlSubjectId = canonType === 'address' ? (pub.addressTruncated ?? '') : parsed.id;
         const body = {
           subject: { type: parsed.type, id: parsed.id },
           status: pub.status,
@@ -643,7 +716,7 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
           failures: pub.failures,
           evidence: pub.evidence,
           checkedAt: pub.evidence.checkedAt,
-          badge: badgeUrls(effectiveBase(), parsed.type, urlSubjectId),
+          badge: canonType === 'address' ? null : badgeUrls(effectiveBase(), parsed.type, parsed.id),
         };
         const text = JSON.stringify(body);
         const etag = etagFor(['status-json', text]);
@@ -725,12 +798,14 @@ export function createBadgeService(deps: BadgeServiceDeps): Server & { badgeInte
         let resolvedResult: { result: VerifyResult; stale: boolean };
         try {
           resolvedResult = await resolveResult(parsed.type, parsed.id);
-        } catch (err) {
-          if (err instanceof OverloadedError) {
-            uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
-            return;
-          }
-          throw err;
+        } catch {
+          // SPEC 4.7 on the badge route: ANY lookup failure —
+          // overload, deadline, or a core/resolver that throws —
+          // is the grey unchecked badge. A badge embed never 500s
+          // because a check could not run; only a failure inside
+          // rendering itself reaches the outer catch.
+          uncheckedBadge(req, res, { theme, variant, format, clientHint, subjectKeyValue: key }, head);
+          return;
         }
         const { result, stale } = resolvedResult;
         sendBadge(

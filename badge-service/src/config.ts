@@ -257,14 +257,18 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
     else throw new ConfigError('invalid value for BADGE_TRUST_PROXY: expected 1/true or 0/false');
   }
 
+  // The registry knobs are validated whether or not a registry
+  // file is configured: a garbage value is a startup error naming
+  // the variable in both cases, never silently ignored just
+  // because the knob currently has nothing to govern.
+  const registryRefreshMs = strictInt(env, 'REGISTRY_REFRESH_MS', 1, 3_600_000);
+  const registryMaxBytes = strictInt(env, 'REGISTRY_MAX_BYTES', 1024, 67_108_864);
   const registryFile = env.VERIFY_REGISTRY_FILE ?? env.REGISTRY_FILE;
   if (registryFile) {
     const varName = env.VERIFY_REGISTRY_FILE !== undefined ? 'VERIFY_REGISTRY_FILE' : 'REGISTRY_FILE';
-    const refreshMs = strictInt(env, 'REGISTRY_REFRESH_MS', 1, 3_600_000);
-    const maxBytes = strictInt(env, 'REGISTRY_MAX_BYTES', 1024, 67_108_864);
     const registry = new FileRegistry(registryFile, varName, {
-      ...(refreshMs !== undefined ? { refreshMs } : {}),
-      ...(maxBytes !== undefined ? { maxBytes } : {}),
+      ...(registryRefreshMs !== undefined ? { refreshMs: registryRefreshMs } : {}),
+      ...(registryMaxBytes !== undefined ? { maxBytes: registryMaxBytes } : {}),
     });
     registry.loadInitial(); // throws ConfigError on any problem: clean startup error
     deps.registrySource = registry;

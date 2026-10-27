@@ -140,16 +140,18 @@ function assertNoLeak(body: string, headers: Headers): void {
 
 /** The address-subject disclosure rule: exactly one occurrence of
  * the full address in the body (the subject echo); every other
- * field — evidence, results, badge URLs — truncated only. */
+ * field — evidence, results — truncated only. Badge URLs are
+ * omitted entirely for address subjects (badge: null, fix pass 2
+ * F7): a working one would embed the full address, and one built
+ * from the truncated form misstates the subject's status. */
 function assertAddressEchoOnce(body: string, headers: Headers): void {
   expect(body).not.toContain(RAW_HUMAN);
   expect(body).not.toContain('"humanId"');
   expect(countOccurrences(body, ADDR)).toBe(1);
-  const parsed = JSON.parse(body) as { subject: { id: string }; badge: { svg: Record<string, string> } };
+  const parsed = JSON.parse(body) as { subject: { id: string }; badge: unknown };
   expect(parsed.subject.id).toBe(ADDR);
-  for (const url of Object.values(parsed.badge.svg)) {
-    expect(url.toLowerCase()).not.toContain(ADDR.toLowerCase());
-  }
+  expect(parsed.badge).toBeNull();
+  expect(body).not.toContain('/badge/'); // no badge URLs at all for address subjects
   headers.forEach((value) => {
     expect(value).not.toContain(RAW_HUMAN);
     expect(value.toLowerCase()).not.toContain(ADDR.toLowerCase());
@@ -346,8 +348,8 @@ describe('JSON status route', () => {
     const res = await fetch(`${base}/v1/status/address/${ADDR}`);
     const text = await res.text();
     // Spec reconciliation: the queried address appears exactly
-    // once, as the subject echo; URLs and all other fields are
-    // truncated only.
+    // once, as the subject echo; badge URLs are omitted for
+    // address subjects and all other fields are truncated only.
     assertAddressEchoOnce(text, res.headers);
     expect((JSON.parse(text) as { status: string }).status).toBe('verified');
     const svg = await get(base, `/badge/address/${ADDR}.svg?theme=light`);
@@ -446,6 +448,13 @@ describe('failure behaviour, abuse posture, and misc routes', () => {
     expect(limitedBadge.res.status).toBe(200);
     expect(limitedBadge.text).toBe(first.text);
     expect(limitedBadge.res.headers.get('cache-control')).toBe('no-store');
+    // Fix pass 2 (F4): the served last render legitimately carries
+    // its GENUINE check time in the image (it is never re-stamped
+    // or fabricated), but a limited response never emits an
+    // X-Checked-At header — the header would claim a check ran
+    // for THIS request.
+    expect(limitedBadge.text).toContain('checked 14:03 UTC');
+    expect(limitedBadge.res.headers.get('x-checked-at')).toBeNull();
     expect(renders).toBe(1);
   });
 
@@ -837,6 +846,13 @@ describe('fix pass: configuration strictness and bind posture', () => {
       { VERIFY_TIMEOUT_MS: '99999999' },
       { CACHE_MAX_ENTRIES: '0' },
       { LOOKUP_QUEUE_MAX: '-2' },
+      // Fix pass 2 (F6): the registry knobs are validated even
+      // with NO registry file configured — garbage names the
+      // variable instead of being silently ignored.
+      { REGISTRY_REFRESH_MS: 'abc' },
+      { REGISTRY_REFRESH_MS: '0' },
+      { REGISTRY_MAX_BYTES: '10' },
+      { REGISTRY_MAX_BYTES: '-1' },
     ]) {
       const name = Object.keys(env)[0]!;
       expect(() => depsFromEnv(env), JSON.stringify(env)).toThrow(new RegExp(name));
@@ -1035,6 +1051,246 @@ describe('fix pass: accessible names and the expired layout', () => {
     const width = PILL_WIDTHS_FIX();
     expect(text).toContain(`<text x="${width - 10}" y="18" text-anchor="end"`);
     expect(text).not.toContain(`x="${width - 104}"`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review fix pass 2 (PR #30 re-review 2: gate failed on F1 + F2)
+// ---------------------------------------------------------------------------
+
+describe('fix pass 2: revocation race (F1)', () => {
+  it('a lookup in flight at registry refresh does not re-seed the cache with the revoked result', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'badge-reg-'));
+    const file = join(dir, 'registry.json');
+    const doc = (withRace: boolean) => ({
+      discord_application: withRace
+        ? { race: { payload: { note: 'race' }, signature: '0x00', signatureType: 'eip191' } }
+        : {},
+    });
+    writeFileSync(file, JSON.stringify(doc(true)));
+    const envDeps = depsFromEnv({ VERIFY_REGISTRY_FILE: file, REGISTRY_REFRESH_MS: '40' });
+
+    // A verifier whose 'race' lookup reads its attestation under
+    // the CURRENT registry, then parks on a gate: the lookup
+    // genuinely started before the revocation landed.
+    class GatedRaceVerifier extends FakeVerifier {
+      raceCalls = 0;
+      private openGate!: () => void;
+      private markEntered!: () => void;
+      readonly gate = new Promise<void>((r) => (this.openGate = r));
+      readonly entered = new Promise<void>((r) => (this.markEntered = r));
+      release() {
+        this.openGate();
+      }
+      override async resolveStatus(subject: Parameters<Verifier['resolveStatus']>[0]): Promise<VerifyResult> {
+        if (subject.kind === 'attested_subject' && subject.subject.id === 'race') {
+          this.raceCalls++;
+          const att = await subject.resolveAttestation(subject.subject);
+          this.markEntered();
+          await this.gate;
+          if (!att) {
+            return {
+              status: 'unknown',
+              address: ZERO as VerifyResult['address'],
+              addressTruncated: '0x0000…00000',
+              humanHash: null,
+              failures: ['attestation_not_found'],
+              evidence: {
+                checkedAt: nowRef.current.toISOString(),
+                source: 'live',
+                agentBook: { network: 'eip155:480', contract: CONTRACT as VerifyResult['address'] },
+              },
+            };
+          }
+          return resultFor('verified');
+        }
+        return super.resolveStatus(subject);
+      }
+    }
+    const gated = new GatedRaceVerifier();
+    const server = createBadgeService({ ...envDeps, verifier: gated });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('no port');
+    const base = `http://127.0.0.1:${addr.port}`;
+
+    const parked = fetch(`${base}/v1/status/discord_application/race`);
+    await gated.entered; // in flight, attestation read under the old registry
+
+    // Revoke: remove the attestation, let the refresh cadence
+    // pass, and trigger the refresh with an unrelated request.
+    writeFileSync(file, JSON.stringify(doc(false)));
+    await new Promise((r) => setTimeout(r, 90));
+    const trigger = await fetch(`${base}/v1/status/discord_application/other`);
+    expect(trigger.status).toBe(200);
+    await trigger.text();
+
+    gated.release();
+    const firstRes = await parked;
+    expect(firstRes.status).toBe(200);
+    // The in-flight request keeps its own result — its lookup ran
+    // under the registry it started with...
+    expect(((await firstRes.json()) as { status: string }).status).toBe('verified');
+    expect(gated.raceCalls).toBe(1);
+
+    // ...but it seeded NOTHING. The repeat request re-resolves
+    // against the current registry and finds the attestation gone
+    // (before this fix it was served verified from the re-seeded
+    // cache, with no second core call, for the full 300 s TTL).
+    const repeat = await fetch(`${base}/v1/status/discord_application/race`);
+    const repeatBody = (await repeat.json()) as { status: string; failures: string[] };
+    expect(repeatBody.status).toBe('unknown');
+    expect(repeatBody.failures).toContain('attestation_not_found');
+    expect(gated.raceCalls).toBe(2);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('fix pass 2: busy PNG keying (F2)', () => {
+  it('the rate-limited busy PNG is keyed by variant and effective theme, and the header tells the truth', async () => {
+    let renders = 0;
+    const base = await start({ rateLimitMax: 0, onRender: () => renders++ });
+    const icon = await getPng(base, '/badge/discord_application/app1.png?variant=icon');
+    const iconDims = PNG.sync.read(icon.buf);
+    expect([iconDims.width, iconDims.height]).toEqual([192, 192]);
+    expect(icon.res.headers.get('x-badge-theme')).toBe('dark'); // auto, no hint -> dark
+
+    // The review's probe: after an icon request, a pill/dark
+    // limited request must NOT be answered with the icon raster.
+    const pillDark = await getPng(base, '/badge/discord_application/app1.png?variant=pill&theme=dark');
+    expect(pillDark.buf.equals(icon.buf)).toBe(false);
+    const pillDims = PNG.sync.read(pillDark.buf);
+    expect([pillDims.width, pillDims.height]).toEqual([232 * 3, 28 * 3]); // pill geometry (unverified width x pill height, 3x)
+    expect(pillDark.res.headers.get('x-badge-theme')).toBe('dark');
+
+    // An explicit theme parameter wins over the (absent) hint,
+    // and the header reports the theme actually served.
+    const pillLight = await getPng(base, '/badge/discord_application/app1.png?variant=pill&theme=light');
+    expect(pillLight.res.headers.get('x-badge-theme')).toBe('light');
+    expect(pillLight.buf.equals(pillDark.buf)).toBe(false);
+
+    // Auto + a light hint resolves to that same light raster.
+    const autoLight = await getPng(base, '/badge/discord_application/app1.png?variant=pill', {
+      'sec-ch-prefers-color-scheme': 'light',
+    });
+    expect(autoLight.res.headers.get('x-badge-theme')).toBe('light');
+    expect(autoLight.buf.equals(pillLight.buf)).toBe(true);
+
+    // Each unique (variant, theme) busy raster rendered exactly
+    // once: icon/dark, pill/dark, pill/light.
+    expect(renders).toBe(3);
+  });
+});
+
+describe('fix pass 2: limited SVG render is cached (F3)', () => {
+  it('repeated rate-limited SVG requests build the unchecked badge once', async () => {
+    let renders = 0;
+    const base = await start({ rateLimitMax: 0, onRender: () => renders++ });
+    const first = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    expect(renders).toBe(1);
+    const second = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    const third = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    expect(second.text).toBe(first.text);
+    expect(third.text).toBe(first.text);
+    expect(renders).toBe(1); // cached after the first limited render, not rebuilt per hit
+    for (const r of [first, second, third]) {
+      expect(r.res.status).toBe(200);
+      expect(r.res.headers.get('cache-control')).toBe('no-store');
+      expect(r.res.headers.get('x-checked-at')).toBeNull();
+    }
+  });
+});
+
+describe('fix pass 2: the lookup deadline is enforced at the service layer (F5)', () => {
+  it('a core that ignores the signal and answers late: 503 at the deadline, late result discarded', async () => {
+    let calls = 0;
+    const slow: Verifier = {
+      async verifyAddress() {
+        throw new Error('unused');
+      },
+      async verifyAttestation() {
+        throw new Error('unused');
+      },
+      async resolveStatus() {
+        calls++;
+        if (calls === 1) await new Promise((r) => setTimeout(r, 1200)); // ignores the AbortSignal entirely
+        return resultFor('verified');
+      },
+    };
+    const base = await start({ verifier: slow, lookupDeadlineMs: 300 });
+    const t0 = Date.now();
+    const res = await fetch(`${base}/v1/status/discord_application/app1`);
+    const elapsed = Date.now() - t0;
+    expect(res.status).toBe(503);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(elapsed).toBeLessThan(1000); // answered at the deadline, not when the core deigned to reply
+    await res.text();
+
+    // Let the late result land, then prove it was discarded: the
+    // next request runs the core again instead of serving the
+    // late verified result out of the cache.
+    await new Promise((r) => setTimeout(r, 1100));
+    const second = await get(base, '/v1/status/discord_application/app1');
+    expect(second.res.status).toBe(200);
+    expect((JSON.parse(second.text) as { status: string }).status).toBe('verified');
+    expect(calls).toBe(2);
+  });
+
+  it('a never-settling core: JSON settles 503 and the badge route settles grey at the deadline', async () => {
+    const never: Verifier = {
+      async verifyAddress() {
+        throw new Error('unused');
+      },
+      async verifyAttestation() {
+        throw new Error('unused');
+      },
+      async resolveStatus() {
+        return new Promise<VerifyResult>(() => {});
+      },
+    };
+    const base = await start({ verifier: never, lookupDeadlineMs: 200 });
+    const t0 = Date.now();
+    const res = await fetch(`${base}/v1/status/discord_application/app1`);
+    expect(res.status).toBe(503);
+    expect(Date.now() - t0).toBeLessThan(1500); // the deadline, not the 30 s server request timeout
+    await res.text();
+    const badge = await get(base, '/badge/discord_application/app1.svg?theme=dark');
+    expect(badge.res.status).toBe(200);
+    expect(badge.text).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+    expect(badge.res.headers.get('cache-control')).toBe('no-store');
+    expect(badge.res.headers.get('x-checked-at')).toBeNull();
+  });
+});
+
+describe('fix pass 2: badge route failure behaviour (F8)', () => {
+  it('a throwing core renders the grey unchecked badge on the badge route; the JSON route keeps its fixed 500', async () => {
+    const exploding: Verifier = {
+      async verifyAddress() {
+        throw new Error('unused');
+      },
+      async verifyAttestation() {
+        throw new Error('unused');
+      },
+      async resolveStatus() {
+        throw new Error(`boom ${RAW_HUMAN} ${ADDR}`);
+      },
+    };
+    const base = await start({ verifier: exploding });
+    const badge = await fetch(`${base}/badge/discord_application/app1.svg?theme=dark`);
+    const badgeText = await badge.text();
+    expect(badge.status).toBe(200);
+    expect(badgeText).toContain(`stroke="${PILL_PALETTES.dark.unverified.ring}"`);
+    expect(badge.headers.get('cache-control')).toBe('no-store');
+    expect(badge.headers.get('x-checked-at')).toBeNull();
+    expect(badgeText).not.toContain(RAW_HUMAN);
+    const png = await fetch(`${base}/badge/discord_application/app1.png?theme=dark`);
+    expect(png.status).toBe(200);
+    expect(png.headers.get('content-type')).toBe('image/png');
+    await png.arrayBuffer();
+    const json = await fetch(`${base}/v1/status/discord_application/app1`);
+    expect(json.status).toBe(500);
+    expect(await json.text()).toBe('{"error":"internal error"}');
   });
 });
 

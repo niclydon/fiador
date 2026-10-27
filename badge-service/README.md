@@ -123,17 +123,26 @@ usefully show a 400), and only an internal rendering fault 500s.
 
 For an `address` subject, the disclosure rule is exact: the
 queried address appears **once** in the body, as the explicit
-`subject` echo. Every other field — evidence, results, and the
-badge URLs — carries the truncated form only (a full wallet
-address in a URL is a leak into logs and browser history,
-spec 4.9). For every other subject type the body contains no
-wallet address at all unless it is the subject itself.
+`subject` echo. Every other field — evidence, results — carries
+the truncated form only, and the badge URLs are **omitted**
+(`badge: null`): a working badge URL would embed the full
+address (a leak into logs and browser history, spec 4.9), and
+one built from the truncated form would resolve to a badge
+reading "not verified" for a verified subject. For every other
+subject type the body contains no wallet address at all unless
+it is the subject itself.
 
 Responses that report no check — rate-limited (429) and
 malformed-subject (400, and the grey badge on image routes) —
-carry **no check time**: no `X-Checked-At` header, no visible
-check label, no `data-checked-at`. A check time is evidence from
-the core (spec 4.4); the service never fabricates one. `HEAD` is
+carry **no fabricated check time**: no `X-Checked-At` header is
+ever emitted for a check that did not run for that request. One
+nuance on the badge routes: a rate-limited request that serves
+the subject's last render serves that render as-is, including
+its genuine check label and `data-checked-at` from the check
+that actually produced it — the time is real evidence, never
+re-stamped to the limited request's arrival. A check time is
+evidence from the core (spec 4.4); the service never invents
+one. `HEAD` is
 answered per route with the GET headers and no body; other
 non-GET methods are 405. Invalid `theme`/`variant` values are
 400, never silently coerced, and route near-misses on the badge
@@ -268,14 +277,21 @@ badge and status routes, keyed on the socket address (or on
 `X-Forwarded-For` only when `BADGE_TRUST_PROXY` says a trusted
 proxy sets it). Over-limit returns 429 on the JSON route; on badge
 routes it serves the subject's last render when one exists, else
-a cheap static unchecked badge — in both cases `no-store`, and in
-neither case a fresh render, so limiting sheds cost instead of
-adding it. A global concurrency cap plus a bounded queue with a
-per-lookup deadline bounds outbound core lookups (the core
-receives the deadline's `AbortSignal`); saturation returns 503 on
-the JSON route and the unchecked badge on badge routes. HTTP
-server timeouts are set explicitly (`requestTimeout` 30 s,
-`headersTimeout` 15 s by default).
+the static unchecked badge — in both cases `no-store`. The
+static fallback is cached per route shape (SVG in the render
+caches; the PNG raster keyed by variant and effective theme), so
+limiting sheds cost instead of adding it: each shape is built at
+most once, and a limited client always receives the geometry
+and theme it asked for. A global concurrency cap plus a bounded
+queue with a per-lookup deadline bounds outbound core lookups:
+the deadline is enforced by the service itself, racing the core
+call (the core also receives the deadline's `AbortSignal`), so
+a core that ignores its signal cannot hold a request past the
+deadline — the request answers 503 on the JSON route and the
+unchecked badge on badge routes, and a result that lands late
+is discarded, never cached. Saturation returns the same 503 /
+unchecked-badge pair. HTTP server timeouts are set explicitly
+(`requestTimeout` 30 s, `headersTimeout` 15 s by default).
 
 ## Tests
 
