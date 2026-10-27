@@ -26,6 +26,25 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
+  badge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run build --workspace=@fiador/verify
+      - run: npm ci --prefix badge-service
+      - run: npm run build --prefix badge-service
+      - run: npm run typecheck --prefix badge-service
+      - run: npm test --prefix badge-service
+
   python:
     runs-on: ubuntu-latest
     timeout-minutes: 15

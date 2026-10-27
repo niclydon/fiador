@@ -1,0 +1,1 @@
+{"compilerOptions":{"declaration":false,"declarationMap":false,"exactOptionalPropertyTypes":true,"noUncheckedIndexedAccess":true,"outDir":"dist","rootDir":"src","sourceMap":false},"extends":"../tsconfig.base.json","include":["src"]}
