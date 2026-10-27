@@ -13,6 +13,18 @@ on World Chain:
 - `resolveStatus(subject)` — one call that composes the two for
   consumers (an address, an attestation, or a subject resolved to an
   attestation).
+- `verifySignedMessage({ message, signature, signatureType,
+  expectedAddress })` — is this arbitrary signed message authentic
+  for its signer? Signature-only (EOA recovery or ERC-1271, the
+  path caller-declared): no registration check, so compose with
+  `verifyAddress` when registration matters.
+
+For ERC-1271, a non-magic result, contract revert, or empty return is
+`signature_mismatch`. An unavailable or wrong-chain RPC is
+`lookup_failed`; a timed-out check is `lookup_timeout`. Both RPC
+failure results leave `verified` false without claiming the signature
+was rejected. A malformed message or signature is rejected before
+any RPC; contract signatures may be any even-length `0x` hex bytes.
 
 ```ts
 import { createVerifier, toPublicVerifyResult } from '@fiador/verify';
@@ -53,10 +65,10 @@ raw value.
 
 - No private keys, ever. Verification is public-input only:
   addresses, signatures, contract reads.
-- All network access goes through an injectable `AgentBookReader`,
-  so tests run offline against fixtures (`fixtures/vectors.json`,
-  generated deterministically by `scripts/gen-fixtures.ts`; every
-  fixture is synthetic).
+- AgentBook reads go through an injectable `AgentBookReader`;
+  ERC-1271 checks use the configured World Chain RPC. Tests run
+  offline against synthetic fixtures (`fixtures/vectors.json`,
+  generated deterministically by `scripts/gen-fixtures.ts`).
 - The default reader reads the contract directly with viem rather
   than wrapping the AgentKit SDK's verifier: the SDK (0.2.1)
   collapses RPC failures into a null result, and this package's

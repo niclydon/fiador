@@ -85,6 +85,13 @@ function fakeVerifier(result: VerifyResult): Verifier {
     verifyAddress: async () => result,
     verifyAttestation: async () => result,
     resolveStatus: async () => result,
+    // Not exercised by these tests; present so the fake satisfies
+    // the Verifier surface (verifySignedMessage joined in 0.2.0).
+    verifySignedMessage: async () => ({
+      verified: false,
+      address: null,
+      failures: ['signature_mismatch'],
+    }),
   };
 }
 

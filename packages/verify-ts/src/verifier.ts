@@ -1,4 +1,8 @@
 import {
+  BaseError,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+  TimeoutError as ViemTimeoutError,
   createPublicClient,
   getAddress,
   hashMessage,
@@ -16,11 +20,13 @@ import type {
   EvmAddress,
   FailureCode,
   SignedAttestation,
+  SignedMessageResult,
   StatusSubject,
   VerificationStatus,
   VerifyAttestationOptions,
   VerifyCoreOptions,
   VerifyResult,
+  VerifySignedMessageInput,
   Verifier,
 } from './types.js';
 
@@ -42,6 +48,25 @@ const ERC1271_ABI = [
 ] as const;
 
 class LookupTimeoutError extends Error {}
+
+function isErc1271Rejection(error: unknown): boolean {
+  return (
+    error instanceof BaseError &&
+    error.walk(
+      (cause) =>
+        cause instanceof ContractFunctionRevertedError ||
+        cause instanceof ContractFunctionZeroDataError,
+    ) !== null
+  );
+}
+
+function isRpcTimeout(error: unknown): boolean {
+  return (
+    error instanceof LookupTimeoutError ||
+    (error instanceof BaseError &&
+      error.walk((cause) => cause instanceof ViemTimeoutError) !== null)
+  );
+}
 
 type LookupOutcome =
   | { state: 'registered'; humanId: string; latencyMs: number }
@@ -79,7 +104,7 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
 
   const publicClient = createPublicClient({
     chain: worldchain,
-    transport: http(options.rpcUrl),
+    transport: http(options.rpcUrl, { retryCount: 0, timeout: timeoutMs }),
   });
 
   async function erc1271Valid(
@@ -87,24 +112,55 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     message: string,
     signature: string,
   ): Promise<boolean> {
-    // An ERC-1271 magic value on another chain is not a signature on
-    // World Chain. Let chain identity failures reach verifyAttestation as
-    // an unknown check, not a false signature verdict.
-    if (await publicClient.getChainId() !== worldchain.id) {
-      throw new Error('ERC-1271 RPC is not World Chain.');
-    }
+    const check = async () => {
+      // Chain identity and the contract read share one deadline. A
+      // non-World Chain RPC is an unchecked signature, not a mismatch.
+      if (await publicClient.getChainId() !== worldchain.id) {
+        throw new Error('ERC-1271 RPC is not World Chain.');
+      }
+      try {
+        const result = await publicClient.readContract({
+          address: wallet,
+          abi: ERC1271_ABI,
+          functionName: 'isValidSignature',
+          args: [hashMessage(message), signature as Hex],
+        });
+        return result.toLowerCase() === ERC1271_MAGIC;
+      } catch (error) {
+        // A definitive contract revert or empty result rejects the
+        // signature. Transport and ambiguous execution errors cannot
+        // establish a mismatch, so callers report an unchecked result.
+        if (isErc1271Rejection(error)) return false;
+        throw error;
+      }
+    };
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new LookupTimeoutError()), timeoutMs);
+    });
     try {
-      const result = await publicClient.readContract({
-        address: wallet,
-        abi: ERC1271_ABI,
-        functionName: 'isValidSignature',
-        args: [hashMessage(message), signature as Hex],
+      return await Promise.race([check(), deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  // EIP-191 recovery, shared by verifyAttestation and
+  // verifySignedMessage so there is exactly one recovery path in the
+  // package (SPEC 3.6 amendment). Returns the checksummed signer, or
+  // null when the signature is not EOA-recoverable at all.
+  async function recoverSigner(
+    message: string,
+    signature: string,
+  ): Promise<EvmAddress | null> {
+    try {
+      return await recoverMessageAddress({
+        message,
+        signature: signature as Hex,
       });
-      return result.toLowerCase() === ERC1271_MAGIC;
     } catch {
-      // A wallet that is not a contract, or a failed read, is not a valid
-      // ERC-1271 signature. Fail closed on the claim (SPEC 3.0).
-      return false;
+      return null;
     }
   }
 
@@ -113,15 +169,9 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     message: string,
   ): Promise<boolean> {
     const wallet = attestation.payload.agentWalletAddress;
-    try {
-      const recovered = await recoverMessageAddress({
-        message,
-        signature: attestation.signature as Hex,
-      });
-      if (recovered === wallet) return true;
-    } catch {
-      // Not an EOA-recoverable signature; fall through to ERC-1271.
-    }
+    const recovered = await recoverSigner(message, attestation.signature);
+    if (recovered === wallet) return true;
+    // Not an EOA signature for this wallet; fall through to ERC-1271.
     return erc1271Valid(wallet, message, attestation.signature);
   }
 
@@ -283,11 +333,11 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     let signatureMatches: boolean;
     try {
       signatureMatches = await signatureValid(envelope.attestation, message);
-    } catch {
+    } catch (error) {
       return buildResult({
         status: 'unknown',
         address: wallet,
-        failures: ['lookup_failed'],
+        failures: [isRpcTimeout(error) ? 'lookup_timeout' : 'lookup_failed'],
         ...(disclosure !== undefined ? { disclosure } : {}),
       });
     }
@@ -426,5 +476,94 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     });
   }
 
-  return { verifyAddress, verifyAttestation, resolveStatus };
+  // D5 (SPEC 3.6 amendment, Oct 26, 2026): verify an arbitrary
+  // caller-canonicalised signed message through the same machinery
+  // verifyAttestation uses internally. Signature-only: no AgentBook
+  // lookup, no expiry/replay/subject semantics, no humanId in either
+  // direction. The caller declares the signature path; a contract
+  // address checked through the EOA path fails rather than silently
+  // switching to ERC-1271. Never throws for an expected failure.
+  async function verifySignedMessage(
+    input: VerifySignedMessageInput,
+  ): Promise<SignedMessageResult> {
+    const fail = (
+      failures: FailureCode[],
+      address: EvmAddress | null = null,
+    ): SignedMessageResult => ({ verified: false, address, failures });
+
+    if (typeof input !== 'object' || input === null) {
+      return fail(['signature_mismatch']);
+    }
+    const { message, signature, signatureType, expectedAddress } = input;
+
+    // A malformed expected address is its own failure, checked before
+    // any signature work (mirrors verifyAddress validating its input
+    // before the lookup).
+    let expected: EvmAddress | undefined;
+    if (expectedAddress !== undefined) {
+      if (typeof expectedAddress !== 'string' || !isAddress(expectedAddress)) {
+        return fail(['malformed_address']);
+      }
+      try {
+        expected = getAddress(expectedAddress);
+      } catch {
+        return fail(['malformed_address']);
+      }
+    }
+
+    if (signatureType === 'eoa') {
+      const recovered =
+        typeof message === 'string' && typeof signature === 'string'
+          ? await recoverSigner(message, signature)
+          : null;
+      if (recovered === null) {
+        // Invalid or undecodable signature.
+        return fail(['signature_mismatch']);
+      }
+      if (expected !== undefined && recovered !== expected) {
+        return fail(['subject_mismatch'], recovered);
+      }
+      return { verified: true, address: recovered, failures: [] };
+    }
+
+    if (signatureType === 'erc1271') {
+      // There is no recovery for a contract signer: the claimed
+      // contract address is required, and it is the signer.
+      if (expected === undefined) {
+        return fail(['signature_mismatch']);
+      }
+      // Runtime callers can bypass the TypeScript input type. Reject
+      // malformed bytes before even checking chain identity; a
+      // permissive contract must not authenticate malformed input.
+      if (
+        typeof message !== 'string' ||
+        typeof signature !== 'string' ||
+        !/^0x(?:[0-9a-fA-F]{2})*$/.test(signature)
+      ) {
+        return fail(['signature_mismatch'], expected);
+      }
+      let valid: boolean;
+      try {
+        valid = await erc1271Valid(expected, message, signature);
+      } catch (error) {
+        // The check could not be executed at all (RPC transport
+        // failure or a wrong-chain RPC). SPEC 3.6 D5 amendment,
+        // pinned Oct 26, 2026 (world-program cba7539): that case is
+        // unchecked, not mismatched. A deadline has its existing
+        // lookup_timeout code; other failed checks use lookup_failed.
+        return fail([isRpcTimeout(error) ? 'lookup_timeout' : 'lookup_failed'], expected);
+      }
+      if (!valid) {
+        return fail(['signature_mismatch'], expected);
+      }
+      return { verified: true, address: expected, failures: [] };
+    }
+
+    // An unrecognised signatureType from an untyped caller: the path
+    // cannot be determined, which is a wrong-path signature failure,
+    // not a thrown error.
+    return fail(['signature_mismatch']);
+  }
+
+  return { verifyAddress, verifyAttestation, resolveStatus, verifySignedMessage };
 }
