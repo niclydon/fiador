@@ -92,9 +92,38 @@ export async function buildVectors() {
   );
   // Payload claims operatorA's wallet; the signature is strangerC's.
   const wrongSigner = await sign(strangerC, validPayload);
+  // Pathological `extra` shapes (7.5 review M7/M8/m3). A `__proto__`
+  // key must be bound by the signature, never dropped by a prototype
+  // setter; integer-like keys must serialise lexicographically
+  // ("1","10","2"), not numerically; astral-plane keys must sort by
+  // Unicode code point (UTF-8 byte order), so U+E000 precedes
+  // U+20000 even though UTF-16 code-unit order reverses them.
+  const extraProtoKey = await sign(
+    operatorA,
+    payload(operatorA.address, {
+      nonce: 'f1'.repeat(32),
+      extra: JSON.parse(
+        '{"__proto__":"proto-value","zeta":"last"}',
+      ) as Record<string, string>,
+    }),
+  );
+  const extraIntegerKeys = await sign(
+    operatorA,
+    payload(operatorA.address, {
+      nonce: 'f2'.repeat(32),
+      extra: { '2': 'two', '10': 'ten', '1': 'one', a: 'letter' },
+    }),
+  );
+  const extraAstralKeys = await sign(
+    operatorA,
+    payload(operatorA.address, {
+      nonce: 'f3'.repeat(32),
+      extra: { '\uE000': 'bmp-private-use', '\u{20000}': 'astral-plane' },
+    }),
+  );
 
   return {
-    note: 'SYNTHETIC FIXTURES ONLY. Generated deterministically by scripts/gen-fixtures.ts. No real wallet, humanId, or key material appears in this file.',
+    note: 'SYNTHETIC FIXTURES ONLY. Generated deterministically by scripts/gen-fixtures.ts. The fixture keys are public-by-construction: each private key is the keccak256 of a committed, labelled seed string in that file, so anyone can re-derive them. The fixture addresses are therefore BURNED — never fund them, never register them in AgentBook, never use them in a demo. No real wallet, humanId, or key material appears in this file.',
     fixedNow: FIXED_NOW_ISO,
     humans: { human1: HUMAN_1, human2: HUMAN_2 },
     wallets: {
@@ -116,6 +145,9 @@ export async function buildVectors() {
       notYetValid,
       longLifetime,
       wrongSigner,
+      extraProtoKey,
+      extraIntegerKeys,
+      extraAstralKeys,
     },
   };
 }

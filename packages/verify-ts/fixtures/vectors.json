@@ -1,5 +1,5 @@
 {
-  "note": "SYNTHETIC FIXTURES ONLY. Generated deterministically by scripts/gen-fixtures.ts. No real wallet, humanId, or key material appears in this file.",
+  "note": "SYNTHETIC FIXTURES ONLY. Generated deterministically by scripts/gen-fixtures.ts. The fixture keys are public-by-construction: each private key is the keccak256 of a committed, labelled seed string in that file, so anyone can re-derive them. The fixture addresses are therefore BURNED — never fund them, never register them in AgentBook, never use them in a demo. No real wallet, humanId, or key material appears in this file.",
   "fixedNow": "2026-01-15T12:00:00.000Z",
   "humans": {
     "human1": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
@@ -154,6 +154,74 @@
         }
       },
       "signature": "0xc73b0de05fd810138c1d1062ed9b00170e5795548d39ac42268379ec8ac448bc0b78174befb951d7e8c62989c6c36c56b9cf36df96d7435b009b3950cd2619761c",
+      "signatureType": "eip191"
+    },
+    "extraProtoKey": {
+      "payload": {
+        "version": 1,
+        "subject": {
+          "type": "discord_application",
+          "id": "111111111111111111"
+        },
+        "agentWalletAddress": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3",
+        "attestationUrl": "https://example.invalid/attestations/operator-a.json",
+        "operatorDisplayName": "Synthetic Operator A",
+        "humanIdDisclosure": "hash",
+        "issuedAt": "2026-01-14T12:00:00.000Z",
+        "expiresAt": "2026-02-14T12:00:00.000Z",
+        "nonce": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+        "extra": {
+          "__proto__": "proto-value",
+          "zeta": "last"
+        }
+      },
+      "signature": "0x549ca67cbaae8f55e21ab710b7e5d300439942e074d948b1e014f30470a32f82276ae79ca6e6dc0ec0794a4e1f83c3e54bca97e53e80a064f0d537d0239ff6d31c",
+      "signatureType": "eip191"
+    },
+    "extraIntegerKeys": {
+      "payload": {
+        "version": 1,
+        "subject": {
+          "type": "discord_application",
+          "id": "111111111111111111"
+        },
+        "agentWalletAddress": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3",
+        "attestationUrl": "https://example.invalid/attestations/operator-a.json",
+        "operatorDisplayName": "Synthetic Operator A",
+        "humanIdDisclosure": "hash",
+        "issuedAt": "2026-01-14T12:00:00.000Z",
+        "expiresAt": "2026-02-14T12:00:00.000Z",
+        "nonce": "f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2",
+        "extra": {
+          "1": "one",
+          "2": "two",
+          "10": "ten",
+          "a": "letter"
+        }
+      },
+      "signature": "0x3f213c71b5495e88ddc40908ec868efd250b4ece6c2834ca5b7514cfc035f1983beae5d580bb50834b0dca339f174300c367adefdc448b6a35ff13cd6e0481f41b",
+      "signatureType": "eip191"
+    },
+    "extraAstralKeys": {
+      "payload": {
+        "version": 1,
+        "subject": {
+          "type": "discord_application",
+          "id": "111111111111111111"
+        },
+        "agentWalletAddress": "0x1150E70CA6d2B2565f5545a65F571f4A0cd3c7b3",
+        "attestationUrl": "https://example.invalid/attestations/operator-a.json",
+        "operatorDisplayName": "Synthetic Operator A",
+        "humanIdDisclosure": "hash",
+        "issuedAt": "2026-01-14T12:00:00.000Z",
+        "expiresAt": "2026-02-14T12:00:00.000Z",
+        "nonce": "f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3",
+        "extra": {
+          "": "bmp-private-use",
+          "𠀀": "astral-plane"
+        }
+      },
+      "signature": "0xd56f4dc15f05cac555ecfc9cff008b277d512548a519c21e2461663161d292cb6fe9d7ea72158b7c50b30113c27ed64bd03125bc8b1ea4739d711292252e37061c",
       "signatureType": "eip191"
     }
   }

@@ -17,6 +17,30 @@ export const AGENTBOOK_ABI = [
   },
 ] as const;
 
+// RPC endpoint policy (7.5 review M17): the configured RPC is the
+// trust oracle for registration answers — whatever it returns IS the
+// lookup result — so a plaintext endpoint is an integrity hole, not a
+// preference. Non-https URLs are rejected at construction, with one
+// exception: loopback endpoints (localhost, 127.0.0.0/8, ::1), where
+// plaintext never leaves the machine (local dev nodes, test stubs).
+// The error messages never interpolate the URL: RPC URLs routinely
+// carry API keys in their path.
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+export function assertRpcUrlAllowed(rpcUrl: string | undefined): void {
+  if (rpcUrl === undefined) return;
+  let url: URL;
+  try {
+    url = new URL(rpcUrl);
+  } catch {
+    throw new TypeError('malformed RPC URL (expected an https URL, or http on loopback)');
+  }
+  if (url.protocol === 'https:') return;
+  if (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname)) return;
+  throw new TypeError(
+    'RPC URL must use https (http is allowed only for loopback endpoints)',
+  );
+}
+
 // The default reader reads the AgentBook contract directly with viem.
 // It deliberately does NOT wrap the AgentKit SDK's
 // createAgentBookVerifier: in @worldcoin/agentkit(-core) 0.2.1,
@@ -30,6 +54,7 @@ export function createLiveReader(options?: {
   rpcUrl?: string;
   contractAddress?: EvmAddress;
 }): AgentBookReader {
+  assertRpcUrlAllowed(options?.rpcUrl);
   const contract = options?.contractAddress ?? AGENTBOOK_CONTRACT;
   const client = createPublicClient({
     chain: worldchain,
@@ -38,9 +63,11 @@ export function createLiveReader(options?: {
   return {
     source: 'live',
     async lookupHuman(address: EvmAddress): Promise<string | null> {
-      // A configured chain only selects viem's transport metadata. The RPC
-      // endpoint itself can answer for any chain, so pin its live identity
-      // before trusting either a positive or zero AgentBook response.
+      // Be precise about what this check is (7.5 review M17): the
+      // configured RPC is the trust oracle for the answer below — this
+      // eth_chainId call does not authenticate it, it only catches the
+      // common misconfiguration of pointing a World Chain verifier at
+      // an endpoint that answers for a different chain entirely.
       if (await client.getChainId() !== worldchain.id) {
         throw new Error('AgentBook RPC is not World Chain.');
       }

@@ -56,7 +56,18 @@ raw value.
 - All network access goes through an injectable `AgentBookReader`,
   so tests run offline against fixtures (`fixtures/vectors.json`,
   generated deterministically by `scripts/gen-fixtures.ts`; every
-  fixture is synthetic).
+  fixture is synthetic). The fixture keys are public-by-construction:
+  each is the keccak256 of a seed string committed in the generator,
+  so anyone can re-derive them. The fixture addresses are therefore
+  burned — never fund them, never register them, never demo with
+  them.
+- Trust model, stated plainly: the configured RPC endpoint is the
+  trust oracle for registration answers — whatever it returns is
+  the lookup result. The reader's chain-id check is a
+  misconfiguration guard (it catches an endpoint answering for a
+  different chain); it does not authenticate the endpoint. For that
+  reason non-https RPC URLs are rejected at construction, loopback
+  excepted.
 - The default reader reads the contract directly with viem rather
   than wrapping the AgentKit SDK's verifier: the SDK (0.2.1)
   collapses RPC failures into a null result, and this package's

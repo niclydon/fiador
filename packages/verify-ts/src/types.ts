@@ -21,6 +21,11 @@ export type FailureCode =
   | 'wallet_mismatch' // attestation wallet != address under check
   | 'not_yet_valid' // issuedAt in the future beyond skew
   | 'expired'
+  | 'attestation_lifetime_invalid' // expiresAt - issuedAt exceeds the 90-day
+  // protocol lifetime cap (or is not positive). Split out of
+  // malformed_attestation on the 7.5 review's M6 so consumers can report
+  // the signature and binding stages honestly for a well-formed document
+  // whose only defect is its lifetime (SPEC 3.0).
   | 'not_registered'
   | 'replay_detected' // nonce already seen (only when a nonce store is supplied)
   | 'lookup_failed' // RPC / transport failure -> status 'unknown'
@@ -112,8 +117,12 @@ export interface VerifyAttestationOptions {
   expectedSubject?: { type: string; id: string };
   expectedWallet?: EvmAddress;
   nonceStore?: {
-    has(nonce: string, wallet: EvmAddress): Promise<boolean>;
-    add(nonce: string, wallet: EvmAddress, expiresAt: string): Promise<void>;
+    // A single ATOMIC claim (7.5 review B2): resolves true when this
+    // call newly recorded the nonce for the wallet, false when the
+    // nonce was already claimed (a replay). The previous has/add pair
+    // had a check-then-set race between the two awaits; there is no
+    // safe way to compose them, so the contract is one operation.
+    claim(nonce: string, wallet: EvmAddress, expiresAt: string): Promise<boolean>;
   };
   checkRegistration?: boolean; // default true: also run the AgentBook lookup
   signal?: AbortSignal;
@@ -125,10 +134,10 @@ export type StatusSubject =
   | {
       kind: 'attested_subject';
       subject: { type: string; id: string };
-      resolveAttestation: (subject: {
-        type: string;
-        id: string;
-      }) => Promise<SignedAttestation | null>;
+      resolveAttestation: (
+        subject: { type: string; id: string },
+        signal?: AbortSignal,
+      ) => Promise<SignedAttestation | null | undefined>;
     };
 
 export interface Verifier {

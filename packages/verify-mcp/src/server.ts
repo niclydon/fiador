@@ -7,6 +7,7 @@ import {
   type Verifier,
 } from '@fiador/verify';
 import { computeChecks } from './checks.js';
+import { parseJsonStrict } from './json.js';
 
 // The verify MCP server (SPEC section 11): a thin wrapper over
 // @fiador/verify with no semantics of its own. Every tool calls the
@@ -53,6 +54,18 @@ function toolError(message: string) {
   };
 }
 
+// Handler guard (7.5 review M12): any unexpected throw inside a tool
+// handler becomes a FIXED tool error. The underlying error — whose
+// message may echo caller input or configuration values — is never
+// returned to the caller.
+async function guarded<T>(fn: () => Promise<T>): Promise<T | ReturnType<typeof toolError>> {
+  try {
+    return await fn();
+  } catch {
+    return toolError('internal error');
+  }
+}
+
 function badgeUrls(base: string, subjectType: string, subjectId: string) {
   const path = `${base.replace(/\/$/, '')}/badge/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`;
   const byTheme = (ext: string) => ({
@@ -64,7 +77,7 @@ function badgeUrls(base: string, subjectType: string, subjectId: string) {
 }
 
 export function createVerifyMcpServer(deps: VerifyMcpDeps): McpServer {
-  const server = new McpServer({ name: 'verify-mcp', version: '0.1.0' });
+  const server = new McpServer({ name: 'verify-mcp', version: '0.2.0' });
 
   server.registerTool(
     'verify_address',
@@ -87,10 +100,11 @@ export function createVerifyMcpServer(deps: VerifyMcpDeps): McpServer {
         })
         .strict(),
     },
-    async ({ address }) => {
-      const result = await deps.verifier.verifyAddress(address);
-      return toolResult({ ...toPublicVerifyResult(result) });
-    },
+    async ({ address }) =>
+      guarded(async () => {
+        const result = await deps.verifier.verifyAddress(address);
+        return toolResult({ ...toPublicVerifyResult(result) });
+      }),
   );
 
   server.registerTool(
@@ -110,7 +124,10 @@ export function createVerifyMcpServer(deps: VerifyMcpDeps): McpServer {
         .object({
           attestation: z.union([z.record(z.string(), z.unknown()), z.string()]),
           subject: z
-            .object({ type: z.string().min(1), id: z.string().min(1) })
+            .object({
+              type: z.string().min(1).max(128),
+              id: z.string().min(1).max(256),
+            })
             .strict()
             .optional(),
           wallet: z
@@ -120,31 +137,42 @@ export function createVerifyMcpServer(deps: VerifyMcpDeps): McpServer {
         })
         .strict(),
     },
-    async ({ attestation, subject, wallet }) => {
-      const serialised =
-        typeof attestation === 'string' ? attestation : JSON.stringify(attestation);
-      if (Buffer.byteLength(serialised, 'utf8') > MAX_ATTESTATION_BYTES) {
-        return toolError('attestation exceeds the 64 KB input cap');
-      }
-      let input: unknown = attestation;
-      if (typeof attestation === 'string') {
-        try {
-          input = JSON.parse(attestation);
-        } catch {
-          input = attestation; // the core returns invalid + malformed_attestation
+    async ({ attestation, subject, wallet }) =>
+      guarded(async () => {
+        const serialised =
+          typeof attestation === 'string' ? attestation : JSON.stringify(attestation);
+        // Malformed, duplicate-keyed, and oversize documents are all
+        // DOMAIN results (SPEC 11.3), never tool errors: the core
+        // produces them from a string input with proper evidence and
+        // the checks block all not_checked. So each of those cases
+        // hands the core the raw string rather than a parsed value.
+        let input: unknown = attestation;
+        if (Buffer.byteLength(serialised, 'utf8') > MAX_ATTESTATION_BYTES) {
+          // Oversize (7.5 review M11): previously an isError tool
+          // error, contradicting 11.3.
+          input = serialised;
+        } else if (typeof attestation === 'string') {
+          try {
+            // Strict parse (7.5 review M10): duplicate keys at any
+            // depth are rejected here; JSON.parse's last-wins would
+            // silently verify a different document than the caller
+            // may have signed.
+            input = parseJsonStrict(attestation);
+          } catch {
+            input = attestation; // the core returns invalid + malformed_attestation
+          }
         }
-      }
-      const result = await deps.verifier.verifyAttestation(input, {
-        ...(subject ? { expectedSubject: subject } : {}),
-        ...(wallet ? { expectedWallet: wallet as EvmAddress } : {}),
-      });
-      const pub = toPublicVerifyResult(result);
-      const checks = computeChecks(pub, {
-        subject: subject !== undefined,
-        wallet: wallet !== undefined,
-      });
-      return toolResult({ result: pub, checks });
-    },
+        const result = await deps.verifier.verifyAttestation(input, {
+          ...(subject ? { expectedSubject: subject } : {}),
+          ...(wallet ? { expectedWallet: wallet as EvmAddress } : {}),
+        });
+        const pub = toPublicVerifyResult(result);
+        const checks = computeChecks(pub, {
+          subject: subject !== undefined,
+          wallet: wallet !== undefined,
+        });
+        return toolResult({ result: pub, checks });
+      }),
   );
 
   if (deps.resolver) {
@@ -168,28 +196,41 @@ export function createVerifyMcpServer(deps: VerifyMcpDeps): McpServer {
           })
           .strict(),
       },
-      async ({ subjectType, subjectId }) => {
-        const subject = { type: subjectType, id: subjectId };
-        const result = await deps.verifier.resolveStatus({
-          kind: 'attested_subject',
-          subject,
-          resolveAttestation: resolver,
-        });
-        const pub = toPublicVerifyResult(result);
-        const body: Record<string, unknown> = {
-          subject,
-          status: pub.status,
-          addressTruncated: pub.addressTruncated,
-          humanHash: pub.humanHash,
-          failures: pub.failures,
-          evidence: pub.evidence,
-          checkedAt: pub.evidence.checkedAt,
-          ...(deps.badgeBaseUrl
-            ? { badge: badgeUrls(deps.badgeBaseUrl, subjectType, subjectId) }
-            : {}),
-        };
-        return toolResult(body);
-      },
+      async ({ subjectType, subjectId }) =>
+        guarded(async () => {
+          // Path segments '.' and '..' survive encodeURIComponent
+          // untouched and would rewrite the badge URL's path (7.5
+          // review m6): reject them as inputs, with a fixed message.
+          if (
+            deps.badgeBaseUrl &&
+            (subjectType === '.' ||
+              subjectType === '..' ||
+              subjectId === '.' ||
+              subjectId === '..')
+          ) {
+            return toolError('invalid subject');
+          }
+          const subject = { type: subjectType, id: subjectId };
+          const result = await deps.verifier.resolveStatus({
+            kind: 'attested_subject',
+            subject,
+            resolveAttestation: resolver,
+          });
+          const pub = toPublicVerifyResult(result);
+          const body: Record<string, unknown> = {
+            subject,
+            status: pub.status,
+            addressTruncated: pub.addressTruncated,
+            humanHash: pub.humanHash,
+            failures: pub.failures,
+            evidence: pub.evidence,
+            checkedAt: pub.evidence.checkedAt,
+            ...(deps.badgeBaseUrl
+              ? { badge: badgeUrls(deps.badgeBaseUrl, subjectType, subjectId) }
+              : {}),
+          };
+          return toolResult(body);
+        }),
     );
   }
 

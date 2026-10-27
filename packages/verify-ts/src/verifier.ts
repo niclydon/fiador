@@ -10,7 +10,7 @@ import {
 import { worldchain } from 'viem/chains';
 import { canonicalAttestationMessage, validateSignedAttestation } from './canonical.js';
 import { hashHumanId, truncateAddress } from './hash.js';
-import { AGENTBOOK_CONTRACT, createLiveReader } from './reader.js';
+import { AGENTBOOK_CONTRACT, assertRpcUrlAllowed, createLiveReader } from './reader.js';
 import type {
   CheckEvidence,
   EvmAddress,
@@ -41,12 +41,68 @@ const ERC1271_ABI = [
   },
 ] as const;
 
-class LookupTimeoutError extends Error {}
+type RaceOutcome<T> =
+  | { kind: 'value'; value: T }
+  | { kind: 'timeout' }
+  | { kind: 'aborted' }
+  | { kind: 'failed' };
+
+// Run an async operation against the verifier's deadline and an
+// optional caller AbortSignal. The operation is invoked INSIDE the
+// guarded region (7.5 review M12): a collaborator that throws
+// synchronously — before returning its promise — is a 'failed'
+// outcome, never an exception escaping a function whose contract is
+// "returns a result". A late rejection after the deadline wins is
+// swallowed so it never surfaces as an unhandled rejection.
+async function raceDeadline<T>(
+  start: () => Promise<T>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<RaceOutcome<T>> {
+  let call: Promise<T>;
+  try {
+    call = start();
+  } catch {
+    return { kind: 'failed' };
+  }
+  call.catch(() => {});
+  let timer: NodeJS.Timeout | undefined;
+  let onAbort: (() => void) | undefined;
+  const deadline = new Promise<'timeout' | 'aborted'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs);
+    if (signal) {
+      if (signal.aborted) {
+        resolve('aborted');
+        return;
+      }
+      onAbort = () => resolve('aborted');
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+  try {
+    const winner = await Promise.race([
+      call.then(
+        (value) => ({ kind: 'value' as const, value }),
+        () => ({ kind: 'failed' as const }),
+      ),
+      deadline.then((kind) => ({ kind })),
+    ]);
+    return winner;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
 
 type LookupOutcome =
   | { state: 'registered'; humanId: string; latencyMs: number }
   | { state: 'unregistered'; latencyMs: number }
   | { state: 'unknown'; code: 'lookup_failed' | 'lookup_timeout'; latencyMs: number };
+
+type SignatureOutcome =
+  | { kind: 'match' }
+  | { kind: 'mismatch' }
+  | { kind: 'unknown'; code: 'lookup_failed' | 'lookup_timeout' };
 
 function readDisclosure(input: unknown): 'hash' | 'none' | undefined {
   if (typeof input === 'object' && input !== null) {
@@ -63,9 +119,11 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
   const contract: EvmAddress = options.contractAddress ?? AGENTBOOK_CONTRACT;
   if (!isAddress(contract)) {
     // Programmer error, not an expected failure: the library throws here
-    // and only here (SPEC 3.0).
-    throw new TypeError(`createVerifier: malformed contract address: ${contract}`);
+    // and only here (SPEC 3.0). The message names no value (7.5 review
+    // M14): configuration values are operator material, not diagnostics.
+    throw new TypeError('createVerifier: malformed contract address');
   }
+  assertRpcUrlAllowed(options.rpcUrl);
   const reader =
     options.reader ??
     createLiveReader({
@@ -82,47 +140,73 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     transport: http(options.rpcUrl),
   });
 
-  async function erc1271Valid(
+  // ERC-1271 validation for a smart-wallet signer. Both RPC calls run
+  // under the same deadline/abort race as the AgentBook lookup (7.5
+  // review B1): a hanging eth_call must not hold verifyAttestation open
+  // past timeoutMs. Distinguish three outcomes honestly: the contract
+  // answered (match/mismatch), the read itself reverted or returned a
+  // non-magic value (mismatch — fail closed on the claim), or the
+  // network could not answer at all (unknown).
+  async function erc1271Check(
     wallet: EvmAddress,
     message: string,
     signature: string,
-  ): Promise<boolean> {
-    // An ERC-1271 magic value on another chain is not a signature on
-    // World Chain. Let chain identity failures reach verifyAttestation as
-    // an unknown check, not a false signature verdict.
-    if (await publicClient.getChainId() !== worldchain.id) {
-      throw new Error('ERC-1271 RPC is not World Chain.');
+    signal?: AbortSignal,
+  ): Promise<SignatureOutcome> {
+    // The configured RPC is the trust oracle for this answer too; the
+    // chain-id call is a misconfiguration guard (it catches an endpoint
+    // answering for another chain), not an authentication of the RPC.
+    const chain = await raceDeadline(() => publicClient.getChainId(), timeoutMs, signal);
+    if (chain.kind === 'timeout') return { kind: 'unknown', code: 'lookup_timeout' };
+    if (chain.kind !== 'value') return { kind: 'unknown', code: 'lookup_failed' };
+    if (chain.value !== worldchain.id) return { kind: 'unknown', code: 'lookup_failed' };
+    const read = await raceDeadline(
+      () =>
+        publicClient.readContract({
+          address: wallet,
+          abi: ERC1271_ABI,
+          functionName: 'isValidSignature',
+          args: [hashMessage(message), signature as Hex],
+        }),
+      timeoutMs,
+      signal,
+    );
+    if (read.kind === 'timeout') return { kind: 'unknown', code: 'lookup_timeout' };
+    if (read.kind === 'aborted') return { kind: 'unknown', code: 'lookup_failed' };
+    if (read.kind === 'failed') {
+      // A wallet that is not a contract, or a reverting validator, is
+      // not a valid ERC-1271 signature. Fail closed on the claim (SPEC 3.0).
+      return { kind: 'mismatch' };
     }
-    try {
-      const result = await publicClient.readContract({
-        address: wallet,
-        abi: ERC1271_ABI,
-        functionName: 'isValidSignature',
-        args: [hashMessage(message), signature as Hex],
-      });
-      return result.toLowerCase() === ERC1271_MAGIC;
-    } catch {
-      // A wallet that is not a contract, or a failed read, is not a valid
-      // ERC-1271 signature. Fail closed on the claim (SPEC 3.0).
-      return false;
-    }
+    return read.value.toLowerCase() === ERC1271_MAGIC
+      ? { kind: 'match' }
+      : { kind: 'mismatch' };
   }
 
-  async function signatureValid(
+  // The declared signatureType selects the ONE verification path (7.5
+  // review B1). It was previously validated and then ignored: an
+  // 'eip191' document silently fell through to ERC-1271 (an unexpected
+  // RPC call), and a contract wallet's EOA-looking signature could be
+  // accepted on the wrong path. 'eip191' is pure local recovery and
+  // never touches the network; 'eip1271' never attempts recovery.
+  async function signatureCheck(
     attestation: SignedAttestation,
     message: string,
-  ): Promise<boolean> {
+    signal?: AbortSignal,
+  ): Promise<SignatureOutcome> {
     const wallet = attestation.payload.agentWalletAddress;
+    if (attestation.signatureType === 'eip1271') {
+      return erc1271Check(wallet, message, attestation.signature, signal);
+    }
     try {
       const recovered = await recoverMessageAddress({
         message,
         signature: attestation.signature as Hex,
       });
-      if (recovered === wallet) return true;
+      return recovered === wallet ? { kind: 'match' } : { kind: 'mismatch' };
     } catch {
-      // Not an EOA-recoverable signature; fall through to ERC-1271.
+      return { kind: 'mismatch' };
     }
-    return erc1271Valid(wallet, message, attestation.signature);
   }
 
   function evidence(latencyMs?: number): CheckEvidence {
@@ -162,36 +246,16 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
   ): Promise<LookupOutcome> {
     const start = Date.now();
     const latency = () => Date.now() - start;
-    const call = reader.lookupHuman(address);
-    // If the deadline wins the race, the underlying call may reject
-    // later; swallow that late rejection so it never surfaces as an
-    // unhandled rejection in the host process.
-    call.catch(() => {});
-    let timer: NodeJS.Timeout | undefined;
-    let onAbort: (() => void) | undefined;
-    const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new LookupTimeoutError()), timeoutMs);
-      if (signal) {
-        if (signal.aborted) {
-          reject(new Error('aborted'));
-          return;
-        }
-        onAbort = () => reject(new Error('aborted'));
-        signal.addEventListener('abort', onAbort, { once: true });
-      }
-    });
-    try {
-      const value = await Promise.race([call, deadline]);
-      if (value === null) return { state: 'unregistered', latencyMs: latency() };
-      return { state: 'registered', humanId: value, latencyMs: latency() };
-    } catch (err) {
-      if (err instanceof LookupTimeoutError) {
+    const outcome = await raceDeadline(() => reader.lookupHuman(address), timeoutMs, signal);
+    switch (outcome.kind) {
+      case 'value':
+        return outcome.value === null
+          ? { state: 'unregistered', latencyMs: latency() }
+          : { state: 'registered', humanId: outcome.value, latencyMs: latency() };
+      case 'timeout':
         return { state: 'unknown', code: 'lookup_timeout', latencyMs: latency() };
-      }
-      return { state: 'unknown', code: 'lookup_failed', latencyMs: latency() };
-    } finally {
-      if (timer) clearTimeout(timer);
-      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      default:
+        return { state: 'unknown', code: 'lookup_failed', latencyMs: latency() };
     }
   }
 
@@ -259,8 +323,19 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     const { payload } = envelope.attestation;
     const wallet = payload.agentWalletAddress;
     const failures: FailureCode[] = [];
+    const finish = (status: VerificationStatus, extra: Partial<Parameters<typeof buildResult>[0]> = {}) =>
+      buildResult({
+        status,
+        address: wallet,
+        failures,
+        ...(disclosure !== undefined ? { disclosure } : {}),
+        ...extra,
+      });
 
-    // Step 2, binding (SPEC 3.3).
+    // Step 2, binding (SPEC 3.3). Expected-wallet comparison is on the
+    // normalised (lowercased) forms (7.5 review m2): a differently-cased
+    // or bad-checksum spelling of the same address is the same wallet,
+    // and a non-string expectation is a mismatch, never a throw.
     if (
       opts.expectedSubject &&
       (opts.expectedSubject.type !== payload.subject.type ||
@@ -268,117 +343,109 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     ) {
       failures.push('subject_mismatch');
     }
-    if (opts.expectedWallet) {
-      let expected: string;
-      try {
-        expected = getAddress(opts.expectedWallet);
-      } catch {
-        expected = opts.expectedWallet.toLowerCase();
-      }
-      if (expected !== wallet) failures.push('wallet_mismatch');
+    if (opts.expectedWallet !== undefined) {
+      const expected: unknown = opts.expectedWallet;
+      const matches =
+        typeof expected === 'string' &&
+        /^0x[0-9a-fA-F]{40}$/.test(expected) &&
+        expected.toLowerCase() === wallet.toLowerCase();
+      if (!matches) failures.push('wallet_mismatch');
     }
 
-    // Step 3, signature over the canonical form.
+    // Step 3, signature over the canonical form, on the declared path.
     const message = canonicalAttestationMessage(payload);
-    let signatureMatches: boolean;
-    try {
-      signatureMatches = await signatureValid(envelope.attestation, message);
-    } catch {
-      return buildResult({
-        status: 'unknown',
-        address: wallet,
-        failures: ['lookup_failed'],
-        ...(disclosure !== undefined ? { disclosure } : {}),
-      });
-    }
-    if (!signatureMatches) {
-      failures.push('signature_mismatch');
-    }
+    const signature = await signatureCheck(envelope.attestation, message, opts.signal);
 
-    // Step 4, dates and the protocol lifetime cap.
+    // Step 4 facts (dates and the protocol lifetime cap) are computed
+    // before any early return: they are established from the payload
+    // alone, and per SPEC 3.3 precedence they outrank 'unknown' — a
+    // network failure at the signature step must not pre-empt an
+    // expiry or discard a binding failure (7.5 review B1).
     const nowMs = now().getTime();
     const issuedMs = Date.parse(payload.issuedAt);
     const expiresMs = Date.parse(payload.expiresAt);
-    if (expiresMs <= issuedMs || expiresMs - issuedMs > MAX_LIFETIME_MS) {
-      failures.push('malformed_attestation');
-    }
-    if (issuedMs > nowMs + clockSkewMs) failures.push('not_yet_valid');
+    const lifetimeInvalid = expiresMs <= issuedMs || expiresMs - issuedMs > MAX_LIFETIME_MS;
+    const notYetValid = issuedMs > nowMs + clockSkewMs;
     const expired = expiresMs <= nowMs;
-    if (expired) failures.push('expired');
+    const dateFailures = (): FailureCode[] => {
+      const out: FailureCode[] = [];
+      if (lifetimeInvalid) out.push('attestation_lifetime_invalid');
+      if (notYetValid) out.push('not_yet_valid');
+      if (expired) out.push('expired');
+      return out;
+    };
+
+    if (signature.kind === 'unknown') {
+      failures.push(...dateFailures());
+      const invalidClass = failures.some((f) => f !== 'expired');
+      if (invalidClass) {
+        return finish('invalid', { failures: [...failures, signature.code] });
+      }
+      if (expired) {
+        return finish('expired', { failures: [...failures, signature.code] });
+      }
+      return finish('unknown', { failures: [signature.code] });
+    }
+    if (signature.kind === 'mismatch') {
+      failures.push('signature_mismatch');
+    }
+    failures.push(...dateFailures());
 
     const invalidFailures = failures.filter((f) => f !== 'expired');
     if (invalidFailures.length > 0) {
-      return buildResult({
-        status: 'invalid',
-        address: wallet,
-        failures,
-        ...(disclosure !== undefined ? { disclosure } : {}),
-      });
-    }
-    if (expired) {
-      // Expired outranks the lookup outcome (SPEC 3.3 precedence), so the
-      // network check is not run.
-      return buildResult({
-        status: 'expired',
-        address: wallet,
-        failures,
-        ...(disclosure !== undefined ? { disclosure } : {}),
-      });
+      return finish('invalid');
     }
 
-    // Step 5, replay. A supplied nonce store is caller infrastructure;
-    // its own errors propagate as programmer/infra errors, not verdicts.
-    if (opts.nonceStore && (await opts.nonceStore.has(payload.nonce, wallet))) {
-      return buildResult({
-        status: 'invalid',
-        address: wallet,
-        failures: ['replay_detected'],
-        ...(disclosure !== undefined ? { disclosure } : {}),
-      });
+    // Step 5, replay (SPEC 3.3), evaluated BEFORE the expired return
+    // (7.5 review M1): 'invalid' outranks 'expired', so a nonce that
+    // was already claimed makes an otherwise-expired attestation
+    // invalid, not expired. The store contract is a single atomic
+    // claim (B2). A store that throws is caller infrastructure
+    // failing: fail closed as 'unknown' + lookup_failed (M2), except
+    // that an established expiry still outranks it.
+    if (opts.nonceStore) {
+      let claimed: boolean;
+      try {
+        claimed = await opts.nonceStore.claim(payload.nonce, wallet, payload.expiresAt);
+      } catch {
+        if (expired) {
+          return finish('expired', { failures: [...failures, 'lookup_failed'] });
+        }
+        return finish('unknown', { failures: ['lookup_failed'] });
+      }
+      if (!claimed) {
+        return finish('invalid', { failures: [...failures, 'replay_detected'] });
+      }
+    }
+
+    if (expired) {
+      // Expired outranks the lookup outcome (SPEC 3.3 precedence), so
+      // the network check is not run.
+      return finish('expired');
     }
 
     // Step 6, registration.
     if (opts.checkRegistration === false) {
-      if (opts.nonceStore) {
-        await opts.nonceStore.add(payload.nonce, wallet, payload.expiresAt);
-      }
-      return buildResult({
-        status: 'verified',
-        address: wallet,
-        failures: [],
-        ...(disclosure !== undefined ? { disclosure } : {}),
-      });
+      return finish('verified', { failures: [] });
     }
     const outcome = await lookup(wallet, opts.signal);
     if (outcome.state === 'unknown') {
-      return buildResult({
-        status: 'unknown',
-        address: wallet,
+      return finish('unknown', {
         failures: [outcome.code],
         latencyMs: outcome.latencyMs,
-        ...(disclosure !== undefined ? { disclosure } : {}),
       });
     }
     if (outcome.state === 'unregistered') {
       // A valid signature from an unregistered wallet attests nothing.
-      return buildResult({
-        status: 'unregistered',
-        address: wallet,
+      return finish('unregistered', {
         failures: ['not_registered'],
         latencyMs: outcome.latencyMs,
-        ...(disclosure !== undefined ? { disclosure } : {}),
       });
     }
-    if (opts.nonceStore) {
-      await opts.nonceStore.add(payload.nonce, wallet, payload.expiresAt);
-    }
-    return buildResult({
-      status: 'verified',
-      address: wallet,
+    return finish('verified', {
       failures: [],
       humanId: outcome.humanId,
       latencyMs: outcome.latencyMs,
-      ...(disclosure !== undefined ? { disclosure } : {}),
     });
   }
 
@@ -402,25 +469,39 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
       });
     }
     // attested_subject: resolve, then verify with the subject as the
-    // expectation (SPEC 3.5).
-    let attestation: SignedAttestation | null;
-    try {
-      attestation = await subject.resolveAttestation(subject.subject);
-    } catch {
+    // expectation (SPEC 3.5). The resolver runs under the same
+    // deadline/abort race as the AgentBook lookup and receives the
+    // caller's signal (7.5 review M3): a hanging resolver must not
+    // hold resolveStatus open past timeoutMs.
+    const resolved = await raceDeadline(
+      () => subject.resolveAttestation(subject.subject, opts?.signal),
+      timeoutMs,
+      opts?.signal,
+    );
+    if (resolved.kind === 'timeout') {
+      return buildResult({
+        status: 'unknown',
+        address: ZERO_ADDRESS,
+        failures: ['lookup_timeout'],
+      });
+    }
+    if (resolved.kind !== 'value') {
       return buildResult({
         status: 'unknown',
         address: ZERO_ADDRESS,
         failures: ['lookup_failed'],
       });
     }
-    if (attestation === null) {
+    // A resolver returning undefined means the same as null (7.5
+    // review m1): no attestation for this subject.
+    if (resolved.value == null) {
       return buildResult({
         status: 'unknown',
         address: ZERO_ADDRESS,
         failures: ['attestation_not_found'],
       });
     }
-    return verifyAttestation(attestation, {
+    return verifyAttestation(resolved.value, {
       expectedSubject: subject.subject,
       ...(opts?.signal ? { signal: opts.signal } : {}),
     });
