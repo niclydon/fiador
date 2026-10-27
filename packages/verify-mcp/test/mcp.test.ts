@@ -1,16 +1,23 @@
-import { createServer as createHttpServer } from 'node:http';
+import { request as httpRequest } from 'node:http';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { describe, expect, it } from 'vitest';
 import {
   createVerifier,
   type AgentBookReader,
   type EvmAddress,
+  type FailureCode,
   type SignedAttestation,
+  type Verifier,
 } from '@fiador/verify';
+import { computeChecks } from '../src/checks.js';
+import { ConfigError, depsFromEnv } from '../src/config.js';
+import { createVerifyHttpServer, parseHttpOptions } from '../src/http.js';
 import { createVerifyMcpServer, type VerifyMcpDeps } from '../src/server.js';
 
 const vectors = JSON.parse(
@@ -23,7 +30,7 @@ const vectors = JSON.parse(
   humans: { human1: string };
   wallets: { operatorA: string; strangerC: string };
   lookups: Array<{ address: string; humanId: string | null }>;
-  attestations: { valid: SignedAttestation };
+  attestations: { valid: SignedAttestation; longLifetime: SignedAttestation };
 };
 const NOW = new Date(vectors.fixedNow);
 const A = vectors.wallets.operatorA;
@@ -208,7 +215,14 @@ describe('verify MCP tools', () => {
       additionalProperties: false,
       properties: {
         attestation: { anyOf: [{ type: 'object' }, { type: 'string' }] },
-        subject: { required: ['type', 'id'], additionalProperties: false },
+        subject: {
+          required: ['type', 'id'],
+          additionalProperties: false,
+          properties: {
+            type: { maxLength: 128 },
+            id: { maxLength: 256 },
+          },
+        },
         wallet: { type: 'string', pattern: '^0x[0-9a-fA-F]{40}$' },
       },
     });
@@ -258,7 +272,17 @@ describe('verify MCP tools', () => {
   });
 });
 
-describe('transport parity', () => {
+async function startHttp(deps: VerifyMcpDeps) {
+  // The REAL wiring (src/http.ts, the same factory main.ts serves):
+  // routing, body handling, DNS-rebinding protection, error paths.
+  const server = createVerifyHttpServer(deps, { host: '127.0.0.1', port: 0 });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('no port');
+  return { server, base: `http://127.0.0.1:${address.port}` };
+}
+
+describe('transport parity (real HTTP wiring)', () => {
   it('streamable HTTP returns the same verify_address result as in-memory', async () => {
     const deps = makeDeps();
     const viaMemory = await connectInMemory(deps);
@@ -267,31 +291,11 @@ describe('transport parity', () => {
       arguments: { address: A },
     });
 
-    const httpServer = createHttpServer(async (req, res) => {
-      let body: unknown;
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) chunks.push(chunk as Buffer);
-      const text = Buffer.concat(chunks).toString('utf8');
-      body = text.length > 0 ? JSON.parse(text) : undefined;
-      // Stateless SDK pattern: fresh server + transport per request.
-      const requestServer = createVerifyMcpServer(deps);
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-      });
-      await requestServer.connect(transport);
-      await transport.handleRequest(req, res, body);
-      res.on('close', () => {
-        void transport.close();
-        void requestServer.close();
-      });
-    });
-    await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
-    const address = httpServer.address();
-    if (address === null || typeof address === 'string') throw new Error('no port');
+    const { server, base } = await startHttp(deps);
     try {
       const httpClient = new Client({ name: 'verify-mcp-http-test', version: '0.0.0' });
       await httpClient.connect(
-        new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/`)),
+        new StreamableHTTPClientTransport(new URL(`${base}/mcp`)),
       );
       const httpResult = await httpClient.callTool({
         name: 'verify_address',
@@ -312,7 +316,355 @@ describe('transport parity', () => {
         stripLatency(memoryResult.structuredContent),
       );
     } finally {
-      httpServer.close();
+      server.close();
     }
+  });
+});
+
+describe('7.5 regressions: HTTP wiring (B4/m7/M15)', () => {
+  it('routes on pathname: /health is GET-only, unknown paths 404, query strings do not break routes', async () => {
+    const { server, base } = await startHttp(makeDeps());
+    try {
+      const health = await fetch(`${base}/health?probe=1`);
+      expect(health.status).toBe(200);
+      expect(await health.json()).toEqual({ ok: true });
+      const healthPost = await fetch(`${base}/health`, { method: 'POST', body: '{}' });
+      expect(healthPost.status).toBe(404);
+      const nope = await fetch(`${base}/nope`);
+      expect(nope.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('malformed JSON gets the SDK JSON-RPC error shape, not an HTML 500', async () => {
+    const { server, base } = await startHttp(makeDeps());
+    try {
+      const res = await fetch(`${base}/mcp`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: '{not json',
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error?: { code?: number } };
+      expect(body.error?.code).toBe(-32700);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a declared body over the cap is refused 413 before being read', async () => {
+    const { server, base } = await startHttp(makeDeps());
+    try {
+      const res = await fetch(`${base}/mcp`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({ pad: 'x'.repeat(1024 * 1024) }),
+      });
+      expect(res.status).toBe(413);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a chunked body over the cap is refused 413 before SDK JSON parsing', async () => {
+    const { server, base } = await startHttp(makeDeps());
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = httpRequest(`${base}/mcp`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+            'transfer-encoding': 'chunked',
+          },
+        }, (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode ?? 0));
+        });
+        req.on('error', reject);
+        req.write('{"pad":"');
+        for (let index = 0; index < 17; index += 1) {
+          req.write('x'.repeat(64 * 1024));
+        }
+        req.end('"}');
+      });
+      expect(status).toBe(413);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('DNS-rebinding protection rejects a foreign Host header on loopback binds', async () => {
+    const { server, base } = await startHttp(makeDeps());
+    try {
+      const url = new URL(`${base}/mcp`);
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            hostname: url.hostname,
+            port: url.port,
+            path: url.pathname,
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              accept: 'application/json, text/event-stream',
+              host: 'evil.example',
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          },
+        );
+        req.on('error', reject);
+        req.end(
+          JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+        );
+      });
+      expect(status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('7.5 regressions: verify_attestation inputs (M10/M11/M5/M6)', () => {
+  it('duplicate JSON keys in a string document -> malformed domain result (M10)', async () => {
+    const client = await connectInMemory(makeDeps());
+    const valid = JSON.stringify(vectors.attestations.valid);
+    // A second, identical top-level "payload" key: last-wins JSON.parse
+    // would verify this happily; the strict parser must not.
+    const dup = valid.replace(
+      ',"signature"',
+      `,"payload":${JSON.stringify(vectors.attestations.valid.payload)},"signature"`,
+    );
+    expect(dup).not.toBe(valid);
+    const res = await client.callTool({
+      name: 'verify_attestation',
+      arguments: { attestation: dup },
+    });
+    expect(res.isError).toBeFalsy();
+    const body = res.structuredContent as {
+      result: { status: string; failures: string[] };
+    };
+    expect(body.result.status).toBe('invalid');
+    expect(body.result.failures).toContain('malformed_attestation');
+  });
+
+  it('oversize document -> spec domain result, not a tool error (M11)', async () => {
+    const client = await connectInMemory(makeDeps());
+    const big = `{"pad":"${'x'.repeat(70 * 1024)}"}`;
+    const res = await client.callTool({
+      name: 'verify_attestation',
+      arguments: { attestation: big },
+    });
+    expect(res.isError).toBeFalsy();
+    const body = res.structuredContent as {
+      result: { status: string; failures: string[] };
+      checks: {
+        signature: string;
+        binding: { subject: string; wallet: string };
+        expiry: string;
+        registration: string;
+      };
+    };
+    expect(body.result.status).toBe('invalid');
+    expect(body.result.failures).toEqual(['malformed_attestation']);
+    expect(body.checks).toEqual({
+      signature: 'not_checked',
+      binding: { subject: 'not_checked', wallet: 'not_checked' },
+      expiry: 'not_checked',
+      registration: 'not_checked',
+    });
+  });
+
+  it('on an unknown result, checks do not fabricate stage outcomes (M5)', async () => {
+    const throwing: AgentBookReader = {
+      source: 'live',
+      async lookupHuman() {
+        throw new Error('RPC endpoint unreachable');
+      },
+    };
+    const deps = makeDeps({
+      verifier: createVerifier({ reader: throwing, now: () => NOW }),
+    });
+    const client = await connectInMemory(deps);
+    const att = vectors.attestations.valid;
+    const res = await client.callTool({
+      name: 'verify_attestation',
+      arguments: { attestation: att, subject: att.payload.subject },
+    });
+    const body = res.structuredContent as {
+      result: { status: string };
+      checks: {
+        signature: string;
+        binding: { subject: string };
+        expiry: string;
+        registration: string;
+      };
+    };
+    expect(body.result.status).toBe('unknown');
+    expect(body.checks.signature).toBe('not_checked');
+    expect(body.checks.expiry).toBe('not_checked');
+    expect(body.checks.registration).toBe('not_checked');
+    // Binding DID run and pass before the network stage; it may say so.
+    expect(body.checks.binding.subject).toBe('pass');
+  });
+
+  it('date failures cannot prove signature success when a lookup failed ambiguously', async () => {
+    const publicResult = await makeDeps().verifier.verifyAttestation(
+      vectors.attestations.valid,
+    );
+    const cases: Array<{ status: 'expired' | 'invalid'; failures: FailureCode[] }> = [
+      { status: 'expired', failures: ['expired', 'lookup_failed'] },
+      { status: 'invalid', failures: ['not_yet_valid', 'lookup_timeout'] },
+      { status: 'invalid', failures: ['attestation_lifetime_invalid', 'lookup_failed'] },
+      { status: 'invalid', failures: ['subject_mismatch', 'expired', 'lookup_failed'] },
+    ];
+    for (const { status, failures } of cases) {
+      const checks = computeChecks({
+        status,
+        addressTruncated: publicResult.addressTruncated,
+        humanHash: null,
+        failures,
+        evidence: publicResult.evidence,
+      }, { subject: true, wallet: false });
+      expect(checks.signature).toBe('not_checked');
+      expect(checks.registration).toBe('not_checked');
+    }
+  });
+
+  it('a lifetime failure reports signature/binding honestly (M6)', async () => {
+    const client = await connectInMemory(makeDeps());
+    const att = vectors.attestations.longLifetime;
+    const res = await client.callTool({
+      name: 'verify_attestation',
+      arguments: { attestation: att, subject: att.payload.subject },
+    });
+    const body = res.structuredContent as {
+      result: { status: string; failures: string[] };
+      checks: {
+        signature: string;
+        binding: { subject: string };
+        expiry: string;
+        registration: string;
+      };
+    };
+    expect(body.result.status).toBe('invalid');
+    expect(body.result.failures).toContain('attestation_lifetime_invalid');
+    expect(body.checks.signature).toBe('pass');
+    expect(body.checks.binding.subject).toBe('pass');
+    expect(body.checks.expiry).toBe('lifetime_invalid');
+    expect(body.checks.registration).toBe('not_checked');
+  });
+
+  it('a throwing verifier surfaces a fixed internal error, never its message (M12)', async () => {
+    const deps = makeDeps({
+      verifier: {
+        async verifyAddress(): Promise<never> {
+          throw new Error('boom: secret detail');
+        },
+      } as unknown as Verifier,
+    });
+    const client = await connectInMemory(deps);
+    const res = await client.callTool({
+      name: 'verify_address',
+      arguments: { address: A },
+    });
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res)).not.toContain('secret detail');
+  });
+
+  it("badge_status rejects '..' subject segments when a badge base is set (m6)", async () => {
+    const client = await connectInMemory(
+      makeDeps({ badgeBaseUrl: 'https://badges.example' }),
+    );
+    const res = await client.callTool({
+      name: 'badge_status',
+      arguments: { subjectType: 'discord_application', subjectId: '..' },
+    });
+    expect(res.isError).toBe(true);
+  });
+});
+
+describe('7.5 regressions: configuration (M14/M16/m5/m6)', () => {
+  it('VERIFY_TIMEOUT_MS is strict: invalid explicit values are startup errors (M16)', () => {
+    for (const bad of ['abc', '50', '60001', '5.5', '-100']) {
+      expect(() => depsFromEnv({ VERIFY_TIMEOUT_MS: bad })).toThrow(ConfigError);
+      expect(() => depsFromEnv({ VERIFY_TIMEOUT_MS: bad })).toThrow(/VERIFY_TIMEOUT_MS/);
+    }
+    expect(() => depsFromEnv({ VERIFY_TIMEOUT_MS: '250' })).not.toThrow();
+  });
+
+  it('ports are strict: 0, non-numeric, and out-of-range are startup errors (M16)', () => {
+    expect(() => parseHttpOptions({ VERIFY_MCP_PORT: '0' }, [])).toThrow(/VERIFY_MCP_PORT/);
+    expect(() => parseHttpOptions({ VERIFY_MCP_PORT: 'abc' }, [])).toThrow(/VERIFY_MCP_PORT/);
+    expect(() => parseHttpOptions({}, ['--port=70000'])).toThrow(/--port/);
+    expect(parseHttpOptions({}, [])).toEqual({ host: '127.0.0.1', port: 8787 });
+  });
+
+  it('a malformed registry file fails sanitised: names the file class, never content (M14/m5)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-mcp-config-'));
+    const secretish = 'do-not-leak-this-content';
+    const path = join(dir, 'registry.json');
+    writeFileSync(path, `{"a:b": ${secretish}`);
+    try {
+      depsFromEnv({ VERIFY_REGISTRY_FILE: path });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as Error).message).toMatch(/VERIFY_REGISTRY_FILE/);
+      expect((err as Error).message).not.toContain(secretish);
+    }
+  });
+
+  it('registry shape errors and duplicate keys are startup errors (m5)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-mcp-config-'));
+    const dupPath = join(dir, 'dup.json');
+    writeFileSync(dupPath, '{"discord_application:1":{},"discord_application:1":{}}');
+    expect(() => depsFromEnv({ VERIFY_REGISTRY_FILE: dupPath })).toThrow(/duplicate keys/);
+    const arrPath = join(dir, 'arr.json');
+    writeFileSync(arrPath, '[]');
+    expect(() => depsFromEnv({ VERIFY_REGISTRY_FILE: arrPath })).toThrow(/JSON object/);
+    const badValuePath = join(dir, 'badvalue.json');
+    writeFileSync(badValuePath, '{"discord_application:1":42}');
+    expect(() => depsFromEnv({ VERIFY_REGISTRY_FILE: badValuePath })).toThrow(/attestation objects/);
+    // A well-formed file loads and its resolver answers.
+    const okPath = join(dir, 'ok.json');
+    const subject = vectors.attestations.valid.payload.subject;
+    writeFileSync(
+      okPath,
+      JSON.stringify({ [`${subject.type}:${subject.id}`]: vectors.attestations.valid }),
+    );
+    const deps = depsFromEnv({ VERIFY_REGISTRY_FILE: okPath });
+    expect(deps.resolver).toBeTypeOf('function');
+  });
+
+  it('a bad contract address fails with a fixed message naming no value (M14)', () => {
+    const marker = 'not-an-address-marker';
+    try {
+      depsFromEnv({ VERIFY_CONTRACT_ADDRESS: marker });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as Error).message).not.toContain(marker);
+    }
+  });
+
+  it('the badge base URL is validated and its query/fragment stripped (m6)', () => {
+    expect(() => depsFromEnv({ VERIFY_BADGE_BASE_URL: 'ftp://badges.example' })).toThrow(
+      /VERIFY_BADGE_BASE_URL/,
+    );
+    const deps = depsFromEnv({
+      VERIFY_BADGE_BASE_URL: 'https://badges.example/root/?token=abc#frag',
+    });
+    expect(deps.badgeBaseUrl).toBe('https://badges.example/root');
   });
 });

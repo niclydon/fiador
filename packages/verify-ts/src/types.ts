@@ -5,6 +5,8 @@
 
 export type EvmAddress = `0x${string}`;
 
+export type NonceClaimResult = 'claimed' | 'replay' | 'expired';
+
 export type VerificationStatus =
   | 'verified' // checked live: registration (and attestation, if any) valid
   | 'unregistered' // checked live: no AgentBook entry for the address
@@ -21,6 +23,11 @@ export type FailureCode =
   | 'wallet_mismatch' // attestation wallet != address under check
   | 'not_yet_valid' // issuedAt in the future beyond skew
   | 'expired'
+  | 'attestation_lifetime_invalid' // expiresAt - issuedAt exceeds the 90-day
+  // protocol lifetime cap (or is not positive). Split out of
+  // malformed_attestation on the 7.5 review's M6 so consumers can report
+  // the signature and binding stages honestly for a well-formed document
+  // whose only defect is its lifetime (SPEC 3.0).
   | 'not_registered'
   | 'replay_detected' // nonce already seen (only when a nonce store is supplied)
   | 'lookup_failed' // RPC / transport failure -> status 'unknown'
@@ -108,12 +115,50 @@ export interface VerifyCoreOptions {
   // It never affects the public shape.
 }
 
+// D5 (SPEC 3.6 amendment, Oct 26, 2026): the caller declares which
+// signature path applies. A contract address checked through the EOA
+// path fails; the verifier never silently switches paths.
+export type SignedMessageSignatureType = 'eoa' | 'erc1271';
+
+export interface VerifySignedMessageInput {
+  message: string; // the exact caller-canonicalised message that was signed
+  signature: string; // even-length 0x hex bytes; EOA path uses EIP-191
+  signatureType: SignedMessageSignatureType;
+  expectedAddress?: string; // optional claimed signer; when given, the
+  // recovered or contract signer must equal it
+}
+
+export interface SignedMessageResult {
+  // Deliberately NOT a VerifyResult: this check is signature-only.
+  // It performs no AgentBook lookup and carries no human identifier
+  // in either direction (SPEC 3.6 amendment).
+  verified: boolean; // true only when the signature is valid for the
+  // signer and, when expectedAddress was given, the signer equals it
+  address: EvmAddress | null; // checksummed signer when one was
+  // determined (recovered EOA, or the named ERC-1271 contract);
+  // null when no signer could be determined
+  failures: FailureCode[]; // empty iff verified is true
+}
+
 export interface VerifyAttestationOptions {
   expectedSubject?: { type: string; id: string };
   expectedWallet?: EvmAddress;
   nonceStore?: {
+    // Read-only, strongly consistent replay check against the same
+    // active-claim store used by claim, including for expired
+    // attestations. A stale false is safe only because claim is atomic;
+    // a stale false on an expired document would lose replay precedence.
     has(nonce: string, wallet: EvmAddress): Promise<boolean>;
-    add(nonce: string, wallet: EvmAddress, expiresAt: string): Promise<void>;
+    // Atomic final claim after successful registration. The store must
+    // check its own clock at the write point and never record a nonce
+    // after expiresAt. It checks an existing active claim first, so
+    // concurrent presentations get exactly one 'claimed' result.
+    // The read above does not replace this concurrency guard.
+    claim(
+      nonce: string,
+      wallet: EvmAddress,
+      expiresAt: string,
+    ): Promise<NonceClaimResult>;
   };
   checkRegistration?: boolean; // default true: also run the AgentBook lookup
   signal?: AbortSignal;
@@ -125,10 +170,10 @@ export type StatusSubject =
   | {
       kind: 'attested_subject';
       subject: { type: string; id: string };
-      resolveAttestation: (subject: {
-        type: string;
-        id: string;
-      }) => Promise<SignedAttestation | null>;
+      resolveAttestation: (
+        subject: { type: string; id: string },
+        signal?: AbortSignal,
+      ) => Promise<SignedAttestation | null | undefined>;
     };
 
 export interface Verifier {
@@ -144,4 +189,7 @@ export interface Verifier {
     subject: StatusSubject,
     opts?: { signal?: AbortSignal },
   ): Promise<VerifyResult>;
+  verifySignedMessage(
+    input: VerifySignedMessageInput,
+  ): Promise<SignedMessageResult>;
 }

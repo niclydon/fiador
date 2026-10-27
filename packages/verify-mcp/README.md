@@ -43,7 +43,7 @@ instructions.
 # stdio (local agent use)
 npx @fiador/verify-mcp
 
-# streamable HTTP (self-hosted; stateless)
+# streamable HTTP (self-hosted; stateless; loopback by default)
 VERIFY_MCP_PORT=8787 npx @fiador/verify-mcp --http
 ```
 
@@ -52,12 +52,27 @@ project-run public instance of this server in v1: you run it
 yourself, over stdio or your own HTTP deployment (decided
 Oct 26, 2026).
 
+HTTP exposure, plainly: the server ships NO authentication.
+It binds `127.0.0.1` unless `VERIFY_MCP_HOST` says otherwise,
+and on loopback binds it enables the MCP transport's
+DNS-rebinding protection (loopback `Host` allowlist), so a web
+page open in a local browser cannot POST to it cross-origin.
+Binding a non-loopback address exposes the tools to anyone who
+can reach the port — the server prints a warning at startup;
+put access control at a gateway in front of it.
+
 Configuration is environment only: `VERIFY_RPC_URL`,
 `VERIFY_CONTRACT_ADDRESS`, `VERIFY_TIMEOUT_MS`,
 `VERIFY_BADGE_BASE_URL`, and `VERIFY_REGISTRY_FILE` (a JSON document
 mapping `"subjectType:subjectId"` to signed attestation objects,
-loaded at startup). The server ships no authentication of its own;
-put access control at your gateway if you need it.
+loaded and shape-validated at startup). Values are strict: an
+explicitly-set invalid value is a startup error naming the
+variable, never a silent default (`VERIFY_TIMEOUT_MS` must be
+an integer in [100, 60000]; `VERIFY_MCP_PORT` / `--port` an
+integer in [1, 65535]; the badge base URL must be http(s), and
+its query and fragment are stripped). Startup error messages
+name the variable and the problem class only — never the
+configured value or a file's content.
 
 Both transports run the same tool implementation and are tested for
 byte-equivalent results.

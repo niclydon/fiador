@@ -105,6 +105,12 @@ export const failClosedVerifier: Verifier = {
     if (!attestation) return unknownResult('0x', ['attestation_not_found']);
     return unknownResult(walletOf(attestation), ['lookup_failed']);
   },
+  async verifySignedMessage() {
+    // Fail closed: the signature is reported as not verified. The
+    // SignedMessageResult shape has no lookup-failure code (SPEC 3.6
+    // amendment), so an unverifiable signature is a mismatch here.
+    return { verified: false, address: null, failures: ['signature_mismatch'] };
+  },
 };
 
 export function createDefaultDeps(env: DefaultDepsEnv = {}): LinkPreviewDeps {

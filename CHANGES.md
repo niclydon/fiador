@@ -1,34 +1,36 @@
 # Changes
 
+## 2026-10-27: static privacy and support pages published
+
+- Published the eight-file static release from branch commit
+  `9b5bc30781333376f8bea1459f03d5069e201858` to fiador.org and
+  www.fiador.org after the operator approved production publication.
+  This was a direct Vercel deployment, not a merge into `main`;
+  draft PR #26 remains open.
+- Live `/privacy/` and `/support/` returned 200. The registry and
+  founding attestation matched the release branch's public files
+  byte for byte; `/verify/`, `/v/example`, and `/api/preview` remained
+  404. The canonical repo registry still differs from its deployed
+  mirror. This release added public information pages; it did not
+  establish live Slack sign-in, a World ID check, or bot control. See
+  `docs/narrative/2026-10-27-static-privacy-support-release.md` and
+  `docs/verification.md` for the release boundary and smoke results.
+
 ## 2026-10-26: dynamic badge service (W0 SPEC section 4)
 
-- badge-service/: the served badge from W0 SPEC section 4, as a
-  top-level app (not a workspace package) over @fiador/verify
-  through its public exports only. Plain Node HTTP; PNG via
-  @resvg/resvg-js rasterising the served SVG at 3x. Routes:
-  /badge/:subjectType/:subjectId.svg|.png (plus the legacy
-  untyped alias), /v1/status/:subjectType/:subjectId returning
-  the public projection plus the badge URL matrix (the verify
-  MCP badge_status shape), /health, and the both-themes
-  explainer at /.
-- States verified/expired/unverified rendered from the canonical
-  palette tables in assets/badges/, both themes and both
-  variants; auto SVG composes both palettes via
-  prefers-color-scheme, auto PNG resolves from the client hint
-  with the dark fallback and X-Badge-Theme. Cache behaviour
-  implements the SPEC 4.6 proposals as configuration (300s
-  verified/expired, 60s negative, no-store on unknown,
-  stale-on-error inside 900s with the original check time).
-- Keyless and fetchless: the attestation source is a local
-  registry file mapping type:id to a signed attestation (the
-  verify MCP shape), loaded at startup; the service fetches
-  nothing. That narrows SPEC 4.2"s URL-registry-plus-fetch
-  sketch deliberately; the divergence and its rationale are
-  recorded in badge-service/README.md.
-- Suite: 27 route-level tests in badge-service (fake verifier
-  and resolver, real HTTP on an ephemeral port), including the
-  raw-humanId deep scan over every response. Nothing deployed;
-  v1 operates no project-run public instance.
+- badge-service/: a top-level, keyless app over the public exports of
+  @fiador/verify. It serves SVG and PNG badges, public JSON status,
+  health, and an explainer. Its Discord application badge stays
+  neutral even when an operator wallet check passes, because that
+  check does not prove control of the named application.
+- The canonical `entries[]` registry is read from a file or fetched
+  over guarded HTTPS. Registry and attestation sources are refreshed
+  within 300 seconds, with shared concurrent fetches and cancellation
+  of queued source work after all callers time out. The full request
+  has a five-second deadline; failures produce neutral, uncached art.
+- The badge-service suite has 48 route and source tests, including
+  checks for source refresh, concurrent requests, and raw human ID
+  leakage. Nothing was deployed; no public badge instance is claimed.
 
 ## 2026-10-26: verifier bot safety and maintenance
 
@@ -63,14 +65,14 @@
   served byte-for-byte at /attestations/nova.json, and the
   registry mirrored at /registry.json. The full §6.1 verify
   page is later work.
-- The founding attestation was signed with the dedicated
-  World Program wallet via tools/signer and live-verified at
+- The founding attestation was signed with the dedicated demo
+  signing wallet via tools/signer and live-verified at
   signing time: status verified, 2026-10-26T10:10:50Z,
   payload hash
   8bfeb9f9182de3ce63cdf42bdff941277250d96089982c65f0f97761f195a031,
   expires 2027-01-24. Narrative:
   docs/narrative/2026-10-26-founding-attestation.md.
-- DESIGN §9 precondition synced: the program wallet's
+- DESIGN §9 precondition synced: the demo signing wallet's
   AgentBook registration is recorded as done (Oct 26, 2026,
   live-verified), replacing the stale awaiting-the-tap text.
 
@@ -158,7 +160,7 @@
   base is configured, per the open M2 default). stdio and
   stateless streamable HTTP transports, parity-tested.
 - Live verification recorded in `docs/verification.md`: the
-  program wallet verifies against the real AgentBook contract,
+  demo signing wallet verifies against the real AgentBook contract,
   through the library and through both MCP transports.
 
 ## 2026-10-25: renamed to Fiador; build design lands
