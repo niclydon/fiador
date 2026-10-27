@@ -18,6 +18,46 @@ const NONCE = 'ab'.repeat(32);
 const HOUR_MS = 60 * 60 * 1000;
 const TEMP_ROOT = realpathSync(tmpdir());
 
+async function signedAttestation(nonce, signatureType = 'eip191') {
+  const account = privateKeyToAccount(keccak256(toBytes('fiador-sqlite-nonce-synthetic-test-key')));
+  const current = Date.now();
+  const payload = {
+    version: 1,
+    subject: { type: 'discord_application', id: '111111111111111111' },
+    agentWalletAddress: account.address,
+    humanIdDisclosure: 'none',
+    issuedAt: new Date(current - 60_000).toISOString(),
+    expiresAt: new Date(current + HOUR_MS).toISOString(),
+    nonce,
+  };
+  return {
+    payload,
+    signature: await account.signMessage({ message: canonicalAttestationMessage(payload) }),
+    signatureType,
+  };
+}
+
+function verifierProcess(t, path, mode, attestation) {
+  const workerFile = fileURLToPath(new URL('./verifier-worker.mjs', import.meta.url));
+  const child = fork(workerFile, [path, mode, JSON.stringify(attestation)], {
+    execArgv: ['--no-warnings'],
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  child.stderrText = () => stderr;
+  t.after(() => child.kill());
+  return child;
+}
+
+async function runVerifier(t, path, mode, attestation) {
+  const child = verifierProcess(t, path, mode, attestation);
+  await awaitMessage(child, 'ready');
+  const done = awaitMessage(child, 'done');
+  child.send('verify');
+  return done;
+}
+
 async function temporaryDatabase(t) {
   const directory = await mkdtemp(join(TEMP_ROOT, 'fiador-nonce-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -124,6 +164,61 @@ test('two processes that both read has=false have exactly one claim winner', asy
   const reopened = new SqliteNonceStore(path);
   assert.equal(await reopened.has(NONCE, WALLET), true);
   reopened.close();
+});
+
+test('two complete verifier processes have one atomic winner after both read has=false', async (t) => {
+  const path = await temporaryDatabase(t);
+  const attestation = await signedAttestation('34'.repeat(32));
+  const children = Array.from({ length: 2 }, () => verifierProcess(t, path, 'race', attestation));
+  await Promise.all(children.map((child) => awaitMessage(child, 'ready')));
+  const reads = children.map((child) => awaitMessage(child, 'read'));
+  children.forEach((child) => child.send('verify'));
+  assert.deepEqual((await Promise.all(reads)).map(({ hadClaim }) => hadClaim), [false, false]);
+
+  const results = children.map((child) => awaitMessage(child, 'done'));
+  children.forEach((child) => child.send('release'));
+  const outcomes = await Promise.all(results);
+  assert.deepEqual(outcomes.map(({ status }) => status).sort(), ['invalid', 'verified']);
+  assert.deepEqual(outcomes.map(({ claims }) => claims), [1, 1]);
+  assert.deepEqual(outcomes.find(({ status }) => status === 'invalid').failures, ['replay_detected']);
+  const reopened = new SqliteNonceStore(path);
+  assert.equal(await reopened.has(attestation.payload.nonce, attestation.payload.agentWalletAddress), true);
+  reopened.close();
+});
+
+test('uncertain signature or registration never claims in an independent verifier process', async (t) => {
+  const path = await temporaryDatabase(t);
+  const cases = [
+    ['uncertain-signature', await signedAttestation('45'.repeat(32), 'eip1271'), 0],
+    ['uncertain-registration', await signedAttestation('56'.repeat(32)), 1],
+  ];
+  for (const [mode, attestation, expectedReads] of cases) {
+    const result = await runVerifier(t, path, mode, attestation);
+    assert.equal(result.status, 'unknown', mode);
+    assert.deepEqual(result.failures, ['lookup_failed'], mode);
+    assert.equal(result.reads, expectedReads, mode);
+    assert.equal(result.claims, 0, mode);
+    const reopened = new SqliteNonceStore(path);
+    assert.equal(await reopened.has(attestation.payload.nonce, attestation.payload.agentWalletAddress), false);
+    reopened.close();
+  }
+});
+
+test('a committed claim with a lost response stays claimed across verifier processes', async (t) => {
+  const path = await temporaryDatabase(t);
+  const attestation = await signedAttestation('67'.repeat(32));
+  const first = await runVerifier(t, path, 'lost-response', attestation);
+  assert.equal(first.status, 'unknown');
+  assert.deepEqual(first.failures, ['lookup_failed']);
+  assert.equal(first.claims, 1);
+
+  const reopened = new SqliteNonceStore(path);
+  assert.equal(await reopened.has(attestation.payload.nonce, attestation.payload.agentWalletAddress), true);
+  reopened.close();
+  const second = await runVerifier(t, path, 'normal', attestation);
+  assert.equal(second.status, 'invalid');
+  assert.deepEqual(second.failures, ['replay_detected']);
+  assert.equal(second.claims, 0);
 });
 
 test('an insert error rolls the transaction back and leaves the nonce fresh', async (t) => {
