@@ -62,8 +62,8 @@ decision: @worldcoin/agentkit-core 0.2.1.
 ## 2026-10-27 — privacy and support static release candidate
 
 Prepared locally from the verified deployed site commit `4f366af`.
-No preview, PR, or production deployment has been made from this
-candidate. The build publishes only the eight files listed in
+At that local checkpoint, no preview, PR, or production deployment had
+been made. The build publishes only the eight files listed in
 `docs/narrative/2026-10-27-static-privacy-support-release.md`.
 
 - `node scripts/build-pages-static.mjs` and
@@ -92,3 +92,10 @@ candidate. The build publishes only the eight files listed in
   `65b4d5f9cff45bbf967eb4248348bac1a443ec725ac9571cfdf71b47b5e006aa`
   and `ad1c0e5e2ab9ea3b78aebd5c2f1b3905392b86a96bc10246264e3a6eba4cce6b`,
   respectively. This is a baseline comparison, not a release smoke.
+- Draft PR #26 targets the retained deployed-baseline branch for a narrow
+  review diff. The protected preview from `54bb3cd` reached READY:
+  `/privacy/` and `/support/` returned 200, while `/verify/`,
+  `/v/example`, and `/api/preview` returned 404. Preview registry and
+  attestation response bytes and `Access-Control-Allow-Origin: *`
+  matched the existing production deployment. No production deployment
+  has been made from this candidate.

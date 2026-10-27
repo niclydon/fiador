@@ -6,8 +6,9 @@ existing founding attestation and registry byte for byte. The
 Fiador Slack app remains an owner-only trial: private backend health
 checks have run in closed mode, but owner enrollment, Slack sign-in,
 and a World ID check have not run live as of this record. General
-enrollment remains closed. This is a local candidate, not a preview
-or production publication.
+enrollment remains closed. At preparation, this was a local
+candidate. It was later staged in draft PR #26 and a protected preview;
+production publication has not happened.
 
 ## Published file boundary
 
@@ -61,5 +62,10 @@ At this checkpoint, live `https://fiador.org/privacy/` and
 unshipped routes also returned 404. Live `/registry.json` and
 `/attestations/nova.json` returned 200 and were byte-identical
 to the static build. Their SHA-256 digests are recorded in
-`docs/verification.md`. A protected preview, exact-head review,
-and separate production decision remain before publication.
+`docs/verification.md`. A protected Vercel preview built from `54bb3cd`
+reached READY. In that preview, `/privacy/` and `/support/` returned
+200, while `/verify/`, `/v/example`, and `/api/preview` returned 404.
+Its registry and attestation responses were byte-identical to the
+existing production deployment, including the public CORS header.
+An independent adversarial review found no blocking issue. Production
+publication remains a separate decision.
