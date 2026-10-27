@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import {
   createVerifier,
@@ -84,6 +85,26 @@ export function subjectKey(type: string, id: string): string {
   return JSON.stringify(canonicalSubject(type, id));
 }
 
+/** Deterministic serialisation of a parsed JSON value: object keys
+ * sorted at every depth, so two parses of the same registry
+ * content fingerprint identically even if the file's key order or
+ * formatting changed between writes. */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
+}
+
+/** A content fingerprint of a parsed registry map. The registry
+ * version is a CONTENT generation: it moves only when this
+ * fingerprint does. */
+function registryFingerprint(entries: Map<string, SignedAttestation>): string {
+  const sorted = [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return createHash('sha256').update(stableStringify(sorted)).digest('hex');
+}
+
 export interface RegistrySource {
   resolve(subject: { type: string; id: string }): Promise<SignedAttestation | null>;
   /** Reload the backing file if the refresh interval has elapsed.
@@ -107,6 +128,7 @@ export interface RegistrySource {
  * load, entries are treated as absent (SPEC 4.6 ceiling). */
 export class FileRegistry implements RegistrySource {
   private entries = new Map<string, SignedAttestation>();
+  private entriesFingerprint = registryFingerprint(this.entries);
   private lastAttemptMs = 0;
   private lastSuccessMs = 0;
   private versionCounter = 0;
@@ -184,6 +206,7 @@ export class FileRegistry implements RegistrySource {
   /** Initial load. Any failure is a startup error (ConfigError). */
   loadInitial(): void {
     this.entries = this.readAndParse();
+    this.entriesFingerprint = registryFingerprint(this.entries);
     const nowMs = (this.options.now ?? Date.now)();
     this.lastAttemptMs = nowMs;
     this.lastSuccessMs = nowMs;
@@ -193,9 +216,22 @@ export class FileRegistry implements RegistrySource {
     if (nowMs - this.lastAttemptMs < this.refreshMs) return;
     this.lastAttemptMs = nowMs;
     try {
-      this.entries = this.readAndParse();
+      const next = this.readAndParse();
+      // Every successful load renews freshness (the 24 h ceiling
+      // ages from lastSuccessMs), changed content or not.
       this.lastSuccessMs = nowMs;
-      this.versionCounter++;
+      // The version moves only when the registry CONTENT does.
+      // The service treats a version change as a new generation:
+      // it flushes every cache and discards in-flight lookups. A
+      // byte-identical reload on the refresh cadence is none of
+      // that; swapping and bumping for it cost a 503/grey storm
+      // every cadence for no change.
+      const fingerprint = registryFingerprint(next);
+      if (fingerprint !== this.entriesFingerprint) {
+        this.entries = next;
+        this.entriesFingerprint = fingerprint;
+        this.versionCounter++;
+      }
     } catch {
       // Keep the last good registry; one fixed, sanitised line.
       (this.options.log ?? console.error)('[badge-service] registry reload failed; keeping last good registry');
@@ -253,7 +289,11 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
   const maxBytes = strictInt(env, 'REGISTRY_MAX_BYTES', 1024, 67_108_864);
   if (registryFile && registryUrl) throw new ConfigError('choose either REGISTRY_FILE or REGISTRY_URL');
   if (registryUrl) {
-    const resolver = createRegistryResolver({ url: registryUrl });
+    const resolver = createRegistryResolver({
+      url: registryUrl,
+      ...(refreshMs !== undefined ? { refreshMs } : {}),
+      ...(maxBytes !== undefined ? { maxBytes } : {}),
+    });
     deps.resolveAttestation = resolver;
     deps.sourceVersion = resolver.currentVersion;
   }
@@ -286,7 +326,11 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): BadgeServiceD
       } catch {
         throw new ConfigError(`${varName}: invalid canonical registry document`);
       }
-      const resolver = createRegistryResolver({ file: registryFile });
+      const resolver = createRegistryResolver({
+        file: registryFile,
+        ...(refreshMs !== undefined ? { refreshMs } : {}),
+        ...(maxBytes !== undefined ? { maxBytes } : {}),
+      });
       deps.resolveAttestation = resolver;
       deps.sourceVersion = resolver.currentVersion;
     }
