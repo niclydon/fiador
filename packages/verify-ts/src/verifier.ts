@@ -164,8 +164,8 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     transport: http(options.rpcUrl, { retryCount: 0, timeout: timeoutMs }),
   });
 
-  // ERC-1271 validation for a smart-wallet signer. Both RPC calls run
-  // under the same deadline/abort race as the AgentBook lookup (7.5
+  // ERC-1271 validation for a smart-wallet signer. Both RPC calls share
+  // one deadline, with the same timeout/abort race as AgentBook (7.5
   // review B1): a hanging eth_call must not hold verifyAttestation open
   // past timeoutMs. Distinguish three outcomes honestly: the contract
   // answered (match/mismatch), the contract definitively rejected the
@@ -181,13 +181,16 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
     // The configured RPC is the trust oracle for this answer too; the
     // chain-id call is a misconfiguration guard (it catches an endpoint
     // answering for another chain), not an authentication of the RPC.
-    const chain = await raceDeadline(() => publicClient.getChainId(), timeoutMs, signal);
+    const deadlineAt = performance.now() + timeoutMs;
+    const remaining = () => Math.max(0, deadlineAt - performance.now());
+    const chain = await raceDeadline(() => publicClient.getChainId(), remaining(), signal);
     if (chain.kind === 'timeout') return { kind: 'unknown', code: 'lookup_timeout' };
     if (chain.kind === 'failed' && isRpcTimeout(chain.error)) {
       return { kind: 'unknown', code: 'lookup_timeout' };
     }
     if (chain.kind !== 'value') return { kind: 'unknown', code: 'lookup_failed' };
     if (chain.value !== worldchain.id) return { kind: 'unknown', code: 'lookup_failed' };
+    if (remaining() === 0) return { kind: 'unknown', code: 'lookup_timeout' };
     const read = await raceDeadline(
       () =>
         publicClient.readContract({
@@ -196,7 +199,7 @@ export function createVerifier(options: VerifyCoreOptions = {}): Verifier {
           functionName: 'isValidSignature',
           args: [hashMessage(message), signature as Hex],
         }),
-      timeoutMs,
+      remaining(),
       signal,
     );
     if (read.kind === 'timeout') return { kind: 'unknown', code: 'lookup_timeout' };

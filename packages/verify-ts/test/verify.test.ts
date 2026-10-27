@@ -1146,7 +1146,7 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
     ethCallResult: string,
     check: (rpcUrl: string, ethCalls: () => number, rpcCalls: () => number) => Promise<void>,
     chainId = '0x1e0',
-    ethCallBehavior: { status?: number; delayMs?: number; revert?: boolean } = {},
+    ethCallBehavior: { status?: number; delayMs?: number; chainDelayMs?: number; revert?: boolean } = {},
   ) {
     let ethCalls = 0;
     let rpcCalls = 0;
@@ -1182,8 +1182,11 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
             }),
           );
         };
-        if (parsed.method === 'eth_call' && ethCallBehavior.delayMs !== undefined) {
-          setTimeout(reply, ethCallBehavior.delayMs);
+        const delay = parsed.method === 'eth_call'
+          ? ethCallBehavior.delayMs
+          : ethCallBehavior.chainDelayMs;
+        if (delay !== undefined) {
+          setTimeout(reply, delay);
         } else {
           reply();
         }
@@ -1446,6 +1449,25 @@ describe('verifySignedMessage (SPEC 3.6 amendment, D5)', () => {
       },
       '0x1e0',
       { delayMs: 300 },
+    );
+  });
+
+  it('ERC-1271: chain identity and contract call share one deadline', async () => {
+    await with1271Rpc(
+      `0x1626ba7e${'00'.repeat(28)}`,
+      async (rpcUrl, ethCalls) => {
+        const result = await noLookupVerifier({ rpcUrl, timeoutMs: 500 }).verifySignedMessage({
+          message: SM.message,
+          signature: `0x${'11'.repeat(65)}`,
+          signatureType: 'erc1271',
+          expectedAddress: CONTRACT,
+        });
+        expect(ethCalls()).toBe(1);
+        expect(result.verified).toBe(false);
+        expect(result.failures).toEqual(['lookup_timeout']);
+      },
+      '0x1e0',
+      { chainDelayMs: 300, delayMs: 300 },
     );
   });
 
