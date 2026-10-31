@@ -1,5 +1,19 @@
 # Changes
 
+## 2026-10-31: DESIGN record synced to settled state
+
+- `docs/DESIGN.md` section 11 item 1 is marked DECIDED
+  (Oct 27, 2026: no further public linkage in v1), and its
+  closing text no longer lists it as open.
+- Section 13: D5 marked RESOLVED (agreed Oct 26, 2026;
+  shipped in @fiador/verify from 0.2.0), D6 gains a status
+  note (the Python port is built and published as
+  fiador-verify 0.3.0; co-ownership confirmation remains
+  with the coordinator), and D8 (witness productization,
+  raised Oct 27, 2026) is recorded. The repo copy had
+  drifted behind the W1 workspace copy on these four items;
+  no other sections changed.
+
 ## 2026-10-27: bot-response witness merged and exercised live (PR #16)
 
 - `verifier-bot/` gains the one-use wallet-signature and

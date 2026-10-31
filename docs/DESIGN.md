@@ -1921,14 +1921,15 @@ spec's recommendation is used as a placeholder and flagged.
 
 | # | Decision | Options / recommendation | Needed by |
 |---|---|---|---|
-| 1 | Whether anything beyond the operator display name links the human to Nic publicly | Narrowed Oct 25, 2026: the display-name part is settled (resolved, below — Nova's payload names him as operator, §3.1.1). What remains open is any further linkage: README/demo copy stating that the human behind the hash is Nic, or cross-project use of the same hash as his identifier. Recommendation (spec): no for v1; "a unique human" is the claim being demonstrated. The hash-only settlement already caps the exposure either way | §9 step 1, §7 copy |
+| 1 | Whether anything beyond the operator display name links the human to Nic publicly | Narrowed Oct 25, 2026: the display-name part is settled (resolved, below — Nova's payload names him as operator, §3.1.1). What remains open is any further linkage: README/demo copy stating that the human behind the hash is Nic, or cross-project use of the same hash as his identifier. Recommendation (spec): no for v1; "a unique human" is the claim being demonstrated. The hash-only settlement already caps the exposure either way. DECIDED Oct 27, 2026 (Nic, in the W1 chat): no further linkage in v1. No public material identifies the human behind the hash, and the hash is not used as his identifier across projects. The operator display name stands as settled Oct 25, 2026 | §9 step 1, §7 copy |
 | 2 | Package names (npm / PyPI) | `fiador` on both (checked free Oct 25, 2026); the exact scoped/unscoped forms are settled at publish time, and availability is re-checked then, as with the repo name. Publishing itself is a separate launch act gated in §10 | First publish |
 | 3 | Registry hosting mirror | Settled in practice by the hosting posture (Nic, Oct 26, 2026): the repo file stays canonical (§3.4) and the mirror serves from the same Vercel posture as the other Fiador web surfaces (§6.4). Any static host serving the file byte-for-byte satisfies the contract if posture ever changes | First public verify surface |
 | 4 | Hosting cost beyond hobby scale | Standing cost watch (§6.4): the serving/cost picture returns to the coordinator as a decision item with real numbers when usage outgrows hobby scale; not silently absorbed. No threshold is pre-set in this design — the first real traffic data sets it | When traffic data exists |
 
-Decision 1 is the spec's one remaining open item. Decisions
-2–3 surfaced during this design and are recorded here rather
-than settled. Repo creation was an execution go, not a table
+Decision 1 was the spec's last open item; it was decided
+Oct 27, 2026 (no further linkage in v1), so the table now
+carries no open Nic decisions. Decisions 2–3 surfaced during
+this design and are recorded here rather than settled. Repo creation was an execution go, not a table
 preference; it was given and used on Oct 25, 2026 (§10).
 
 Resolved, recorded so nobody re-opens them, and deliberately
@@ -2166,8 +2167,15 @@ in writing in both documents.
   operator who never attested as having failed a check. W1
   position: adopt the W0 provisional answer and give it a
   plain-language sentence distinct from every failure sentence.
-- D5, `verifySignedMessage` export. OPEN, W0 chat to agree.
-  This revision proposes one export beyond the W0 spec's
+- D5, `verifySignedMessage` export. RESOLVED Oct 26, 2026:
+  AGREED by W0. The §3.6 amendment is recorded in the canonical
+  W0 spec (world-program main a264b4d): `verifySignedMessage`
+  joins @fiador/verify in 0.2.0 with the §4.1 signature as
+  proposed here, its own small result type (no VerifyResult
+  semantics), EOA/ERC-1271 paths caller-declared, no lookup,
+  no new failure codes. Implemented and merged (PR #28) and
+  shipped from @fiador/verify 0.2.0. Historical text of the
+  open item: this revision proposes one export beyond the W0 spec's
   closed list, because W3's seal verification needs a
   recovered-signer check over its own payload (§4.7). If the
   W0 chat prefers, the same need is met by documenting W3's use
@@ -2183,6 +2191,11 @@ in writing in both documents.
   W1 repo's package set either way (§4.5); the open part is
   only whether the W0 chat co-owns its parity standard or
   reviews it. The fixture-parity bar does not change.
+  Status Oct 31, 2026: the port was built in this repo
+  (packages/verify-py, merged from PR #29) and published as
+  fiador-verify (0.3.0) under the parity standard; the
+  co-ownership confirmation itself remains with the
+  coordinator.
 - D7, disclosure pin vs the generic enum. Raised at build time
   (Oct 26, 2026), coordinator to confirm. §3.1 of this design
   pins the Discord profile's `humanIdDisclosure` to `hash`
@@ -2207,3 +2220,23 @@ changed only by agreement between this chat and the W0 chat,
 recorded in both documents and surfaced by the coordinator.
 Consumer needs (W2–W6) enter as proposals through §4.7's rule,
 never as edits made unilaterally in a consumer's code.
+
+- D8, witness productization. Raised Oct 27, 2026 after the
+  first live witness run (PR #16, merged 1840cb7). The
+  shipped two-command ceremony (control-start, then
+  control-complete carrying a pasted nonce, wallet signature,
+  and message ID) is a test harness: acceptable for a
+  one-off operator-run proof, not a flow an adopter should
+  meet. The product shape is session-based pairing on the
+  OAuth device-flow pattern: one command opens a server-side
+  session (the nonce stays internal), the wallet signature is
+  captured on a one-time signing page linked from the start
+  reply and returned directly to the verifier, a target bot
+  carrying a small Fiador responder posts its response
+  itself (fallback for arbitrary bots: one short code in one
+  modal field), and completion is automatic, with the
+  verifier discovering the response message itself. No
+  trust-boundary change: the witness still records a bot
+  response, not application control. W1 build item; spec
+  detail to be written before the build, per the standing
+  spec-first rule.
