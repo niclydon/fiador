@@ -8,6 +8,33 @@ dedicated demo signing wallet by role and record methods and status
 without wallet or human-hash fragments. The signed public attestation retains
 the wallet address required by the protocol.
 
+## 2026-10-31 — production routes promotion (verify page, /v/ links, terms)
+
+- Production deployment `dpl_9KG6DJAm7HkntCYvAFeaw9LqkJAK` from
+  main `4fd9f9b` (after PR #51 added the terms page) replaced the
+  Oct 27 static-only production deployment. The earlier static
+  deployment remains available as a rollback target.
+- Route checks against https://fiador.org after the promotion:
+  `/` 200, `/verify/` 200 (previously 404), `/terms/` 200 (new),
+  `/privacy/` 200, `/support/` 200, `/registry.json` 200,
+  `/attestations/nova.json` 200 and byte-identical to the signed
+  repository file (sha256 ad1c0e5e...).
+- `/v/rp7lt6iyfx` with a browser user agent returns 302 to
+  `/verify/?attestation=...` and the page begins the check, as
+  designed. With a crawler user agent it returns 200 with the
+  Open Graph page titled "Claim unconfirmed", and
+  `/v/rp7lt6iyfx/card.svg` returns 200. An invented ID returns
+  the neutral "Attestation not found" page, not an error or a
+  status. This discharges the live-surface halves of DESIGN
+  section 9 steps 2 and 5a and the invented-application case of
+  step 5.
+- Visual QA on the production deployment (real browser, light
+  and dark): landing, /verify/, /terms/, /privacy/, and
+  /support/ all pass with no layout defects; the one nit found,
+  the /verify/ footer missing the Privacy/Support/Terms links
+  the other pages carry, is fixed in the same change as this
+  entry.
+
 ## 2026-10-27 — live bot-response witness (verifier bot, PR #16)
 
 Environment: the verifier bot was built from PR #16 head `950f2af`
