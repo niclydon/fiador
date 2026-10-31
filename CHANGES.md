@@ -14,6 +14,15 @@
   drifted behind the W1 workspace copy on these four items;
   no other sections changed.
 
+## 2026-10-31: production routes promoted; DESIGN record synced (PR #50)
+
+- fiador.org production now serves the full site from main:
+  the /verify/ checker, /v/ status links and cards, and the
+  new /terms/ page (PR #51) are live alongside the landing,
+  privacy, and support pages. The Oct 27 static deployment
+  remains as a rollback target. Evidence in
+  docs/verification.md.
+
 ## 2026-10-27: bot-response witness merged and exercised live (PR #16)
 
 - `verifier-bot/` gains the one-use wallet-signature and
