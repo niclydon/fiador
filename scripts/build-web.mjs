@@ -4,7 +4,7 @@ const output = new URL('../public/', import.meta.url);
 
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
-for (const path of ['index.html', 'theme.js', 'style.css', 'privacy', 'support', 'verify', 'assets', 'attestations']) {
+for (const path of ['index.html', 'theme.js', 'style.css', 'privacy', 'support', 'terms', 'verify', 'assets', 'attestations']) {
   await cp(new URL(`../verify-page/${path}`, import.meta.url), new URL(`../public/${path}`, import.meta.url), {
     recursive: true,
     force: true,
