@@ -21,7 +21,7 @@ test('the web build publishes the exact static source files at their requested p
   assert.deepEqual(await read('public/registry.json'), await read('registry/registry.json'));
 });
 
-test('each public preview path routes to the one root function', async () => {
+test('vercel.json routes are exactly the pinned set', async () => {
   const config = JSON.parse((await read('vercel.json')).toString('utf8'));
   assert.equal(config.framework, null);
   assert.equal(config.outputDirectory, 'public');
@@ -38,6 +38,10 @@ test('each public preview path routes to the one root function', async () => {
     },
   ]);
   assert.deepEqual(config.rewrites, [
+    {
+      source: '/app-authority/callback/:proofId',
+      destination: '/app-authority-callback.html',
+    },
     {
       source: '/v/:id/card.svg',
       destination: '/api/preview?fiador_id=:id&fiador_card=1',

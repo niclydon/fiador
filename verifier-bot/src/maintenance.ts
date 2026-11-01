@@ -44,6 +44,25 @@ export function startControlChallengePruning(store: Store): NodeJS.Timeout {
   return timer;
 }
 
+/** Remove expired authority sessions after 24 hours; records are kept. */
+export function pruneExpiredAuthoritySessions(store: Store, nowMs = Date.now()): number {
+  return store.pruneAuthoritySessions(new Date(nowMs - CONTROL_CHALLENGE_RETENTION_MS).toISOString());
+}
+
+/** Prune authority sessions at startup and daily, like the witness rows. */
+export function startAuthoritySessionPruning(store: Store): NodeJS.Timeout {
+  pruneExpiredAuthoritySessions(store);
+  const timer = setInterval(() => {
+    try {
+      pruneExpiredAuthoritySessions(store);
+    } catch (error) {
+      console.error(`fiador: authority session pruning failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, PRUNE_INTERVAL_MS);
+  timer.unref();
+  return timer;
+}
+
 interface SyncState {
   lastRunMs: number | null;
   intervalMs: number;

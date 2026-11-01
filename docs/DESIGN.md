@@ -1072,14 +1072,30 @@ summaries an admin explicitly asks to post.
   rechecked separately. None of these paths creates a trusted
   binding or grants a role. No unsolicited DM goes to a bot owner.
 
-Draft PR #16 adds `/fiador control-start` and
-`/fiador control-complete` for admins with Manage Guild. It records
-one fresh wallet signature and one exact response from the named
-bot after matching the guild integration. A bot that echoes user
-input can produce the response, so the witness is deliberately
-insufficient for operator authority. It creates no trusted binding
-and makes no role change; it is draft code until merged and live
-tested, not a command available from `main`.
+PR #16 (merged, exercised live Oct 27, 2026) adds `/fiador
+control-start` and `/fiador control-complete` for admins with
+Manage Guild. It records one fresh wallet signature and one exact
+response from the named bot after matching the guild integration.
+A bot that echoes user input can produce the response, so the
+witness is deliberately insufficient for operator authority. It
+creates no trusted binding and makes no role change.
+
+The application-authority ceremony (`docs/app-authority.md`,
+built Nov 1, 2026) adds `/fiador authority-start`,
+`/fiador authority-sign`, and `/fiador authority-complete` for
+admins with Manage Guild, on verifier instances configured with a
+callback origin. A one-use session binds the attestation wallet
+to a per-session OAuth callback URI that only the application's
+owner or team can register (redirect URIs are not writable with a
+bot token, verified live Oct 31, 2026); the wallet signs the
+session statement; the verifier exchanges the returned OAuth code
+itself (PKCE S256, `identify` scope, no client secret) and
+requires `GET /oauth2/@me` to name the challenged application. A
+completed ceremony stores an authority record keyed to the
+attestation's payload hash — team-grade application authority,
+not sole ownership. The record creates no binding and changes no
+role; role automation remains disabled pending a separate policy
+decision.
 
 ### 5.3 Presentation
 
@@ -2240,3 +2256,13 @@ never as edits made unilaterally in a consumer's code.
   response, not application control. W1 build item; spec
   detail to be written before the build, per the standing
   spec-first rule.
+
+  Progress (Nov 1, 2026): the session machinery D8 anticipated
+  shipped first as the application-authority ceremony
+  (`docs/app-authority.md`): server-side one-use sessions in the
+  bot's own store, the nonce-class secrets never user-carried
+  (the operator pastes back only the OAuth callback URL, the
+  one short artifact the flow cannot hide), and automatic
+  completion on presentation. The witness itself still uses the
+  two-command harness; folding it into the same session shape
+  remains open, as does the one-time signing page.

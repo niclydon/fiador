@@ -18,6 +18,10 @@
   ],
   "rewrites": [
     {
+      "source": "/app-authority/callback/:proofId",
+      "destination": "/app-authority-callback.html"
+    },
+    {
       "source": "/v/:id/card.svg",
       "destination": "/api/preview?fiador_id=:id&fiador_card=1"
     },
