@@ -53,6 +53,46 @@ export interface ControlChallenge {
   messageId: string | null;
 }
 
+/**
+ * One application-authority ceremony session (docs/app-authority.md).
+ * The OAuth state and PKCE verifier live only in this row and are
+ * scrubbed when the session is consumed; they are never logged.
+ */
+export interface AuthoritySession {
+  proofId: string;
+  guildId: string;
+  channelId: string;
+  applicationId: string;
+  wallet: `0x${string}`;
+  payloadHash: string;
+  attestationUrl: string;
+  callbackUri: string;
+  nonce: string;
+  oauthState: string;
+  pkceVerifier: string;
+  issuedAt: string;
+  expiresAt: string;
+  signedAt: string | null;
+  consumedAt: string | null;
+}
+
+/**
+ * A completed authority ceremony: application authority (team-grade)
+ * proven for one exact attestation payload hash. Re-issuing the
+ * attestation changes the hash and makes the record stale.
+ */
+export interface AuthorityRecord {
+  guildId: string;
+  applicationId: string;
+  wallet: `0x${string}`;
+  /** The Discord user who authorized the application in the ceremony. */
+  discordUserId: string;
+  payloadHash: string;
+  attestationUrl: string;
+  provenAt: string;
+  proofId: string;
+}
+
 export interface CheckLogEntry {
   id?: number;
   guildId: string;
@@ -79,6 +119,19 @@ export interface Store {
   consumeControlChallenge(nonce: string, consumedAt: string, messageId: string): boolean;
   /** Remove expired witness rows after their short operational retention window. */
   pruneControlChallenges(expiredBeforeIso: string): number;
+  saveAuthoritySession(session: AuthoritySession): void;
+  getAuthoritySession(proofId: string): AuthoritySession | null;
+  /** Atomically mark one still-live, unsigned session signed. False on replay/expiry. */
+  markAuthoritySessionSigned(proofId: string, signedAt: string): boolean;
+  /**
+   * Atomically consume one signed, still-live session and scrub its OAuth
+   * state and PKCE verifier. False on replay/expiry. Exactly one caller wins.
+   */
+  consumeAuthoritySession(proofId: string, consumedAt: string): boolean;
+  /** Remove expired authority sessions after their retention window. */
+  pruneAuthoritySessions(expiredBeforeIso: string): number;
+  saveAuthorityRecord(record: AuthorityRecord): void;
+  getAuthorityRecord(guildId: string, applicationId: string): AuthorityRecord | null;
   appendCheckLog(entry: CheckLogEntry): void;
   getLatestCheck(guildId: string, applicationId: string): CheckLogEntry | null;
   listCheckLog(guildId: string, applicationId?: string): CheckLogEntry[];
@@ -134,6 +187,34 @@ CREATE TABLE IF NOT EXISTS control_challenge (
   consumed_at TEXT,
   message_id TEXT
 );
+CREATE TABLE IF NOT EXISTS authority_session (
+  proof_id TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  wallet TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  attestation_url TEXT NOT NULL,
+  callback_uri TEXT NOT NULL,
+  nonce TEXT NOT NULL,
+  oauth_state TEXT NOT NULL,
+  pkce_verifier TEXT NOT NULL,
+  issued_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  signed_at TEXT,
+  consumed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS authority_record (
+  guild_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  wallet TEXT NOT NULL,
+  discord_user_id TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  attestation_url TEXT NOT NULL,
+  proven_at TEXT NOT NULL,
+  proof_id TEXT NOT NULL,
+  PRIMARY KEY (guild_id, application_id)
+);
 `;
 
 interface GuildConfigDbRow {
@@ -186,6 +267,68 @@ function toControlChallenge(row: ControlChallengeDbRow): ControlChallenge {
     expiresAt: row.expires_at,
     consumedAt: row.consumed_at,
     messageId: row.message_id,
+  };
+}
+
+interface AuthoritySessionDbRow {
+  proof_id: string;
+  guild_id: string;
+  channel_id: string;
+  application_id: string;
+  wallet: `0x${string}`;
+  payload_hash: string;
+  attestation_url: string;
+  callback_uri: string;
+  nonce: string;
+  oauth_state: string;
+  pkce_verifier: string;
+  issued_at: string;
+  expires_at: string;
+  signed_at: string | null;
+  consumed_at: string | null;
+}
+
+function toAuthoritySession(row: AuthoritySessionDbRow): AuthoritySession {
+  return {
+    proofId: row.proof_id,
+    guildId: row.guild_id,
+    channelId: row.channel_id,
+    applicationId: row.application_id,
+    wallet: row.wallet,
+    payloadHash: row.payload_hash,
+    attestationUrl: row.attestation_url,
+    callbackUri: row.callback_uri,
+    nonce: row.nonce,
+    oauthState: row.oauth_state,
+    pkceVerifier: row.pkce_verifier,
+    issuedAt: row.issued_at,
+    expiresAt: row.expires_at,
+    signedAt: row.signed_at,
+    consumedAt: row.consumed_at,
+  };
+}
+
+interface AuthorityRecordDbRow {
+  guild_id: string;
+  application_id: string;
+  wallet: `0x${string}`;
+  discord_user_id: string;
+  payload_hash: string;
+  attestation_url: string;
+  proven_at: string;
+  proof_id: string;
+}
+
+function toAuthorityRecord(row: AuthorityRecordDbRow): AuthorityRecord {
+  return {
+    guildId: row.guild_id,
+    applicationId: row.application_id,
+    wallet: row.wallet,
+    discordUserId: row.discord_user_id,
+    payloadHash: row.payload_hash,
+    attestationUrl: row.attestation_url,
+    provenAt: row.proven_at,
+    proofId: row.proof_id,
   };
 }
 
@@ -357,6 +500,76 @@ export class SqliteStore implements Store {
       .run(expiredBeforeIso).changes);
   }
 
+  saveAuthoritySession(session: AuthoritySession): void {
+    this.db.prepare(
+      `INSERT INTO authority_session
+       (proof_id, guild_id, channel_id, application_id, wallet, payload_hash,
+        attestation_url, callback_uri, nonce, oauth_state, pkce_verifier,
+        issued_at, expires_at, signed_at, consumed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+    ).run(
+      session.proofId, session.guildId, session.channelId, session.applicationId,
+      session.wallet, session.payloadHash, session.attestationUrl, session.callbackUri,
+      session.nonce, session.oauthState, session.pkceVerifier,
+      session.issuedAt, session.expiresAt,
+    );
+  }
+
+  getAuthoritySession(proofId: string): AuthoritySession | null {
+    const row = this.db.prepare('SELECT * FROM authority_session WHERE proof_id = ?')
+      .get(proofId) as AuthoritySessionDbRow | undefined;
+    return row ? toAuthoritySession(row) : null;
+  }
+
+  markAuthoritySessionSigned(proofId: string, signedAt: string): boolean {
+    const changed = this.db.prepare(
+      `UPDATE authority_session SET signed_at = ?
+       WHERE proof_id = ? AND signed_at IS NULL AND consumed_at IS NULL
+         AND issued_at <= ? AND expires_at > ?`,
+    ).run(signedAt, proofId, signedAt, signedAt);
+    return Number(changed.changes) === 1;
+  }
+
+  consumeAuthoritySession(proofId: string, consumedAt: string): boolean {
+    const changed = this.db.prepare(
+      `UPDATE authority_session SET consumed_at = ?, oauth_state = '', pkce_verifier = ''
+       WHERE proof_id = ? AND signed_at IS NOT NULL AND consumed_at IS NULL
+         AND issued_at <= ? AND expires_at > ?`,
+    ).run(consumedAt, proofId, consumedAt, consumedAt);
+    return Number(changed.changes) === 1;
+  }
+
+  pruneAuthoritySessions(expiredBeforeIso: string): number {
+    return Number(this.db.prepare('DELETE FROM authority_session WHERE expires_at < ?')
+      .run(expiredBeforeIso).changes);
+  }
+
+  saveAuthorityRecord(record: AuthorityRecord): void {
+    this.db.prepare(
+      `INSERT INTO authority_record
+       (guild_id, application_id, wallet, discord_user_id, payload_hash,
+        attestation_url, proven_at, proof_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (guild_id, application_id) DO UPDATE SET
+         wallet = excluded.wallet,
+         discord_user_id = excluded.discord_user_id,
+         payload_hash = excluded.payload_hash,
+         attestation_url = excluded.attestation_url,
+         proven_at = excluded.proven_at,
+         proof_id = excluded.proof_id`,
+    ).run(
+      record.guildId, record.applicationId, record.wallet, record.discordUserId,
+      record.payloadHash, record.attestationUrl, record.provenAt, record.proofId,
+    );
+  }
+
+  getAuthorityRecord(guildId: string, applicationId: string): AuthorityRecord | null {
+    const row = this.db.prepare(
+      'SELECT * FROM authority_record WHERE guild_id = ? AND application_id = ?',
+    ).get(guildId, applicationId) as AuthorityRecordDbRow | undefined;
+    return row ? toAuthorityRecord(row) : null;
+  }
+
   appendCheckLog(entry: CheckLogEntry): void {
     this.db
       .prepare(
@@ -416,6 +629,8 @@ export class InMemoryStore implements Store {
   private readonly configs = new Map<string, GuildConfigRow>();
   private readonly bindings = new Map<string, Binding>();
   private readonly controlChallenges = new Map<string, ControlChallenge>();
+  private readonly authoritySessions = new Map<string, AuthoritySession>();
+  private readonly authorityRecords = new Map<string, AuthorityRecord>();
   private readonly checks: CheckLogEntry[] = [];
   private nextId = 1;
 
@@ -484,6 +699,52 @@ export class InMemoryStore implements Store {
       }
     }
     return count;
+  }
+
+  saveAuthoritySession(session: AuthoritySession): void {
+    if (this.authoritySessions.has(session.proofId)) throw new Error('Authority session already exists.');
+    this.authoritySessions.set(session.proofId, { ...session, signedAt: null, consumedAt: null });
+  }
+
+  getAuthoritySession(proofId: string): AuthoritySession | null {
+    const session = this.authoritySessions.get(proofId);
+    return session ? { ...session } : null;
+  }
+
+  markAuthoritySessionSigned(proofId: string, signedAt: string): boolean {
+    const session = this.authoritySessions.get(proofId);
+    if (!session || session.signedAt || session.consumedAt ||
+        signedAt < session.issuedAt || signedAt >= session.expiresAt) return false;
+    this.authoritySessions.set(proofId, { ...session, signedAt });
+    return true;
+  }
+
+  consumeAuthoritySession(proofId: string, consumedAt: string): boolean {
+    const session = this.authoritySessions.get(proofId);
+    if (!session || !session.signedAt || session.consumedAt ||
+        consumedAt < session.issuedAt || consumedAt >= session.expiresAt) return false;
+    this.authoritySessions.set(proofId, { ...session, consumedAt, oauthState: '', pkceVerifier: '' });
+    return true;
+  }
+
+  pruneAuthoritySessions(expiredBeforeIso: string): number {
+    let count = 0;
+    for (const [proofId, session] of this.authoritySessions) {
+      if (session.expiresAt < expiredBeforeIso) {
+        this.authoritySessions.delete(proofId);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  saveAuthorityRecord(record: AuthorityRecord): void {
+    this.authorityRecords.set(InMemoryStore.bindingKey(record.guildId, record.applicationId), { ...record });
+  }
+
+  getAuthorityRecord(guildId: string, applicationId: string): AuthorityRecord | null {
+    const record = this.authorityRecords.get(InMemoryStore.bindingKey(guildId, applicationId));
+    return record ? { ...record } : null;
   }
 
   appendCheckLog(entry: CheckLogEntry): void {

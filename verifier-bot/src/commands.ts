@@ -9,6 +9,8 @@
 //   /fiador status    paged legacy claims, last checks, manual role audit
 //   /fiador setup     (Manage Guild) configure role / registry / interval / log channel
 //   /fiador control-start, control-complete  limited bot-response witness
+//   /fiador authority-start, authority-sign, authority-complete
+//                     application-authority ceremony (docs/app-authority.md)
 //   /verify-agent     one-off check of one application, no state change
 //   /attest           operator claim check; app control remains unproven
 
@@ -19,6 +21,7 @@ import {
 import type { SignedAttestation } from '@fiador/verify';
 import type { DiscordAdapter } from './discordAdapter.js';
 import { canonicalBotResponseText, canonicalChallengeText, type AppControlService } from './appControl.js';
+import type { AppAuthorityService } from './appAuthority.js';
 import { buildResultEmbed, failureSentence, type EmbedObject } from './embeds.js';
 import { RoleSyncEngine } from './roles.js';
 import type { Store } from './store.js';
@@ -57,6 +60,7 @@ export interface CommandDeps {
   rateLimiter: AttemptRateLimiter;
   defaultSyncIntervalMinutes: number;
   appControl?: AppControlService;
+  appAuthority?: AppAuthorityService;
 }
 
 /** Shared /attest and /verify-agent limit: 5 checks / user / guild / 10 min. */
@@ -125,7 +129,22 @@ export function buildCommandDefinitions(): RESTPostAPIChatInputApplicationComman
       .setDescription('Check a signed challenge and one exact bot message (Manage Guild)')
       .addStringOption((opt) => opt.setName('nonce').setDescription('Nonce from control-start').setRequired(true))
       .addStringOption((opt) => opt.setName('signature').setDescription('Wallet signature over exact challenge text').setRequired(true))
-      .addStringOption((opt) => opt.setName('message_id').setDescription('Target bot message ID').setRequired(true)));
+      .addStringOption((opt) => opt.setName('message_id').setDescription('Target bot message ID').setRequired(true)))
+    .addSubcommand((sub) => sub
+      .setName('authority-start')
+      .setDescription('Start an application-authority ceremony (Manage Guild)')
+      .addStringOption((opt) => opt.setName('url')
+        .setDescription('HTTPS URL of the signed Discord attestation').setRequired(true)))
+    .addSubcommand((sub) => sub
+      .setName('authority-sign')
+      .setDescription('Present the wallet signature for an authority ceremony (Manage Guild)')
+      .addStringOption((opt) => opt.setName('proof_id').setDescription('Ceremony ID from authority-start').setRequired(true))
+      .addStringOption((opt) => opt.setName('signature').setDescription('Wallet signature over the exact ceremony statement').setRequired(true)))
+    .addSubcommand((sub) => sub
+      .setName('authority-complete')
+      .setDescription('Complete an authority ceremony with the full callback URL (Manage Guild)')
+      .addStringOption((opt) => opt.setName('proof_id').setDescription('Ceremony ID from authority-start').setRequired(true))
+      .addStringOption((opt) => opt.setName('callback_url').setDescription('The full callback URL from the browser address bar').setRequired(true)));
 
   const verifyAgent = new SlashCommandBuilder()
     .setName('verify-agent')
@@ -194,10 +213,14 @@ export async function handleFiadorStatus(
     for (const binding of bindings.slice(first, first + STATUS_PAGE_SIZE)) {
       const last = deps.store.getLatestCheck(ctx.guildId, binding.applicationId);
       const applicationId = statusField(binding.applicationId, 32);
+      const authority = deps.appAuthority?.currentRecord(ctx.guildId, binding.applicationId, binding.payloadHash);
+      const controlState = authority
+        ? `application authority proven ${statusField(authority.provenAt, 32)} for the current attestation; no role automation`
+        : 'application control unproven; no role automation';
       lines.push(
         last
-          ? `• Application ${applicationId} — application control unproven; no role automation; last attestation check: **${statusField(last.status, 24)}** at ${statusField(last.checkedAt, 32)}`
-          : `• Application ${applicationId} — application control unproven; no role automation; not checked yet`,
+          ? `• Application ${applicationId} — ${controlState}; last attestation check: **${statusField(last.status, 24)}** at ${statusField(last.checkedAt, 32)}`
+          : `• Application ${applicationId} — ${controlState}; not checked yet`,
       );
     }
   }
@@ -237,7 +260,7 @@ export async function handleFiadorSetup(
       `• Registry URL: ${config.registryUrl ?? '(instance default)'}`,
       `• Sync interval: ${config.syncIntervalMinutes} minutes`,
       `• Log channel ID: ${config.logChannelId ?? '(none)'}`,
-      'Bot-response witnessing is available through /fiador control-start. It is not app-control proof. Role automation is disabled.',
+      'Bot-response witnessing is available through /fiador control-start. It is not app-control proof. Application authority is proven through /fiador authority-start when this verifier has a callback origin configured. Role automation is disabled.',
     ].join('\n'),
   );
 }
@@ -288,6 +311,85 @@ export async function handleFiadorControlComplete(
       : 'No witness recorded. The challenge may be invalid, expired, used, or the wallet and Discord evidence may not match.');
   } catch {
     return ephemeral('No witness recorded because an external check was unavailable. Retry while the challenge is still live.');
+  }
+}
+
+export async function handleFiadorAuthorityStart(
+  ctx: CommandContext,
+  deps: CommandDeps,
+): Promise<ReplyPayload> {
+  if (!ctx.hasManageGuild) return ephemeral('`/fiador authority-start` requires Manage Guild.');
+  if (!deps.appAuthority) return ephemeral('Application-authority ceremonies are unavailable on this verifier (no callback origin is configured).');
+  if (!deps.rateLimiter.tryAcquire(`authority:${ctx.guildId}:${ctx.userId}`)) {
+    return ephemeral('Too many ceremony attempts — try again in a few minutes.');
+  }
+  const url = ctx.getOption('url');
+  if (!url) return ephemeral('Provide the signed attestation `url`.');
+  try {
+    const start = await deps.appAuthority.start(ctx.guildId, ctx.channelId, url);
+    return ephemeral([
+      `Authority ceremony started. Ceremony ID: \`${start.proofId}\`. Expires ${start.expiresAt}.`,
+      'Step 1 — in the Developer Portal for the attested application, open OAuth2 settings and add this exact Redirect URI:',
+      '```text',
+      start.callbackUri,
+      '```',
+      'Step 2 — sign the private statement below with the attestation wallet. Do not post it anywhere.',
+      'Step 3 — run `/fiador authority-sign` with the ceremony ID and that signature.',
+      'Private ceremony statement:',
+      '```text',
+      start.message,
+      '```',
+      'This ceremony proves application authority (team-grade) for the current attestation. It creates no binding and grants no role.',
+    ].join('\n'));
+  } catch (error) {
+    return ephemeral(`No ceremony was started: ${error instanceof Error ? error.message : 'verification unavailable'}`);
+  }
+}
+
+export async function handleFiadorAuthoritySign(
+  ctx: CommandContext,
+  deps: CommandDeps,
+): Promise<ReplyPayload> {
+  if (!ctx.hasManageGuild) return ephemeral('`/fiador authority-sign` requires Manage Guild.');
+  if (!deps.appAuthority) return ephemeral('Application-authority ceremonies are unavailable on this verifier (no callback origin is configured).');
+  if (!deps.rateLimiter.tryAcquire(`authority:${ctx.guildId}:${ctx.userId}`)) {
+    return ephemeral('Too many ceremony attempts — try again in a few minutes.');
+  }
+  try {
+    const sign = await deps.appAuthority.sign(
+      ctx.guildId, ctx.getOption('proof_id') ?? '', ctx.getOption('signature') ?? '',
+    );
+    return ephemeral([
+      'Wallet signature accepted. Step 4 — open this authorization URL while signed in to Discord as the application owner or a team member, and approve the request:',
+      '```text',
+      sign.authorizationUrl,
+      '```',
+      'Discord will send the browser to the callback URI you registered. Step 5 — copy the FULL address from the browser address bar, exactly as shown, and run `/fiador authority-complete` with the ceremony ID and that URL.',
+      'The code in that address is single-use and expires with the ceremony.',
+    ].join('\n'));
+  } catch (error) {
+    return ephemeral(`The signature was not accepted: ${error instanceof Error ? error.message : 'signature check unavailable'}`);
+  }
+}
+
+export async function handleFiadorAuthorityComplete(
+  ctx: CommandContext,
+  deps: CommandDeps,
+): Promise<ReplyPayload> {
+  if (!ctx.hasManageGuild) return ephemeral('`/fiador authority-complete` requires Manage Guild.');
+  if (!deps.appAuthority) return ephemeral('Application-authority ceremonies are unavailable on this verifier (no callback origin is configured).');
+  if (!deps.rateLimiter.tryAcquire(`authority:${ctx.guildId}:${ctx.userId}`)) {
+    return ephemeral('Too many ceremony attempts — try again in a few minutes.');
+  }
+  try {
+    const record = await deps.appAuthority.complete(
+      ctx.guildId, ctx.getOption('proof_id') ?? '', ctx.getOption('callback_url') ?? '',
+    );
+    return ephemeral(record
+      ? `Application authority recorded for application ${record.applicationId}: the attestation wallet and Discord user ${record.discordUserId} completed one fresh ceremony at ${record.provenAt}. This proves application authority (team-grade) for the current attestation only. No binding was created and no role was changed; role automation remains disabled.`
+      : 'No authority was recorded. The ceremony may be invalid, expired, already used, or the Discord evidence may not match. A failed completion consumes the ceremony; start a new one with `/fiador authority-start`.');
+  } catch {
+    return ephemeral('No authority was recorded because an external check was unavailable.');
   }
 }
 

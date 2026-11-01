@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'">
+  <meta name="description" content="Final step of a Fiador application-authority ceremony: copy this page's full address back to the verifier bot.">
+  <title>Application authority — Fiador</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/theme.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="wordmark" href="/">Fiador</a>
+    <button id="theme-toggle" class="theme-toggle" type="button">Use dark mode</button>
+  </header>
+  <main id="content">
+    <div class="hero-art" aria-hidden="true"><img src="/assets/fiador-banner.webp" alt=""></div>
+    <div class="hero-copy">
+      <p class="eyebrow">Fiador / Application authority</p>
+      <h1>One step left</h1>
+      <p>Discord sent your browser to this page to finish an application-authority ceremony. Nothing on this page sends anything anywhere — the last step happens back in Discord, with the address of this page.</p>
+    </div>
+
+    <section class="check-card" aria-labelledby="finish-title">
+      <h2 id="finish-title">Finish in Discord</h2>
+      <p>1. Look at your browser's address bar. It holds a long address for this page, ending with parameters that include <code>code=</code> and <code>state=</code>.</p>
+      <p>2. Copy the entire address, exactly as shown, from the beginning to the end.</p>
+      <p>3. Return to Discord and run the <code>/fiador authority-complete</code> command: give it the ceremony ID from <code>authority-start</code> and paste the copied address as the <code>callback_url</code>.</p>
+      <p>The code in the address is single-use, proves nothing on its own, and expires ten minutes after the ceremony started. If the command reports that no authority was recorded, start a fresh ceremony with <code>/fiador authority-start</code>.</p>
+    </section>
+
+    <section class="check-card" aria-labelledby="meaning-title">
+      <h2 id="meaning-title">What this proves</h2>
+      <p>A completed ceremony records that the attestation wallet's holder and a Discord account with authority over the application took part in one fresh ceremony — application authority, team-grade. It does not prove sole legal ownership of the application, who wrote any message, or who the human behind the wallet is. See <a href="/terms/">the terms</a> for what a Fiador result means.</p>
+    </section>
+  </main>
+  <footer><p>Created by Nic Lydon · Independent open source · Updated 1 November 2026 · <a href="/privacy/">Privacy</a> · <a href="/support/">Support</a> · <a href="/terms/">Terms</a></p></footer>
+</body>
+</html>

@@ -1,5 +1,32 @@
 # Changes
 
+## 2026-11-01: application-authority ceremony built
+
+- `verifier-bot/` gains the application-authority ceremony
+  (`/fiador authority-start`, `/fiador authority-sign`,
+  `/fiador authority-complete`): a one-use, ten-minute session
+  binds the attestation wallet to a per-session OAuth callback
+  URI that only the target application's owner or team can
+  register (redirect URIs are not writable with a bot token —
+  verified live against the Fiador application on Oct 31, 2026).
+  The verifier exchanges the returned code itself (PKCE S256,
+  `identify` scope, no client secret anywhere) and records
+  team-grade application authority keyed to the attestation's
+  payload hash when `GET /oauth2/@me` names the challenged
+  application. Protocol: `docs/app-authority.md`.
+- The ceremony is opt-in per instance via
+  `AUTHORITY_CALLBACK_ORIGIN`; a static callback helper page
+  (`verify-page/app-authority-callback.html`, rewritten from
+  `/app-authority/callback/<proof ID>`) ships with the web
+  build. Production promotion of the page is a separate,
+  operator-approved deploy.
+- A completed ceremony changes nothing by itself: no binding
+  is created, the badge still renders "Claim unconfirmed",
+  and role automation remains disabled. `/fiador status`
+  reports a current authority record where one exists. The
+  first live ceremony needs the application admin at the
+  Developer Portal and is a short joint session by design.
+
 ## 2026-10-31: DESIGN record synced to settled state
 
 - `docs/DESIGN.md` section 11 item 1 is marked DECIDED

@@ -1,3 +1,5 @@
+import { requireCallbackOrigin } from './appAuthority.js';
+
 // Environment configuration for the verifier bot.
 //
 // The bot token lives ONLY in the environment (DESIGN §5.4): it is never
@@ -18,6 +20,11 @@ export interface BotConfig {
   dbPath: string;
   /** Default interval for re-checking legacy bindings, in minutes. */
   syncIntervalMinutes: number;
+  /**
+   * Exact HTTPS origin serving the application-authority callback page
+   * (docs/app-authority.md). Null disables the authority ceremony.
+   */
+  authorityCallbackOrigin: string | null;
 }
 
 export const DEFAULT_SYNC_INTERVAL_MINUTES = 360;
@@ -54,6 +61,19 @@ export function loadConfig(env: EnvLike = process.env): BotConfig {
     syncIntervalMinutes = parsed;
   }
 
+  const authorityOriginRaw = optional(env, 'AUTHORITY_CALLBACK_ORIGIN');
+  let authorityCallbackOrigin: string | null = null;
+  if (authorityOriginRaw !== null) {
+    try {
+      authorityCallbackOrigin = requireCallbackOrigin(authorityOriginRaw);
+    } catch {
+      throw new Error(
+        `Environment variable AUTHORITY_CALLBACK_ORIGIN must be one exact HTTPS origin ` +
+          `(for example "https://fiador.org"); got "${authorityOriginRaw}".`,
+      );
+    }
+  }
+
   return {
     token: required(env, 'DISCORD_TOKEN'),
     clientId: required(env, 'DISCORD_CLIENT_ID'),
@@ -61,5 +81,6 @@ export function loadConfig(env: EnvLike = process.env): BotConfig {
     rpcUrl: optional(env, 'RPC_URL'),
     dbPath: optional(env, 'DB_PATH') ?? DEFAULT_DB_PATH,
     syncIntervalMinutes,
+    authorityCallbackOrigin,
   };
 }

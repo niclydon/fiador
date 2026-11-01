@@ -28,6 +28,9 @@ import {
   handleFiadorStatus,
   handleFiadorControlStart,
   handleFiadorControlComplete,
+  handleFiadorAuthorityStart,
+  handleFiadorAuthoritySign,
+  handleFiadorAuthorityComplete,
   handleVerifyAgent,
   AttemptRateLimiter,
   type CommandContext,
@@ -35,9 +38,10 @@ import {
   type ReplyPayload,
 } from './commands.js';
 import { AppControlService, createWalletSignatureVerifier } from './appControl.js';
+import { AppAuthorityService, createDiscordOAuthTransport } from './appAuthority.js';
 import { loadConfig } from './config.js';
 import type { DiscordAdapter } from './discordAdapter.js';
-import { scheduleGuildSync, startCheckLogPruning, startControlChallengePruning } from './maintenance.js';
+import { scheduleGuildSync, startAuthoritySessionPruning, startCheckLogPruning, startControlChallengePruning } from './maintenance.js';
 import { RoleSyncEngine, warnLegacyRoleAudit } from './roles.js';
 import { SqliteStore, type Store } from './store.js';
 import { VerifyService, type VerifierLike } from './verifyService.js';
@@ -102,6 +106,14 @@ async function dispatch(interaction: ChatInputCommandInteraction, deps: CommandD
       reply = sub === 'control-start'
         ? await handleFiadorControlStart(toContext(interaction), deps)
         : await handleFiadorControlComplete(toContext(interaction), deps);
+    } else if (sub === 'authority-start' || sub === 'authority-sign' || sub === 'authority-complete') {
+      await interaction.deferReply({ ephemeral: true });
+      const ctx = toContext(interaction);
+      reply = sub === 'authority-start'
+        ? await handleFiadorAuthorityStart(ctx, deps)
+        : sub === 'authority-sign'
+          ? await handleFiadorAuthoritySign(ctx, deps)
+          : await handleFiadorAuthorityComplete(ctx, deps);
     } else {
       reply = sub === 'setup'
         ? await handleFiadorSetup(toContext(interaction), deps)
@@ -127,6 +139,7 @@ export async function main(env: Record<string, string | undefined> = process.env
   const store = new SqliteStore(config.dbPath);
   startCheckLogPruning(store);
   startControlChallengePruning(store);
+  startAuthoritySessionPruning(store);
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
   });
@@ -143,6 +156,14 @@ export async function main(env: Record<string, string | undefined> = process.env
     service, store, adapter,
     verifyWalletSignature: createWalletSignatureVerifier(config.rpcUrl),
   });
+  const appAuthority = config.authorityCallbackOrigin
+    ? new AppAuthorityService({
+        service, store, adapter,
+        verifyWalletSignature: createWalletSignatureVerifier(config.rpcUrl),
+        callbackOrigin: config.authorityCallbackOrigin,
+        fetchDiscord: createDiscordOAuthTransport(),
+      })
+    : undefined;
   const engine = new RoleSyncEngine({ store, service, adapter });
   const deps: CommandDeps = {
     service,
@@ -152,6 +173,7 @@ export async function main(env: Record<string, string | undefined> = process.env
     rateLimiter: new AttemptRateLimiter(),
     defaultSyncIntervalMinutes: config.syncIntervalMinutes,
     appControl,
+    appAuthority,
   };
 
   const rest = new REST().setToken(config.token);

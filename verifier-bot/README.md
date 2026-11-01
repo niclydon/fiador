@@ -65,6 +65,9 @@ All responses are ephemeral.
 | `/fiador setup` | Manage Guild | Set the Human-backed role ID, registry URL, sync interval, log channel |
 | `/fiador control-start <url>` | Manage Guild | Start a ten-minute wallet and bot-response witness in this channel |
 | `/fiador control-complete <nonce> <signature> <message_id>` | Manage Guild | Record a limited witness; no binding or role change |
+| `/fiador authority-start <url>` | Manage Guild | Start a ten-minute application-authority ceremony for a verified attestation |
+| `/fiador authority-sign <proof_id> <signature>` | Manage Guild | Present the wallet signature; receive the Discord authorization URL |
+| `/fiador authority-complete <proof_id> <callback_url>` | Manage Guild | Exchange the OAuth code and record application authority for the current attestation |
 | `/verify-agent <application_id>` | anyone | One-off check of one application; logs the check but changes no binding or role |
 | `/attest <url \| attestation>` | anyone | Check a presented operator attestation and log the result; never bind or change a role |
 
@@ -120,6 +123,50 @@ URL and payload hash, nonce, timestamps, and successful message ID. It
 does not retain the wallet signature, bot token, message body, or raw human
 ID. Expired rows more than 24 hours old are pruned at startup and daily.
 
+## Application-authority ceremony
+
+The witness above records a bot response; it cannot prove the signer
+holds authority over the application. The ceremony in
+[`docs/app-authority.md`](../docs/app-authority.md) proves that half. It
+activates when the verifier is configured with `AUTHORITY_CALLBACK_ORIGIN`
+(see Configuration); without it the three commands report themselves
+unavailable.
+
+1. A member with Manage Guild runs `/fiador authority-start url:<URL>`.
+   The verifier applies the same gates as the witness (verified
+   attestation, current published claim, exactly one enabled guild
+   integration), then replies with a one-use callback URI and the exact
+   statement to sign.
+2. In the target application's Developer Portal, an owner or team member
+   adds that exact URI under OAuth2 → Redirects, and the attestation
+   wallet signs the statement. Registering the URI is the
+   authority-bearing act: redirect URIs are not writable with a bot
+   token, so a leaked token cannot substitute for portal access.
+3. `/fiador authority-sign` checks the signature and replies with a
+   Discord authorization URL (PKCE S256, `identify` scope only). The
+   application's owner or a team member opens it and authorizes; Discord
+   redirects the browser to the callback URI carrying a single-use code.
+4. `/fiador authority-complete` takes the full callback URL pasted from
+   the browser's address bar. The verifier checks the issuer, the OAuth
+   state, and the attestation's currency, consumes the session
+   atomically, exchanges the code itself (no client secret is used
+   anywhere in the flow), and reads `GET /oauth2/@me` once: the token's
+   application must be the challenged application. The access token is
+   never stored, logged, or returned.
+
+On success the verifier stores an **authority record** — guild,
+application, wallet, the authorizing Discord user, and the attestation
+payload hash it was proven against. `/fiador status` shows the proof
+while the attestation is unchanged; re-issuing the attestation requires
+a fresh ceremony. The honest claim is application authority
+(team-grade): the wallet holder and an account with authority over the
+application took part in one fresh ceremony. It is not sole legal
+ownership.
+
+**A record changes nothing by itself.** It creates no binding, renders
+no new badge state, and grants no role. Role automation stays disabled;
+keying any of those off authority records is a separate policy change.
+
 ## Configuration
 
 Environment only; the token is never written to disk or the database.
@@ -132,6 +179,7 @@ Environment only; the token is never written to disk or the database.
 | `RPC_URL` | no | World Chain RPC URL (package default otherwise) |
 | `DB_PATH` | no | SQLite state file (default `./data/fiador-verifier.db`) |
 | `SYNC_INTERVAL_MINUTES` | no | Default sync interval (default 360 = 6h) |
+| `AUTHORITY_CALLBACK_ORIGIN` | no | Exact HTTPS origin serving the authority callback page (e.g. `https://fiador.org`); enables the authority ceremony |
 
 Per guild, an admin may record the `Human-backed` role ID with
 `/fiador setup` for status display. Role automation is disabled; the
@@ -150,7 +198,8 @@ DISCORD_TOKEN=… DISCORD_CLIENT_ID=… npm start --workspace=@fiador/verifier-b
 ```
 
 State lives in one SQLite file (Node's built-in `node:sqlite`): guild
-config, legacy bindings, short-lived witness rows, and a `check_log`
+config, legacy bindings, short-lived witness rows, short-lived authority
+sessions and their records, and a `check_log`
 (status stored verbatim, pruned on startup and daily after 90 days) so a
 self-hoster can answer "when was this operator claim last checked?".
 
@@ -171,19 +220,20 @@ self-hoster can answer "when was this operator claim last checked?".
 
 ## Application-control gate
 
-The remaining proof must bind the attestation signer to **operator
-authority** over the specific Discord application and its bot user. A
-fresh bot-authored message alone does not do this. Discord's
-documented [`GET /oauth2/applications/@me`](https://docs.discord.com/developers/topics/oauth2#bot-users)
-returns the current application only when authenticated with that
-application's bot token. This self-hosted verifier possesses only its
-own token and should never ask another operator to hand over theirs.
-Discord's [user object](https://docs.discord.com/developers/resources/user#user-object)
-offers a `bot` boolean, but that flag does not prove who controls the
-application. No supported cross-application operator-control assertion is
-wired here. A future protocol must prove wallet authority without
-disclosing target bot credentials to the verifier. Until then, role
-automation remains disabled.
+The bot-response witness alone cannot bind the attestation signer to
+**operator authority** over the specific Discord application: a fresh
+bot-authored message proves responsiveness, and Discord's
+[`GET /oauth2/applications/@me`](https://docs.discord.com/developers/topics/oauth2#bot-users)
+answers only the token holder, so any check based on it is token-grade
+— and this verifier never asks another operator to hand over their
+token. The application-authority ceremony (above,
+[`docs/app-authority.md`](../docs/app-authority.md)) closes the gap
+without target credentials: a per-session redirect URI that only the
+application's owner or team can register, the attestation wallet's
+signature, and the verifier's own PKCE exchange and `/oauth2/@me`
+read. A current authority record is the evidence bindings, badge
+state, and role automation may key off — but none of them do yet.
+Role automation remains disabled pending a separate policy change.
 
 ## Stub boundaries
 
