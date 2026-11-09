@@ -1,5 +1,21 @@
 # Changes
 
+## 2026-11-09: application-authority callback page live in production
+
+- The static callback helper page built in PR #53 is now served
+  in production at
+  https://fiador.org/app-authority/callback/<proof ID>
+  (production deployment `dpl_8wWcnerWZKyLNJ9262EpxzkrYZ21`
+  from main `6b442ba`, operator-approved on Nov 9, 2026). A
+  Discord OAuth redirect for a ceremony now lands on the helper
+  page instead of a 404 whose address bar carried the callback
+  URL. Evidence: the `docs/verification.md` entry of the same
+  date.
+- No behaviour change: a completed ceremony still creates no
+  binding, the badge still renders "Claim unconfirmed", and
+  role automation remains disabled. The first live ceremony is
+  still to be run.
+
 ## 2026-11-01: application-authority ceremony built
 
 - `verifier-bot/` gains the application-authority ceremony
