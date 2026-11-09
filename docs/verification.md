@@ -8,6 +8,31 @@ dedicated demo signing wallet by role and record methods and status
 without wallet or human-hash fragments. The signed public attestation retains
 the wallet address required by the protocol.
 
+## 2026-11-09 — application-authority callback page promoted to production
+
+- Production deployment `dpl_8wWcnerWZKyLNJ9262EpxzkrYZ21` from
+  main `6b442ba` (PR #53) replaced production deployment
+  `dpl_BMYwi2Mu9gH9yKm3JVirfijbVb4w`. The operator approved the
+  promotion on Nov 9, 2026. The deployment was produced with the
+  Vercel CLI from a clean archive of main after the Vercel
+  connector returned scope 403 errors for project and deployment
+  calls.
+- Route checks against https://fiador.org after the promotion:
+  `/app-authority/callback/<proof id>` with `code`, `state`, and
+  `iss` parameters returns 200 and serves the helper page
+  (title "Application authority — Fiador"). The page instructs
+  the operator to copy the full address back into
+  `/fiador authority-complete`; it transmits nothing itself.
+- Regression checks: `/`, `/verify/`, `/terms/`, `/privacy/`,
+  `/support/`, and `/registry.json` all return 200;
+  `/attestations/nova.json` is byte-identical to the signed
+  repository file (sha256 ad1c0e5e...); `/v/rp7lt6iyfx` with a
+  browser user agent returns 302 to `/verify/?attestation=...`.
+- The first live authority ceremony remains outstanding: it
+  needs the operator to register one session callback URI in
+  the Discord Developer Portal. This promotion changes no claim
+  state.
+
 ## 2026-10-31 — production routes promotion (verify page, /v/ links, terms)
 
 - Production deployment `dpl_9KG6DJAm7HkntCYvAFeaw9LqkJAK` from
